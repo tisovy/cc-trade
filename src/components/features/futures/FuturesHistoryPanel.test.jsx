@@ -142,17 +142,18 @@ describe('FuturesHistoryPanel', () => {
     expect(table).toHaveTextContent('2.632')
     // 3 000 contracts entered at 2.554 is 7 662 USDT — the size the desk sizes in.
     expect(table).toHaveTextContent('7662')
-    // The whole round's visible result, not a fill's slice of it.
-    expect(table).toHaveTextContent('+233.94')
+    // The whole round's exchange PnL, not a fill's slice of it.
+    expect(table).toHaveTextContent('+234.00')
     // The fee is a component of the result, not a column of its own: it was
     // crowding the only reading this panel exists for off the right edge.
     expect(table).not.toHaveTextContent('0.0621')
-    // The canonical fixture supplies the visible subtotal and an explicit
-    // ownership qualification; the gross Binance figure remains its own cell.
-    expect(within(table).getByTitle(
+    // The wallet subtotal and its qualification ride the PnL cell's element
+    // rather than taking a second money column of their own.
+    const money = within(screen.getAllByRole('row')[1]).getAllByRole('cell')[6]
+    expect(money.getAttribute('title')).toContain(
       'Visible net: +233.94 USDT · Exact ownership is not established',
-    )).toBeInTheDocument()
-    expect(table).toHaveTextContent('Exact ownership is not established')
+    )
+    expect(table).not.toHaveTextContent('Exact ownership is not established')
   })
 
   it('shows the complete reconstructed round after a break-even edge close and add', () => {
@@ -191,20 +192,18 @@ describe('FuturesHistoryPanel', () => {
     recovered.focus()
     expect(recovered).toHaveFocus()
     expect(cells[5]).toHaveTextContent('113.333')
-    // The exchange's own figure and the desk's result are two columns, because
-    // they are two numbers: the first is what Binance reports and what its app
-    // shows, the second is the visible fill subtotal until the wallet ledger
-    // proves every component.
-    expect(cells[6]).toHaveTextContent('+190 USDT')
-    expect(cells[7]).toHaveTextContent('+184.00')
-    expect(cells[7]).toHaveAttribute(
-      'title',
+    // One money column: the figure Binance reports and its app shows, at cents.
+    // The fill subtotal the wallet ledger has not yet proven exact is a
+    // different quantity, so it rides the element under its own name.
+    expect(cells).toHaveLength(7)
+    expect(cells[6]).toHaveTextContent('+190.00 USDT')
+    expect(cells[6].getAttribute('title')).toContain(
       'Visible net: +184.00 USDT · Exact ownership is not established',
     )
     expect(screen.queryByText('SHORT')).not.toBeInTheDocument()
   })
 
-  it('calls a result Wallet Net only when the ledger supplies an exact wallet amount', () => {
+  it('keeps the exact Wallet Net on the PnL element instead of a second money column', () => {
     const exactAmount = '116.4000000000000000001'
     render(
       <FuturesHistoryPanel
@@ -227,39 +226,66 @@ describe('FuturesHistoryPanel', () => {
       />,
     )
 
-    const result = within(screen.getByRole('row', { name: /BTCUSDT/ }))
-      .getAllByRole('cell')[7]
-    expect(result).toHaveTextContent('Wallet Net')
-    expect(result).toHaveTextContent(`+${exactAmount} USDT`)
+    const cells = within(screen.getByRole('row', { name: /BTCUSDT/ }))
+      .getAllByRole('cell')
+    expect(cells).toHaveLength(7)
+    const result = cells[6]
+    // The cell shows the exchange figure; the wallet result is named, exact
+    // to its last digit, on the element.
+    expect(result).toHaveTextContent('+10.00 USDT')
+    expect(result).not.toHaveTextContent('Wallet Net')
     expect(result).not.toHaveTextContent('Partial')
-    expect(result).toHaveAttribute('title', `Wallet Net: +${exactAmount} USDT`)
+    expect(result.getAttribute('title')).toContain(`Wallet Net: +${exactAmount} USDT`)
   })
 
-  it('renders bounded exact Gross values without cent rounding or Number precision loss', () => {
+  it('rounds the PnL cell to cents and keeps the exact figure lossless on the element', () => {
     const exactGross = [
       {
+        // Rounded for the glance; the exact string survives on the element.
+        key: 'gross-rounded-down',
+        realizedPnl: 86.70158975,
+        realizedPnlExact: '86.70158975',
+        expected: '+86.70 USDT',
+        expectedExact: 'Exact +86.70158975 USDT',
+      },
+      {
+        // Half away from zero on the third decimal.
+        key: 'gross-rounded-up',
+        realizedPnl: 92.577,
+        realizedPnlExact: '92.577',
+        expected: '+92.58 USDT',
+        expectedExact: 'Exact +92.577 USDT',
+      },
+      {
+        // Cents that would print a non-zero amount as 0.00 keep the exact text.
         key: 'gross-positive-sub-cent',
         realizedPnl: 0.0049,
         realizedPnlExact: '0.0049',
         expected: '+0.0049 USDT',
+        expectedExact: null,
       },
       {
         key: 'gross-negative-sub-cent',
         realizedPnl: -0.0049,
         realizedPnlExact: '-0.0049',
         expected: '−0.0049 USDT',
+        expectedExact: null,
       },
       {
+        // Rounding is done on the string: past 2^53 a Number round-trip would
+        // state a different figure.
         key: 'gross-beyond-safe-integer',
         realizedPnl: Number('9007199254740993.12'),
         realizedPnlExact: '9007199254740993.12',
         expected: '+9007199254740993.12 USDT',
+        expectedExact: null,
       },
       {
         key: 'gross-canonical-negative-zero',
         realizedPnl: -0,
         realizedPnlExact: '-0.0000',
-        expected: '0.0000 USDT',
+        expected: '0.00 USDT',
+        expectedExact: null,
       },
     ]
     render(
@@ -286,6 +312,9 @@ describe('FuturesHistoryPanel', () => {
       const gross = within(table.querySelector(`[data-round-key="${reading.key}"]`))
         .getAllByRole('cell')[6]
       expect(gross.textContent).toBe(reading.expected)
+      if (reading.expectedExact !== null) {
+        expect(gross.getAttribute('title')).toContain(reading.expectedExact)
+      }
     }
   })
 
@@ -317,15 +346,14 @@ describe('FuturesHistoryPanel', () => {
 
     const cells = within(screen.getByRole('row', { name: /BTCUSDC/ }))
       .getAllByRole('cell')
-    expect(cells[6]).toHaveTextContent('+10 USDC')
+    expect(cells).toHaveLength(7)
+    expect(cells[6]).toHaveTextContent('+10.00 USDC')
     expect(cells[6]).not.toHaveTextContent('USDT')
-    expect(cells[7]).toHaveTextContent('Wallet Net')
-    expect(cells[7]).toHaveTextContent('+7 USDC')
-    expect(cells[7]).not.toHaveTextContent('USDT')
-    expect(cells[7]).toHaveAttribute('title', 'Wallet Net: +7 USDC')
+    expect(cells[6].getAttribute('title')).toContain('Wallet Net: +7 USDC')
+    expect(cells[6].getAttribute('title')).not.toContain('USDT')
   })
 
-  it('renders partial visible net and its reason for keyboard and touch without relying on hover', () => {
+  it('names a qualified wallet reading and its reason on the element, not as a row badge', () => {
     render(
       <FuturesHistoryPanel
         view="tradeHistory"
@@ -347,22 +375,16 @@ describe('FuturesHistoryPanel', () => {
       />,
     )
 
-    const result = within(screen.getByRole('row', { name: /BTCUSDT/ }))
-      .getAllByRole('cell')[7]
-    expect(result).toHaveTextContent('Visible net')
-    expect(result).toHaveTextContent('+116 USDT')
-    expect(result).not.toHaveTextContent('Wallet Net')
-
-    const qualification = within(result).getByRole('note', {
-      name: 'Partial. Commission history is incomplete',
-    })
-    expect(qualification).toHaveTextContent('Partial')
-    expect(qualification).toHaveTextContent('Commission history is incomplete')
-    expect(qualification).not.toHaveAttribute('title')
-    qualification.focus()
-    expect(qualification).toHaveFocus()
-    fireEvent.touchStart(qualification)
-    expect(qualification).toHaveTextContent('Commission history is incomplete')
+    const row = screen.getByRole('row', { name: /BTCUSDT/ })
+    const result = within(row).getAllByRole('cell')[6]
+    // The row shows the exchange figure only; the qualified subtotal is named
+    // as what it is — a visible net, not a Wallet Net — on the element.
+    expect(result.getAttribute('title')).toContain(
+      'Visible net: +116 USDT · Commission history is incomplete',
+    )
+    expect(result.getAttribute('title')).not.toContain('Wallet Net')
+    expect(row).not.toHaveTextContent('Visible net')
+    expect(within(row).queryByRole('note')).not.toBeInTheDocument()
   })
 
   // The window of trades the exchange returns is bounded: its oldest rows can be
@@ -389,10 +411,12 @@ describe('FuturesHistoryPanel', () => {
       'Opened before this window of trades — entry recovered from the realized PnL',
     )
     expect(cells[5]).toHaveTextContent('58500.0')
-    // −96.74 realized, which is Binance's own figure and stands alone in its
-    // own column; less the 0.02 commission on the fill, which is the result.
+    // −96.74 realized, which is Binance's own figure and owns the one money
+    // column; less the commission on the fill, which is the wallet result the
+    // element names.
+    expect(cells).toHaveLength(7)
     expect(cells[6]).toHaveTextContent('−96.74')
-    expect(cells[7]).toHaveTextContent('−96.76')
+    expect(cells[6].getAttribute('title')).toContain('Visible net: −96.76 USDT')
   })
 
   // Binance charges commission in BNB whenever the account holds it — the
@@ -418,11 +442,11 @@ describe('FuturesHistoryPanel', () => {
     )
     const cells = within(screen.getAllByRole('row')[1]).getAllByRole('cell')
     // The BNB fee is not subtracted from a USDT result — there is no rate here
-    // to subtract it by.
-    expect(cells[6]).toHaveTextContent('+120 USDT')
-    expect(cells[7]).toHaveTextContent('+120.00')
-    expect(cells[7]).toHaveTextContent('−0.0085 BNB')
-    expect(cells[7].getAttribute('title')).toContain('Amounts settle in multiple assets')
+    // to subtract it by. Both settle-assets are named apart on the element.
+    expect(cells).toHaveLength(7)
+    expect(cells[6]).toHaveTextContent('+120.00 USDT')
+    expect(cells[6].getAttribute('title')).toContain('−0.0085 BNB')
+    expect(cells[6].getAttribute('title')).toContain('Amounts settle in multiple assets')
   })
 
   it('renders BNB-only and multi-asset ledger readings without converting or hiding them', () => {
@@ -466,19 +490,14 @@ describe('FuturesHistoryPanel', () => {
 
     const table = screen.getByRole('table', { name: 'Position history' })
     const bnbResult = within(table.querySelector('[data-round-key="bnb-only"]'))
-      .getAllByRole('cell')[7]
-    expect(bnbResult).toHaveTextContent('Wallet Net')
-    expect(bnbResult).toHaveTextContent('−0.003 BNB')
-    expect(bnbResult).not.toHaveTextContent('—')
+      .getAllByRole('cell')[6]
+    expect(bnbResult.getAttribute('title')).toContain('Wallet Net: −0.003 BNB')
 
     const multiResult = within(table.querySelector('[data-round-key="multi-asset"]'))
-      .getAllByRole('cell')[7]
-    expect(multiResult).toHaveTextContent('Visible net')
-    expect(multiResult).toHaveTextContent('+120 USDT')
-    expect(multiResult).toHaveTextContent('−0.0045 BNB')
-    expect(within(multiResult).getByRole('note', {
-      name: 'Multi-asset. Amounts settle in multiple assets',
-    })).toBeInTheDocument()
+      .getAllByRole('cell')[6]
+    expect(multiResult.getAttribute('title')).toContain(
+      'Visible net: +120 USDT · −0.0045 BNB · Amounts settle in multiple assets',
+    )
   })
 
   // A position still running has no exit and no result. It belongs to the live
@@ -528,8 +547,11 @@ describe('FuturesHistoryPanel', () => {
     expect(size).toHaveTextContent('10.0k')
     expect(size).toHaveAttribute('title', 'Closed volume: 4000 contracts · 2 fills')
     expect(screen.getByRole('columnheader', { name: 'Closed volume' })).toBeInTheDocument()
-    expect(screen.getByRole('columnheader', { name: 'Gross' })).toBeInTheDocument()
-    expect(screen.getByRole('columnheader', { name: 'NET' })).toBeInTheDocument()
+    // One money column named for the quantity it holds — the exchange's own
+    // realized PnL. The NET column was ruled noise by the operator (2026-08-23).
+    expect(screen.getByRole('columnheader', { name: 'PnL' })).toBeInTheDocument()
+    expect(screen.queryByRole('columnheader', { name: 'Gross' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('columnheader', { name: 'NET' })).not.toBeInTheDocument()
     expect(screen.queryByRole('columnheader', { name: 'Realized' })).not.toBeInTheDocument()
     expect(screen.queryByRole('columnheader', { name: 'Net result' })).not.toBeInTheDocument()
     expect(screen.queryByRole('columnheader', { name: 'Size' })).not.toBeInTheDocument()
@@ -769,15 +791,15 @@ describe('FuturesHistoryPanel', () => {
       />
     )
     const walletResult = () => within(screen.getByRole('row', { name: /BTCUSDT/ }))
-      .getAllByRole('cell')[7]
+      .getAllByRole('cell')[6]
     const expectQualifiedRetainedValue = () => {
       const result = walletResult()
-      expect(result).toHaveTextContent('Visible net')
-      expect(result).toHaveTextContent('+9 USDT')
-      expect(result).not.toHaveTextContent('Wallet Net')
-      expect(within(result).getByRole('note', {
-        name: 'Partial. Settled-income verification is not ready',
-      })).toBeInTheDocument()
+      expect(result).toHaveTextContent('+10.00 USDT')
+      expect(result.getAttribute('title')).toContain('Visible net: +9 USDT')
+      expect(result.getAttribute('title')).toContain(
+        'Settled-income verification is not ready',
+      )
+      expect(result.getAttribute('title')).not.toContain('Wallet Net')
     }
 
     const { rerender } = render(panel(resource('loading')))
@@ -790,9 +812,8 @@ describe('FuturesHistoryPanel', () => {
     expect(screen.getByRole('status')).toHaveTextContent('Wallet adjustments ready · verified')
     expect(screen.queryByRole('button', { name: 'Retry wallet adjustments' }))
       .not.toBeInTheDocument()
-    expect(walletResult()).toHaveTextContent('Wallet Net')
-    expect(walletResult()).toHaveTextContent('+9 USDT')
-    expect(walletResult()).not.toHaveTextContent('Partial')
+    expect(walletResult().getAttribute('title')).toContain('Wallet Net: +9 USDT')
+    expect(walletResult().getAttribute('title')).not.toContain('Visible net')
 
     rerender(panel(resource('stale', {
       successfulAt: 1_784_000_100_000,
@@ -873,7 +894,7 @@ describe('FuturesHistoryPanel', () => {
     expect(btcRow).toHaveFocus()
   })
 
-  it('states unresolved empty scope without claiming there were no closed positions', () => {
+  it('refuses the no-closed-positions claim for unresolved scope without hanging a banner', () => {
     render(
       <FuturesHistoryPanel
         view="tradeHistory"
@@ -900,15 +921,49 @@ describe('FuturesHistoryPanel', () => {
       />,
     )
 
-    const scopeNotice = screen.getByRole('region', {
-      name: 'Closed-position scope is partial',
-    })
-    expect(scopeNotice).toHaveTextContent('BTCUSDT LONG: trade history incomplete')
-    expect(scopeNotice).toHaveTextContent('No numeric position row was inferred')
+    // The banner that used to narrate each unresolved scope was ruled noise by
+    // the operator (2026-08-23): the position it described is on screen in the
+    // live table. What must survive is the claim discipline — an unresolved
+    // scope forbids "No closed positions".
+    expect(screen.queryByRole('region', { name: 'Closed-position scope is partial' }))
+      .not.toBeInTheDocument()
+    expect(screen.queryByText(/Closed-position scope is partial/))
+      .not.toBeInTheDocument()
     expect(screen.queryByText(/^No closed positions/)).not.toBeInTheDocument()
     expect(screen.getByText(/No resolved closed positions/))
       .toHaveTextContent('This partial review cannot prove that none exist')
     expect(screen.queryByRole('table', { name: 'Position history' })).not.toBeInTheDocument()
+  })
+
+  it('shows resolved rows without a scope banner while another scope is unresolved', () => {
+    render(
+      <FuturesHistoryPanel
+        view="tradeHistory"
+        symbol="BTCUSDT"
+        tickSizes={ticks}
+        history={{ ...history, discoveryComplete: false, trades: [] }}
+        tradeRoundIndex={{
+          closed: [indexedClosedRound()],
+          sharedAdjustments: [],
+          // The very case the banner used to narrate: an open position whose
+          // opening boundary the read has not reached. The operator sees that
+          // position in the live table above; here it is only a claim guard.
+          unresolved: [{
+            key: 'unresolved:ONGUSDT:BOTH',
+            positionKey: 'ONGUSDT:BOTH',
+            symbol: 'ONGUSDT',
+            leg: 'BOTH',
+            open: true,
+            reasons: ['left-boundary-unproven'],
+          }],
+        }}
+      />,
+    )
+
+    expect(screen.getByRole('table', { name: 'Position history' })).toBeInTheDocument()
+    expect(screen.queryByText(/Closed-position scope is partial/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/No numeric position row was inferred/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/more positions may exist/)).not.toBeInTheDocument()
   })
 
   it('lists orders at the contract tick with what became of them', () => {

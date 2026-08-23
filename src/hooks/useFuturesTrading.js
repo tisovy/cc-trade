@@ -1775,6 +1775,17 @@ const useFuturesTrading = ({
     ))
     const generation = state.historyReconcileGeneration
     if (!missingSettlementEvidence && generation <= 0) return
+    // `account.history` is refused without a symbol, and this effect fires at
+    // start before a contract has been chosen — the desk's own journal showed
+    // the refusal once per session start (INVALID_TYPED_HISTORY_SYMBOL, from
+    // 2026-08-22 on), and the offline-gap close it asked for was silently
+    // lost. Any contract the account holds names the read as well as the one
+    // on screen; with neither, wait — the effect re-runs when positions land.
+    const reconcileSymbol = symbolRef.current
+      || state.positions[0]?.symbol
+      || state.history.symbols?.[0]
+      || null
+    if (reconcileSymbol === null) return
     const key = [
       state.accountFingerprint,
       generation,
@@ -1788,7 +1799,7 @@ const useFuturesTrading = ({
       // reconnects need only the cheaper cursor gaps.
       full: missingSettlementEvidence,
       coverage: state.history.coverage,
-      symbol: symbolRef.current,
+      symbol: reconcileSymbol,
       views: ['trades'],
     }))
     if (sent) historyReconcileRef.current = key
@@ -1798,9 +1809,11 @@ const useFuturesTrading = ({
     state.accountFingerprint,
     state.accountResources.positions?.status,
     state.history.coverage,
+    state.history.symbols,
     state.history.trades,
     state.historyReconcileGeneration,
     state.historyStoreReady,
+    state.positions,
     wsConnection,
   ])
 

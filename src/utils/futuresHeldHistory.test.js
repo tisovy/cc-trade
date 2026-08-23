@@ -431,4 +431,35 @@ describe('futuresHeldHistory', () => {
     expect(fillsOnly.orders).toEqual([])
     expect(fillsOnly.readViews).toEqual({ orders: null, trades: 5_000 })
   })
+
+  // A basis read covers the open positions and nothing else. On 2026-08-23 a
+  // one-contract basis read stamped `trades` as read, the Closed Positions tab
+  // believed the view was covered, and the account-wide read the tab exists to
+  // trigger never ran — the review showed one contract and called it the
+  // account.
+  it('merges a basis read without letting it vouch a view as read', () => {
+    const basis = applyFuturesHistoryReading(createHeldFuturesHistory(), {
+      ...READING,
+      basisOnly: true,
+      orders: [],
+      trades: [{ symbol: 'ONGUSDT', id: 11, realizedPnl: '2.5', time: 2_000 }],
+      symbols: ['ONGUSDT'],
+      views: ['trades'],
+    }, 5_000)
+
+    // The rows and the coverage are held — only the view claim is withheld.
+    expect(basis.trades.map(trade => trade.id)).toEqual([11])
+    expect(basis.coverage.ONGUSDT.tradeCursor).toBe('11')
+    expect(basis.readViews).toEqual({ orders: null, trades: null })
+
+    // The account-wide read that follows still stamps the view it covered.
+    const wide = applyFuturesHistoryReading(basis, {
+      ...READING,
+      orders: [],
+      trades: [{ symbol: 'BTCUSDT', id: 12, realizedPnl: '1.5', time: 3_000 }],
+      symbols: ['BTCUSDT', 'ONGUSDT'],
+      views: ['trades'],
+    }, 9_000)
+    expect(wide.readViews).toEqual({ orders: null, trades: 9_000 })
+  })
 })

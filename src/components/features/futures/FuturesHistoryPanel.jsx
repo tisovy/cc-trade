@@ -210,21 +210,6 @@ const WALLET_QUALIFICATION_LABELS = Object.freeze({
 
 const NON_READY_SETTLED_STATUSES = new Set(['idle', 'loading', 'stale', 'error'])
 
-const UNRESOLVED_REASON_LABELS = Object.freeze({
-  'left-boundary-unproven': 'opening boundary not reached',
-  'trade-coverage-incomplete': 'trade history incomplete',
-  'history-continuity-unproven': 'trade-history continuity not proven',
-  'trade-oldest-edge-unproven': 'oldest trade-history edge not reached',
-  'trade-newest-edge-unproven': 'newest trade-history edge not reached',
-  'history-page-limited': 'trade-history request limit reached',
-  'history-retention-limited': 'local trade-history retention limit reached',
-  'commission-coverage-incomplete': 'commission history incomplete',
-  'terminal-snapshot-mismatch': 'position snapshot does not match the fill basis',
-  'terminal-snapshot-unreconciled': 'position snapshot was not reconciled',
-  'fill-basis-missing': 'fill basis missing',
-  'invalid-fill': 'one or more fills could not be identified',
-})
-
 const SHARED_COMPONENT_LABELS = Object.freeze({
   funding: 'funding',
   insurance: 'insurance',
@@ -247,6 +232,31 @@ const signedLedgerAmount = (reading) => {
       ? `−${held.amount.slice(1)}`
       : held.amount.startsWith('+') ? held.amount : `+${held.amount}`
   return `${amount} ${held.asset}`
+}
+
+// The record is exact; the column is read at a glance. The exact string is
+// rounded to cents as a string — half away from zero on the third decimal —
+// because a figure past 2^53 fed through Number comes back a different number.
+// Two absences keep the exact text instead: an amount that is not a plain
+// decimal, and cents that would print a non-zero amount as 0.00 — a 0.0049
+// shown as nothing is a lie, and a sub-cent string is short enough to read.
+const centsLedgerReading = (reading) => {
+  const held = ledgerReading(reading)
+  if (held === null) return null
+  const match = /^([+-]?)(\d+)(?:\.(\d*))?$/.exec(held.amount)
+  if (match === null) return held
+  const [, sign, integer, fraction = ''] = match
+  if (fraction.length <= 2) {
+    return { asset: held.asset, amount: `${sign}${integer}.${fraction.padEnd(2, '0')}` }
+  }
+  const scaled = BigInt(integer + fraction.slice(0, 2))
+    + (fraction.charCodeAt(2) >= 53 ? 1n : 0n)
+  if (scaled === 0n && /[1-9]/.test(integer + fraction)) return held
+  const text = scaled.toString().padStart(3, '0')
+  return {
+    asset: held.asset,
+    amount: `${sign}${text.slice(0, -2)}.${text.slice(-2)}`,
+  }
 }
 
 const ledgerTone = (reading, fallback = 0) => {
@@ -328,15 +338,6 @@ const roundMoneyReading = (round, settledStatus = null) => {
   }
 }
 
-const qualificationBadge = reading => (
-  reading.qualificationCodes.length === 1
-    && reading.qualificationCodes[0] === 'MULTI_ASSET'
-    ? 'Multi-asset'
-    : reading.qualificationCodes.some(code => code.endsWith('_SHARED'))
-      ? 'Shared'
-      : 'Partial'
-)
-
 const sharedAdjustmentName = (adjustment) => {
   const scope = adjustment?.symbol
     ? `${adjustment.symbol}${adjustment.leg ? ` ${adjustment.leg}` : ''}`
@@ -354,38 +355,14 @@ const sharedAdjustmentName = (adjustment) => {
     : `${scope} ${ownership} ${components.join(' / ')}`
 }
 
-const unresolvedScopesOf = (segments) => {
-  const scopes = new Map()
-  for (const segment of Array.isArray(segments) ? segments : []) {
-    const symbol = String(segment?.symbol ?? '').trim().toUpperCase()
-    const leg = String(segment?.leg ?? '').trim().toUpperCase()
-    const key = String(segment?.positionKey ?? `${symbol || 'Unknown'}:${leg || 'position'}`)
-    if (!scopes.has(key)) scopes.set(key, { key, symbol, leg, reasons: new Set() })
-    const scope = scopes.get(key)
-    for (const reason of Array.isArray(segment?.reasons) ? segment.reasons : []) {
-      scope.reasons.add(UNRESOLVED_REASON_LABELS[reason] ?? String(reason).replaceAll('-', ' '))
-    }
-  }
-  return [...scopes.values()].map(scope => ({
-    ...scope,
-    reasons: scope.reasons.size === 0 ? ['fill scope unresolved'] : [...scope.reasons],
-  }))
-}
-
-// What happened, and what it cost. Realized PnL is the number a trader reviews
-// a session with, so it is the one column that never abbreviates its sign.
-//
-// The history spans the account, not the contract on screen: a trader reviews the
-// session they had, and half of it was on the pairs they have since switched away
-// from. Every row therefore names its contract and is priced at that contract's
-// own tick, and the selected one is only tinted rather than being all there is.
-// Every component that was applied to the exchange's own realized PnL, named for
-// the record it came from. Two sign conventions meet in this one sentence and
-// only one of them is negated: the commission comes off the trade record as an
-// unsigned magnitude and is subtracted, while funding and insurance clearance
-// come off the income record already signed and are added. Stating them apart is
-// what lets an operator reconcile the row against Binance instead of taking the
-// desk's word for it.
+// What reached the wallet, stated on the PnL cell's element rather than in a
+// column of its own. The column shows the exchange's own realized PnL — the
+// figure the Binance app shows and the one number checkable against it without
+// knowing how the desk folds fills. What came off it on the way to the wallet
+// (commission, funding, insurance) is a different quantity, so it keeps its own
+// name here: a net printed under a PnL heading is exactly the mislabelling the
+// 2026-08-20 reconciliation tripped on. The operator ruled the second column
+// noise on 2026-08-23; the quantity survives, named, on the element.
 const roundResultTitle = (round, reading = roundMoneyReading(round)) => {
   if (!reading.legacy) {
     const amounts = reading.amounts.map(signedLedgerAmount).filter(Boolean)
@@ -456,13 +433,13 @@ export const FuturesHistoryPanel = ({
   // model here would collapse hedge legs and copy overlapping funding again.
   const canonicalModelMissing = view === 'tradeHistory' && sharedRounds === null
   const rounds = sharedRounds ?? EMPTY_ROWS
-  const unresolvedIndex = view === 'tradeHistory' && Array.isArray(tradeRoundIndex?.unresolved)
-    ? tradeRoundIndex.unresolved
-    : EMPTY_ROWS
-  const unresolvedScopes = useMemo(
-    () => unresolvedScopesOf(unresolvedIndex),
-    [unresolvedIndex],
-  )
+  // Counted, not listed. An unresolved scope is almost always a position that is
+  // still open — which the operator is already looking at in the live table
+  // above — so a banner narrating it was noise (removed 2026-08-23). The count
+  // still guards the claim the empty state makes.
+  const unresolvedCount = view === 'tradeHistory' && Array.isArray(tradeRoundIndex?.unresolved)
+    ? tradeRoundIndex.unresolved.length
+    : 0
   const sharedAdjustments = view === 'tradeHistory'
     && Array.isArray(tradeRoundIndex?.sharedAdjustments)
     ? tradeRoundIndex.sharedAdjustments
@@ -659,37 +636,7 @@ export const FuturesHistoryPanel = ({
   const closedScopeIncomplete = view === 'tradeHistory'
     && (canonicalModelMissing
       || history?.discoveryComplete === false
-      || unresolvedScopes.length > 0)
-  const unresolvedNotice = !closedScopeIncomplete ? null : (
-    <section
-      className="futures-workstation-history-scope"
-      aria-label="Closed-position scope is partial"
-      tabIndex={0}
-    >
-      <strong>Closed-position scope is partial</strong>
-      {canonicalModelMissing ? (
-        <span>Canonical wallet reconciliation is unavailable; no numeric position row was inferred.</span>
-      ) : null}
-      {history?.discoveryComplete === false ? (
-        <span>Contract discovery did not finish; more positions may exist.</span>
-      ) : null}
-      {unresolvedScopes.length > 0 ? (
-        <ul>
-          {unresolvedScopes.map((scopeItem) => {
-            const scopeName = scopeItem.symbol === ''
-              ? 'Unknown contract'
-              : `${scopeItem.symbol}${scopeItem.leg === '' ? '' : ` ${scopeItem.leg}`}`
-            return (
-              <li key={scopeItem.key}>
-                <strong>{scopeName}</strong>
-                {`: ${scopeItem.reasons.join(', ')}. No numeric position row was inferred.`}
-              </li>
-            )
-          })}
-        </ul>
-      ) : null}
-    </section>
-  )
+      || unresolvedCount > 0)
   const sharedAdjustmentSection = sharedAdjustments.length === 0 ? null : (
     <section
       className="futures-workstation-history-shared"
@@ -806,7 +753,6 @@ export const FuturesHistoryPanel = ({
         <>
           {notice}
           {settledNotice}
-          {unresolvedNotice}
           <p className="futures-workstation-empty">
             {closedScopeIncomplete
               ? `No resolved closed positions${scope}. This partial review cannot prove that none exist.`
@@ -820,7 +766,6 @@ export const FuturesHistoryPanel = ({
       <>
         {notice}
         {settledNotice}
-        {unresolvedNotice}
         {rounds.length > FUTURES_CLOSED_POSITION_WINDOW_SIZE ? (
           <div
             className="futures-workstation-history-window"
@@ -856,12 +801,12 @@ export const FuturesHistoryPanel = ({
           aria-label="Position history"
           aria-rowcount={rounds.length + 1}
         >
-          {/* Two money columns, because they are two different figures and the
-              operator reconciles the desk against Binance with both. "Gross"
-              is the exchange's fill figure before commission and funding. The
-              final column names itself Wallet Net only when all ledger lanes are
-              complete; otherwise it exposes the visible subtotal and why that
-              subtotal is qualified. */}
+          {/* One money column. It shows the figure the Binance app shows — the
+              exchange's own realized PnL on the round's fills — rounded to
+              cents for the glance, with the exact string and what actually
+              reached the wallet (commission, funding, insurance netted) named
+              on the element. The second NET column that used to stand here was
+              ruled noise by the operator on 2026-08-23. */}
           <div className="futures-workstation-dock-row is-head is-rounds" role="row">
             <span role="columnheader">Symbol</span>
             <span role="columnheader">Closed</span>
@@ -869,29 +814,21 @@ export const FuturesHistoryPanel = ({
             <span role="columnheader">Closed volume</span>
             <span role="columnheader">Entry</span>
             <span role="columnheader">Exit</span>
-            <span role="columnheader" title="What Binance reported realized on this round’s fills, before its own commission and with no funding in it">Gross</span>
-            <span role="columnheader">NET</span>
+            <span role="columnheader" title="Binance’s own realized PnL on this round’s fills, before its own commission and with no funding in it. The exact figure and what reached the wallet are on each cell.">PnL</span>
           </div>
           {groupedRounds.map(group => dayGroup(group, (round) => {
             const money = roundMoneyReading(round, settledStatus)
-            const primaryAmount = money.amounts.find(
-              amount => amount.asset === round.settlementAsset,
-            )
-              ?? money.amounts[0]
-            const moneyBadge = money.exact ? null : qualificationBadge(money)
-            // The tone follows the result the row states, not the gross the
-            // exchange settled before its own fees: a round that realized a
-            // profit and gave all of it back in funding is not a winner.
-            const tone = ledgerTone(primaryAmount, round.netPnl)
-            // The gross carries its own tone rather than the result's. A round
-            // that realized a profit and gave all of it back in funding is not a
-            // winner, and it did still realize the profit: colouring the two
-            // cells alike would hide exactly the case the second column exists
-            // to show.
             const realizedReading = ledgerReading({
               amount: round.realizedPnlExact ?? round.realizedPnl,
               asset: round.settlementAsset,
             })
+            // Rounded for the glance; the exact string stays on the element
+            // whenever rounding dropped anything.
+            const displayedReading = centsLedgerReading(realizedReading)
+            const exactAmount = signedLedgerAmount(realizedReading)
+            const displayedAmount = displayedReading === null
+              ? null
+              : signedLedgerAmount(displayedReading)
             const grossTone = ledgerTone(realizedReading, round.realizedPnl)
             const leg = round.positionSide === 'LONG' ? 'buy' : 'sell'
             return (
@@ -944,59 +881,28 @@ export const FuturesHistoryPanel = ({
                   ) : null}
                 </span>
                 <span role="cell">{formatPriceOrAbsent(round.exitPrice, tickOf(round.symbol))}</span>
-                {/* The exchange's own figure, stated as the exchange states it.
-                    It is the one number on this row that can be checked against
-                    Binance without knowing anything about how the desk folds
-                    fills, so it is not adjusted, netted or qualified here. */}
+                {/* The exchange's own figure, stated at cents. It is the one
+                    number on this row that can be checked against Binance
+                    without knowing anything about how the desk folds fills, so
+                    it is not adjusted, netted or qualified — the exact string
+                    and the wallet result ride the element instead. */}
                 <span
                   role="cell"
                   className={`futures-workstation-dock-pnl is-${grossTone}`}
-                  title={round.partial === true
-                    ? 'Binance’s own realized PnL on the fills of this round that '
-                      + 'are inside the read — the position was opened before it, so '
-                      + 'what it realized earlier is not in this figure'
-                    : 'Binance’s own realized PnL on this round’s fills, before '
-                      + 'its commission and with no funding in it'}
+                  title={[
+                    round.partial === true
+                      ? 'Binance’s own realized PnL on the fills of this round that '
+                        + 'are inside the read — the position was opened before it, so '
+                        + 'what it realized earlier is not in this figure'
+                      : 'Binance’s own realized PnL on this round’s fills, before '
+                        + 'its commission and with no funding in it',
+                    displayedAmount !== null && displayedAmount !== exactAmount
+                      ? `Exact ${exactAmount}`
+                      : null,
+                    roundResultTitle(round, money),
+                  ].filter(Boolean).join(' · ')}
                 >
-                  {signedLedgerAmount(realizedReading) ?? 'Unknown'}
-                </span>
-                {/* `walletNet` is the only exact wallet claim. Anything else is a
-                    visible, qualified ledger subtotal; every asset and reason is
-                    rendered rather than hidden in this supplementary title. */}
-                <span
-                  role="cell"
-                  className={`futures-workstation-dock-pnl futures-workstation-history-net is-${tone}${
-                    money.exact ? '' : ' is-partial'}`}
-                  title={roundResultTitle(round, money)}
-                >
-                  <span className="futures-workstation-history-measure">{money.label}</span>
-                  <span className="futures-workstation-history-amounts">
-                    {money.legacy ? (
-                      <strong className="futures-workstation-history-amount is-flat">
-                        Unknown
-                      </strong>
-                    ) : money.amounts.length === 0 ? (
-                      <strong className="futures-workstation-history-amount is-flat">Unknown</strong>
-                    ) : money.amounts.map(amount => (
-                      <strong
-                        className={`futures-workstation-history-amount is-${ledgerTone(amount)}`}
-                        key={`${amount.asset}:${amount.amount}`}
-                      >
-                        {signedLedgerAmount(amount)}
-                      </strong>
-                    ))}
-                  </span>
-                  {money.exact ? null : (
-                    <span
-                      className="futures-workstation-history-qualification"
-                      role="note"
-                      tabIndex={0}
-                      aria-label={`${moneyBadge}. ${money.qualifications.join('. ')}`}
-                    >
-                      <em>{moneyBadge}</em>
-                      <span>{money.qualifications.join(' · ')}</span>
-                    </span>
-                  )}
+                  {displayedAmount ?? exactAmount ?? 'Unknown'}
                 </span>
               </div>
             )

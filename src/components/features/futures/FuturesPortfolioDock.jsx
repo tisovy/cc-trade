@@ -35,6 +35,31 @@ const EMPTY_ROWS = Object.freeze([])
 const EMPTY_TICKS = Object.freeze({})
 const EMPTY_MARGIN_CALLS = Object.freeze({})
 
+// The dock's height is the operator's to set: a session reviewing forty orders
+// wants rows, a session watching the chart wants the chart. The chosen height
+// survives a restart the way the RSI pane's does, and a desk with no storage
+// still resizes for the session.
+export const FUTURES_DOCK_PANEL_HEIGHT_KEY = 'futuresDockPanelHeight'
+const DOCK_PANEL_DEFAULT_HEIGHT = 260
+const DOCK_PANEL_MIN_HEIGHT = 120
+
+const clampDockPanelHeight = (value) => {
+  const ceiling = Math.max(
+    DOCK_PANEL_MIN_HEIGHT,
+    Math.round((window.innerHeight || 900) * 0.7),
+  )
+  return Math.min(ceiling, Math.max(DOCK_PANEL_MIN_HEIGHT, Math.round(value)))
+}
+
+const readStoredDockPanelHeight = () => {
+  try {
+    const stored = Number(window.localStorage?.getItem(FUTURES_DOCK_PANEL_HEIGHT_KEY))
+    return Number.isFinite(stored) && stored > 0 ? clampDockPanelHeight(stored) : null
+  } catch {
+    return null
+  }
+}
+
 // Which endpoint each tab is read out of. `working` is not a review at all — it
 // is the live order list, and it reads nothing.
 const HISTORY_VIEW_OF_TAB = Object.freeze({
@@ -140,19 +165,6 @@ const settledVisibleAmounts = (settled) => {
     amounts.push({ key: `other:${asset}`, text })
   }
   return amounts
-}
-
-const settledQualificationLabels = (settled) => {
-  const labels = [...new Set(
-    (Array.isArray(settled?.qualifications) ? settled.qualifications : [])
-      .map(code => String(code ?? '').trim().toUpperCase())
-      .filter(Boolean)
-      .map(code => OPEN_SETTLED_QUALIFICATION_LABELS[code]
-        ?? code.toLowerCase().replaceAll('_', ' ')),
-  )]
-  if (labels.length > 0) return labels
-  if (settled?.from === null) return ['The fill basis does not reach the position opening']
-  return ['Exact wallet coverage is incomplete']
 }
 
 // Three different absences wear the same `—`, and until 2026-08-20 they wore the
@@ -353,9 +365,6 @@ const FuturesPortfolioPositionRow = memo(({
   const hasPnl = valuation.unrealizedPnl !== null
   const hasRoe = valuation.roeComplete && valuation.roe !== null
   const settledAmounts = settledVisibleAmounts(settled)
-  const settledQualifications = settled !== null && settled.complete === false
-    ? settledQualificationLabels(settled)
-    : EMPTY_ROWS
   return (
     <div
       className={`futures-workstation-dock-row is-${presentation.tone}${selected ? ' is-current-symbol' : ''}`}
@@ -464,24 +473,13 @@ const FuturesPortfolioPositionRow = memo(({
           settled !== null && settled.complete === false ? ' is-partial' : ''}`}
         title={settledTitle(settled, settledWindow, settledRead, position)}
       >
+        {/* The number and nothing else — the operator ruled every inline badge
+            off this cell (2026-08-23). A partial reading keeps its dotted
+            underline and states its reasons on the element; a failed resource
+            already surfaces through the dock's own alert line. */}
         {settledAmounts.length === 0 ? '—' : (
           <span className="futures-workstation-dock-asset-amounts">
             {settledAmounts.map(amount => <strong key={amount.key}>{amount.text}</strong>)}
-          </span>
-        )}
-        {/* One word in the row, the sentences on the badge itself. This is a
-            live row, not a review: printed in full, the qualifications stood
-            taller than the row that holds them and overflowed the dock. The
-            review rows below wrap, so they keep the full block. */}
-        {settledQualifications.length === 0 ? null : (
-          <span
-            className="futures-workstation-history-qualification"
-            role="note"
-            tabIndex={0}
-            title={settledQualifications.join(' · ')}
-            aria-label={`Partial. ${settledQualifications.join('. ')}`}
-          >
-            <em>Partial</em>
           </span>
         )}
       </span>
@@ -533,6 +531,56 @@ export const FuturesPortfolioDock = ({
 }) => {
   const [ordersTab, setOrdersTab] = useState('working')
   const [isCollapsed, setIsCollapsed] = useState(false)
+  // null means "the CSS default": content-sized up to the stylesheet's cap. A
+  // number is the operator's own height, applied to both panels through one
+  // custom property so the pair never drifts apart.
+  const [panelHeight, setPanelHeight] = useState(readStoredDockPanelHeight)
+  const dockRef = useRef(null)
+  const dockDragRef = useRef(null)
+  useEffect(() => {
+    try {
+      if (panelHeight === null) {
+        window.localStorage?.removeItem(FUTURES_DOCK_PANEL_HEIGHT_KEY)
+      } else {
+        window.localStorage?.setItem(FUTURES_DOCK_PANEL_HEIGHT_KEY, String(panelHeight))
+      }
+    } catch {
+      // Height still applies for the session; only its survival is lost.
+    }
+  }, [panelHeight])
+  const measuredPanelHeight = () => {
+    if (panelHeight !== null) return panelHeight
+    const panel = dockRef.current?.querySelector('.futures-workstation-dock-panel')
+    const measured = panel?.getBoundingClientRect().height
+    return Number.isFinite(measured) && measured > 0
+      ? measured
+      : DOCK_PANEL_DEFAULT_HEIGHT
+  }
+  const beginDockResize = (event) => {
+    dockDragRef.current = {
+      pointerId: event.pointerId,
+      y: event.clientY,
+      height: measuredPanelHeight(),
+    }
+    event.currentTarget.setPointerCapture?.(event.pointerId)
+    event.preventDefault()
+  }
+  const moveDockResize = (event) => {
+    const drag = dockDragRef.current
+    if (drag === null || drag.pointerId !== event.pointerId) return
+    // The handle sits on the dock's top edge: dragging up grows the dock.
+    setPanelHeight(clampDockPanelHeight(drag.height + (drag.y - event.clientY)))
+  }
+  const endDockResize = (event) => {
+    if (dockDragRef.current?.pointerId !== event.pointerId) return
+    dockDragRef.current = null
+  }
+  const keyboardDockResize = (event) => {
+    const step = event.key === 'ArrowUp' ? 32 : event.key === 'ArrowDown' ? -32 : null
+    if (step === null) return
+    event.preventDefault()
+    setPanelHeight(clampDockPanelHeight(measuredPanelHeight() + step))
+  }
   const retryAccount = useCallback(() => {
     onRefreshAccount?.(selectedSymbol)
   }, [onRefreshAccount, selectedSymbol])
@@ -673,7 +721,31 @@ export const FuturesPortfolioDock = ({
   }
 
   return (
-    <section className="futures-workstation-dock" aria-label="Futures positions and working orders">
+    <section
+      ref={dockRef}
+      className="futures-workstation-dock"
+      aria-label="Futures positions and working orders"
+      style={panelHeight === null
+        ? undefined
+        : { '--fx-dock-panel-height': `${panelHeight}px` }}
+    >
+      <div
+        className="futures-workstation-dock-resize"
+        role="separator"
+        aria-orientation="horizontal"
+        aria-label="Resize the portfolio dock"
+        aria-valuemin={DOCK_PANEL_MIN_HEIGHT}
+        aria-valuenow={Math.round(panelHeight ?? DOCK_PANEL_DEFAULT_HEIGHT)}
+        tabIndex={0}
+        title={'Drag to change how many rows the dock shows. '
+          + 'Arrow keys resize; double-click restores the default height.'}
+        onPointerDown={beginDockResize}
+        onPointerMove={moveDockResize}
+        onPointerUp={endDockResize}
+        onPointerCancel={endDockResize}
+        onKeyDown={keyboardDockResize}
+        onDoubleClick={() => setPanelHeight(null)}
+      />
       <div className="futures-workstation-dock-panel">
         <header>
           <div>
@@ -869,30 +941,26 @@ export const FuturesPortfolioDock = ({
                     ? 'not read'
                     : `read ${formatFuturesDeskTime(historyReadAt)}`}
               </span>
+              {/* One compact control. The Full read that used to stand beside it
+                  was removed on the operator's word (2026-08-23): while the
+                  held review says contract discovery did not finish, this one
+                  control runs the full discovery read itself, and once the
+                  account's contracts are known it goes back to reading only
+                  what may have changed. */}
               <button
                 type="button"
-                className="futures-workstation-dock-close"
+                className="futures-workstation-dock-close futures-workstation-dock-refresh"
                 aria-label="Re-read account history"
-                title="Read only the account history that may have changed"
+                title={history?.discoveryComplete === false
+                  ? 'Contract discovery did not finish — this re-read runs the full account discovery'
+                  : 'Read only the account history that may have changed'}
                 disabled={historyReading || typeof onLoadHistory !== 'function'}
                 onClick={() => onLoadHistory?.(selectedSymbol, {
+                  ...(history?.discoveryComplete === false ? { full: true } : {}),
                   views: historyView === null ? null : [historyView],
                 })}
               >
                 ↻
-              </button>
-              <button
-                type="button"
-                className="futures-workstation-dock-close"
-                aria-label="Read full account history"
-                title="Run discovery and read the full account history window"
-                disabled={historyReading || typeof onLoadHistory !== 'function'}
-                onClick={() => onLoadHistory?.(selectedSymbol, {
-                  full: true,
-                  views: historyView === null ? null : [historyView],
-                })}
-              >
-                Full
               </button>
             </div>
           )}

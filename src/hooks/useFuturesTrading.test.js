@@ -1168,6 +1168,56 @@ describe('useFuturesTrading', () => {
     await waitFor(() => expect(historyReads()).toHaveLength(2))
   })
 
+  // The desk's own journal for 2026-08-22/23 has this read rejected with
+  // INVALID_TYPED_HISTORY_SYMBOL once per session start: the reconcile fired
+  // before a contract had been chosen and named no symbol, and the offline-gap
+  // close it asked for was silently lost — the send succeeded, so it was never
+  // asked again.
+  it('names a held position on the reconcile read when no contract is chosen, or waits', async () => {
+    const socket = createSocket()
+    const historyStore = {
+      readContracts: vi.fn(async () => []),
+      writeReading: vi.fn(async () => true),
+    }
+    const { result } = renderHook(() => useFuturesTrading({
+      enabled: true,
+      symbol: undefined,
+      wsConnection: socket,
+      historyStore,
+    }))
+    const reconcileReads = () => socket.sent.filter(frame => (
+      frame.action === 'account.history' && frame.basisOnly !== true
+    ))
+
+    authorizeAccount(socket, {
+      positions: { status: 'ready', data: [], lastSuccessfulAt: 100 },
+    })
+    await waitFor(() => expect(result.current.historyStoreReady).toBe(true))
+
+    act(() => socket.receive({
+      type: 'futures_history_reconcile',
+      version: 1,
+      accountFingerprint: ACCOUNT_FINGERPRINT,
+      generation: 1,
+    }))
+    // No contract anywhere to name: the read waits rather than being sent to
+    // be refused.
+    expect(reconcileReads()).toEqual([])
+
+    authorizeAccount(socket, {
+      positions: {
+        status: 'ready',
+        data: [{ symbol: 'ONGUSDT', positionSide: 'BOTH', quantity: '1', entryPrice: '0.08' }],
+        lastSuccessfulAt: 200,
+      },
+    })
+    await waitFor(() => expect(reconcileReads()).toHaveLength(1))
+    expect(reconcileReads()[0]).toMatchObject({
+      symbol: 'ONGUSDT',
+      views: ['trades'],
+    })
+  })
+
   it('coalesces a reconcile frame with legacy margin-asset migration into one Full read', async () => {
     const socket = createSocket()
     let deliverStore

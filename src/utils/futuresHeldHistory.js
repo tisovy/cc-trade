@@ -492,13 +492,18 @@ export const applyFuturesHistoryReading = (history, payload, now) => {
     error: null,
     readAt: stamps.length > 0 ? Math.min(...stamps) : responseAt,
     coverage: frozenCoverage,
+    // A basis read covers the open positions and nothing else. It merges its
+    // rows and its coverage, but it must not vouch a *view*: on 2026-08-23 a
+    // one-contract basis read stamped `trades` as read, the Closed Positions
+    // tab believed it, and the account-wide read the tab exists to trigger
+    // never ran — the review showed one contract and called it the account.
     readViews: Object.freeze({
-      orders: coveredOrders.size > 0 || (
+      orders: (payload?.basisOnly !== true && coveredOrders.size > 0) || (
         acceptsDiscovery && requested.length === 0 && payload?.discoveryComplete !== false
       )
         ? Math.max(history.readViews?.orders ?? responseAt, responseAt)
         : history.readViews?.orders ?? null,
-      trades: coveredTrades.size > 0 || (
+      trades: (payload?.basisOnly !== true && coveredTrades.size > 0) || (
         acceptsDiscovery && requested.length === 0 && payload?.discoveryComplete !== false
       )
         ? Math.max(history.readViews?.trades ?? responseAt, responseAt)

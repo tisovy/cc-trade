@@ -354,16 +354,12 @@ describe('FuturesPortfolioDock', () => {
       .querySelector('.futures-workstation-dock-settled')
     expect(settled).toHaveClass('is-partial')
     expect(settled.getAttribute('title')).toContain('not the whole life of the position')
-    const qualification = within(settled).getByRole('note', {
-      name: 'Partial. Exact wallet coverage is incomplete',
-    })
-    expect(qualification).toHaveAttribute('tabindex', '0')
-    expect(qualification).toHaveTextContent('Partial')
-    // The sentences ride on the badge (hover, focus, reader), not in the row: a
-    // live row is one line, and on 2026-08-22 the printed block overflowed the
-    // dock past the panel edge.
-    expect(qualification).not.toHaveTextContent('Exact wallet coverage is incomplete')
-    expect(qualification.getAttribute('title')).toBe('Exact wallet coverage is incomplete')
+    // The number and nothing else. The one-word Partial badge that stood under
+    // the figure was ruled off the row by the operator (2026-08-23): the dotted
+    // underline marks the reading and the element carries the sentences.
+    expect(settled).toHaveTextContent('+40.00 USDT')
+    expect(settled).not.toHaveTextContent('Partial')
+    expect(within(settled).queryByRole('note')).not.toBeInTheDocument()
   })
 
   // The failure of 2026-08-20. With no start for the position, every amount the
@@ -1489,6 +1485,7 @@ describe('FuturesPortfolioDock', () => {
             entryImplied: false,
             exitPrice: 58500,
             realizedPnl: 12.5,
+            settlementAsset: 'USDT',
             netPnl: 12.48,
             partial: false,
             wallet: {
@@ -1505,8 +1502,12 @@ describe('FuturesPortfolioDock', () => {
     // The tab lists positions now, not executions: fills are folded into the
     // round trips they belong to before anything is drawn.
     fireEvent.click(screen.getByRole('tab', { name: 'Closed positions' }))
-    // The result, not the +12.50 the exchange settled before its own commission.
-    expect(screen.getByRole('table', { name: 'Position history' })).toHaveTextContent('+12.48')
+    // The exchange's own figure leads the row; the +12.48 that reached the
+    // wallet is named on the cell's element.
+    const rounds = screen.getByRole('table', { name: 'Position history' })
+    expect(rounds).toHaveTextContent('+12.50')
+    expect(within(rounds).getAllByRole('cell')[6].getAttribute('title'))
+      .toContain('Wallet Net: +12.48 USDT')
     expect(screen.queryByRole('table', { name: 'Working orders' })).not.toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('tab', { name: /Working/ }))
@@ -1519,13 +1520,45 @@ describe('FuturesPortfolioDock', () => {
     fireEvent.click(screen.getByRole('tab', { name: 'Closed positions' }))
     expect(onLoadHistory).toHaveBeenCalledTimes(0)
 
-    // The ordinary refresh is incremental; the wider read is a separate,
-    // explicit operator choice. Both read the view that is open and not the one
-    // beside it.
+    // One incremental refresh control, reading the view that is open and not
+    // the one beside it. The Full button that stood beside it was removed on
+    // the operator's word (2026-08-23); the wide discovery read still runs
+    // where the coverage machinery asks for it.
     fireEvent.click(screen.getByRole('button', { name: 'Re-read account history' }))
     expect(onLoadHistory).toHaveBeenCalledExactlyOnceWith('BTCUSDT', { views: ['trades'] })
-    fireEvent.click(screen.getByRole('button', { name: 'Read full account history' }))
-    expect(onLoadHistory).toHaveBeenNthCalledWith(2, 'BTCUSDT', { full: true, views: ['trades'] })
+    expect(screen.queryByRole('button', { name: 'Read full account history' }))
+      .not.toBeInTheDocument()
+  })
+
+  // The refusal chain of 2026-08-23: a v2 store re-key emptied the persisted
+  // coverage, discovery never re-ran because one covered contract short-circuits
+  // it, and the review self-sustained at one contract. While the held reading
+  // itself says discovery did not finish, the one refresh control must run the
+  // full discovery read — an incremental press cannot widen the account.
+  it('escalates the re-read to full while the held discovery is incomplete', () => {
+    const onLoadHistory = vi.fn()
+    render(
+      <FuturesPortfolioDock
+        selectedSymbol="BTCUSDT"
+        onLoadHistory={onLoadHistory}
+        history={{
+          symbol: 'BTCUSDT',
+          status: 'ready',
+          readAt: 1_784_000_100_000,
+          orders: [],
+          trades: [],
+          error: null,
+          discoveryComplete: false,
+          readViews: { orders: 1_784_000_100_000, trades: 1_784_000_100_000 },
+        }}
+      />,
+    )
+    fireEvent.click(screen.getByRole('tab', { name: 'Closed positions' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Re-read account history' }))
+    expect(onLoadHistory).toHaveBeenCalledExactlyOnceWith(
+      'BTCUSDT',
+      { full: true, views: ['trades'] },
+    )
   })
 
   // Every USDⓈ-M history endpoint is read per contract, so a review that reads
@@ -1665,7 +1698,45 @@ describe('FuturesPortfolioDock', () => {
     )
     expect(screen.getByText('reading…')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Re-read account history' })).toBeDisabled()
-    expect(screen.getByRole('button', { name: 'Read full account history' })).toBeDisabled()
+  })
+
+  // The dock's height belongs to the operator: a review of forty orders wants
+  // rows. The handle on the dock's top edge drags a height that both panels
+  // share, arrow keys move it, a double-click hands it back to the stylesheet,
+  // and the choice survives a restart the way the RSI pane's height does.
+  it('resizes from its top-edge handle, persists the height, and resets on double-click', () => {
+    window.localStorage.removeItem('futuresDockPanelHeight')
+    render(<FuturesPortfolioDock selectedSymbol="BTCUSDT" openOrders={[order]} />)
+    const dock = screen.getByRole('region', { name: 'Futures positions and working orders' })
+    const handle = screen.getByRole('separator', { name: 'Resize the portfolio dock' })
+    expect(dock.style.getPropertyValue('--fx-dock-panel-height')).toBe('')
+
+    // jsdom measures nothing, so the drag starts from the 260px default:
+    // 80px of upward drag is 340.
+    fireEvent.pointerDown(handle, { pointerId: 7, clientY: 500 })
+    fireEvent.pointerMove(handle, { pointerId: 7, clientY: 420 })
+    fireEvent.pointerUp(handle, { pointerId: 7, clientY: 420 })
+    expect(dock.style.getPropertyValue('--fx-dock-panel-height')).toBe('340px')
+    expect(window.localStorage.getItem('futuresDockPanelHeight')).toBe('340')
+
+    // A move that belongs to no held pointer moves nothing.
+    fireEvent.pointerMove(handle, { pointerId: 7, clientY: 300 })
+    expect(dock.style.getPropertyValue('--fx-dock-panel-height')).toBe('340px')
+
+    fireEvent.keyDown(handle, { key: 'ArrowUp' })
+    expect(dock.style.getPropertyValue('--fx-dock-panel-height')).toBe('372px')
+    fireEvent.keyDown(handle, { key: 'ArrowDown' })
+    expect(dock.style.getPropertyValue('--fx-dock-panel-height')).toBe('340px')
+
+    // The floor holds: no drag can take the rows away entirely.
+    fireEvent.pointerDown(handle, { pointerId: 8, clientY: 100 })
+    fireEvent.pointerMove(handle, { pointerId: 8, clientY: 9_000 })
+    fireEvent.pointerUp(handle, { pointerId: 8, clientY: 9_000 })
+    expect(dock.style.getPropertyValue('--fx-dock-panel-height')).toBe('120px')
+
+    fireEvent.doubleClick(handle)
+    expect(dock.style.getPropertyValue('--fx-dock-panel-height')).toBe('')
+    expect(window.localStorage.getItem('futuresDockPanelHeight')).toBeNull()
   })
 
   it('collapses to a live truthful summary and expands back to the full dock', () => {
@@ -1768,6 +1839,7 @@ describe('FuturesPortfolioDock', () => {
         entryImplied: false,
         exitPrice: 58500,
         realizedPnl: 12.5,
+        settlementAsset: 'USDT',
         netPnl: 12.48,
         partial: false,
         wallet: {
@@ -1797,8 +1869,8 @@ describe('FuturesPortfolioDock', () => {
       />,
     )
 
-    // The result, not the +12.50 the exchange settled before its own commission.
-    expect(screen.getByRole('table', { name: 'Position history' })).toHaveTextContent('+12.48')
+    // The exchange's figure leads the row; the wallet result stays on the element.
+    expect(screen.getByRole('table', { name: 'Position history' })).toHaveTextContent('+12.50')
     expect(onLoadHistory).not.toHaveBeenCalled()
   })
 
