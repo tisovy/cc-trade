@@ -40,3 +40,12 @@
 - [x] 3.2 Run GitNexus `detect_changes` against `main`, inspect every affected execution flow, and resolve unexpected behavior before commit
 - [ ] 3.3 Observe live charged weight, retry latency, command priority, and `429` rate before/after deployment; keep this unchecked until the operator confirms
 - [ ] 3.4 Archive only after operator confirmation and do not bundle income scheduling changes into this change
+
+## Note, 2026-08-23 — where the code landed
+
+The limiter and account-refresh-receipt hunks of this change reached `main`
+in `af65905` (subject «close final PnL audit gaps», an archive sweep commit)
+after a three-way index race on 2026-08-23. The `nextAdmission`/`reserve`
+fairness hunks rode in the same commit without a recorded author. Chain:
+`ac3a1a3 → 1b5e6b0 → af65905`; nothing was lost, this line exists so blame
+archaeology does not have to rediscover that.
