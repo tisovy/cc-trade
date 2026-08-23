@@ -136,6 +136,8 @@ that archival implied verification.
 | `drop-the-grip-that-cannot-lift` | 5.3, 7.6 | `OUTSTANDING` | `NOT RECORDED` | `NOT RECORDED` | `NOT RECORDED` | Archived 2026-08-20 with the gates open: the operator has not yet drag-checked a resting stop-market (plate + cancel, no grip, Ctrl/Alt-drag starts nothing) nor a stop-limit (plate names its trigger, no editor doorway, a plain limit still drags). |
 | `bound-depth-delivery-through-standing-stale` | 4.1 | `OUTSTANDING` | `NOT RECORDED` | `NOT RECORDED` | `NOT RECORDED` | Archived 2026-08-20 with the gate open: no journal reading yet of the delivery cadence on a contract whose book stands stale (expect the 200 ms bound, not per-diff delivery); the same reading should say whether the band-edge flapping regime recorded in the change's 5.2 occurs in practice. |
 | `value-filled-orders-at-their-fill-price` | 4.4 | `OUTSTANDING` | `NOT RECORDED` | `NOT RECORDED` | `NOT RECORDED` | Archived 2026-08-20 with the gate open: the operator has not yet read the Filled column against a real gapped or partial fill on the live desk. |
+| `let-the-operator-own-the-margin-mode` | 5.5 | `CONFIRMED` | 2026-08-21 and 2026-08-23 | Production | `NOT RECORDED` | Position half 2026-08-21: the chip stated the reason and no `trade.setMarginType` reached the exchange. Flat half 2026-08-23: BEATUSDT toggled `ISOLATED → CROSSED` from the ticket at 08:26:56Z (`ok`, 1 823 ms), the mode held in the Binance app, two repeat presses answered `-4046 NO_NEED_TO_CHANGE_MARGIN_TYPE` — the exchange itself countersigning the held mode — and a cross BUY LIMIT filled on that contract at 08:28:16Z while two other contracts stood isolated. |
+| `let-the-operator-own-the-margin-mode` | 5.4 | `OUTSTANDING` | `NOT RECORDED` | `NOT RECORDED` | `NOT RECORDED` | Archived 2026-08-23 with this gate open. The record half is closed by the change's 5.6 (zero `trade.setMarginType` in a day of eight starts); the display half is not: with the desk stopped, set a flat contract to cross ×1 in the Binance app, start the desk on it, and confirm it states `CROSS 1×` from the first frame. |
 | `find-the-read-that-fails-on-every-start` | 4.2 | `CONFIRMED BY DIAGNOSTIC RECORD` | 2026-08-19 record | Production | `NOT RECORDED` | The 2026-08-19 day carries six `exchange-info` lines with `outcome: "aborted"`, `code: "REQUEST_ABORTED"` at 1–5 ms — the expected losers of superseded generations, now named as such — while genuine failures are separately `REQUEST_DEADLINE_EXCEEDED` at the 10 s deadline. The operator's own reading across a few starts is not recorded; the archived box stays unchecked. |
 
 ## Test-Only Guarantees
@@ -369,3 +371,25 @@ the next bad morning closes both.
 - The late-frame item remains open until a complaint supplies contract and time
   and the nearest raw `kind: "frame"` supplies its own four legs. Daily medians
   are explicitly not evidence for it.
+- **Measured 2026-08-23, owned by the change
+  `stop-the-consequence-read-holding-the-answer` — a margin-mode toggle can
+  answer in 45–57 s while the exchange answers it in ~340 ms.** Five toggles on
+  flat BEATUSDT, 08:26:56–08:28:00Z. The first answered in 1 823 ms — POST,
+  configuration re-read, bracket re-read and a 90-weight account pass, all
+  serial, all inside the answer. The second's account pass found the desk's own
+  window at `spent: 796` of 800 (minute 08:26 carried a ~700-weight book
+  bootstrap) and its last weight-5 read slept 55 093 ms — the journal's
+  `kind: "deferred"` line names it. `handleFuturesSetMarginType` holds the
+  command's answer on that pass, and the registry serializes mutating commands
+  per contract, so toggles three to five never reached the limiter until it
+  woke: answers of 56 752, 52 132, 48 044 and 45 202 ms, the last two `-4046`
+  because the chip was stale when pressed. Two self-inflictions compound. The
+  exchange's own minute counter had already reset — `observedWeight` 704 at
+  08:26:57.999 against 1 at 08:27:00.532 — while the desk's baseline, restamped
+  at `now` by `reconcilePhysicalResponse`, carried the spend to 08:27:56. And
+  the answer waits on a consequence read the operator never asked to wait for —
+  the rule `trading-command-integrity` already states for spot. The 2026-08-22
+  queue fix held: the deferred read slept outside the slot; the lane above it,
+  the per-contract command serialization, is what stood still. The mode itself
+  switched on the exchange in ~340 ms every time, and nothing mispriced: the
+  chip kept stating what the exchange last reported.
