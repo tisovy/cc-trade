@@ -503,12 +503,25 @@ export class RateLimiter {
      * cannot refund locally admitted work; a higher one replaces the component
      * entries with one fresh baseline so it cannot expire piecemeal beneath the
      * exchange observation.
+     *
+     * The meter is an interval counter: it resets at the minute boundary, not a
+     * minute after each request. The baseline is therefore stamped at the start
+     * of the interval it was observed in, so it forgets when the exchange does.
+     * Stamped at the moment of observation instead, a ~700-weight bootstrap
+     * observed at 08:26:58 was carried to 08:27:56 while the exchange's own
+     * counter read 1 from 08:27:00 — and a weight-5 read slept 55 093ms for
+     * room the exchange had already given back (journal, 2026-08-23). A sample
+     * received after a boundary can only describe the interval it arrived in or
+     * an older one, so the interval stamp never releases spend early; the desk's
+     * clock is trusted to the boundary the way every signed request already
+     * trusts it, and the 800-of-2400 ceiling absorbs sub-second skew.
      */
     reconcilePhysicalResponse(
         { status, usedWeight, retryAfterMs } = {},
         admission = null,
     ) {
         const now = Date.now();
+        const intervalStart = now - (now % this.windowMs);
         const admissionSequence = admission?.sequence;
         let unresolvedReservations = [];
         if (Number.isSafeInteger(admissionSequence) && admissionSequence > 0) {
@@ -540,14 +553,14 @@ export class RateLimiter {
                 if (candidateWeight > locallyUsed) {
                     this.requests = [
                         ...unresolvedReservations,
-                        { timestamp: now, weight: usedWeight },
+                        { timestamp: intervalStart, weight: usedWeight },
                     ].sort((left, right) => left.timestamp - right.timestamp);
                 }
             } else if (usedWeight > locallyUsed) {
                 // Compatibility for direct/legacy observations which predate
                 // physical-admission tokens. Production Futures sends always
                 // take the token-aware branch above.
-                this.requests = [{ timestamp: now, weight: usedWeight }];
+                this.requests = [{ timestamp: intervalStart, weight: usedWeight }];
             }
         }
 
@@ -6797,8 +6810,15 @@ export function setupBinanceConnection({
                     urgent: true,
                 });
                 broadcastFuturesSymbolConfigs([config]);
-                // Margin requirements and the liquidation price both moved.
-                await refreshFuturesAccountState({ reason: 'setting' });
+                // Margin requirements and the liquidation price both moved, and
+                // the pass that prices them still runs — but not inside this
+                // answer. The setting the operator is watching was broadcast
+                // above, and this lane carries their next command on the
+                // contract: held here behind a budget-deferred pass, repeat
+                // toggles waited 45–57s on 2026-08-23 for an exchange that
+                // answered in ~340ms.
+                void refreshFuturesAccountState({ reason: 'setting' })
+                    .catch(error => reportDetachedFuturesAccountRefreshFailure('setting', error));
             } catch (error) {
                 // Named, because the contract *is* the identity of this command
                 // — there is no order id to carry it. Unnamed, the record shows
@@ -6853,17 +6873,21 @@ export function setupBinanceConnection({
             }
             // What the exchange holds now, not what was asked for. Read even
             // where nothing changed: -4046 means the desk's own reading of the
-            // mode was the stale one, and that is worth correcting.
-            const config = await readFuturesSymbolConfig(symbol, {
-                withCeiling: true,
-                urgent: true,
-            });
+            // mode was the stale one, and that is worth correcting. Without the
+            // bracket table: the ceiling is not a function of the mode, and the
+            // held one survives a bracket-less answer.
+            const config = await readFuturesSymbolConfig(symbol, { urgent: true });
             broadcastFuturesSymbolConfigs([config]);
             // The account only where the mode actually moved — it changes what
             // stands behind a position, and therefore where it liquidates. A
             // contract that was already in the mode moved nothing, and an
-            // account read is not free.
-            if (changed) await refreshFuturesAccountState({ reason: 'setting' });
+            // account read is not free. Detached for the reason the leverage
+            // pass above is: the answer is the mode, and the lane behind it is
+            // the operator's next command on this contract.
+            if (changed) {
+                void refreshFuturesAccountState({ reason: 'setting' })
+                    .catch(error => reportDetachedFuturesAccountRefreshFailure('setting', error));
+            }
         };
 
         const handleFuturesModifyOrder = async (command) => {

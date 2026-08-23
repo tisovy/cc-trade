@@ -296,6 +296,53 @@ describe('production RateLimiter cancellation', () => {
         expect(limiter.getCurrentWeight()).toBe(100);
     });
 
+    it('releases an observed baseline when the exchange interval that reported it ends', async () => {
+        vi.setSystemTime(55_000);
+        const limiter = new RateLimiter(800, 60_000, 0, { physicalAttempts: true });
+        const attempt = await limiter.execute(() => admitBinancePhysicalAttempt(), 1, 0);
+        attempt.observeResponse({ status: 200, usedWeight: 704 });
+        expect(limiter.getCurrentWeight()).toBe(704);
+
+        // The exchange's minute meter fell 704 → 1 across this boundary in the
+        // 2026-08-23 journal while the desk went on charging the spend for
+        // another 56 seconds. The sample belongs to the interval it was
+        // observed in and forgets with it.
+        vi.setSystemTime(61_000);
+        expect(limiter.getCurrentWeight()).toBe(0);
+    });
+
+    it('keeps locally booked unanswered work when the exchange interval rolls', async () => {
+        vi.setSystemTime(55_000);
+        const limiter = new RateLimiter(800, 60_000, 0, { physicalAttempts: true });
+        const [attemptA] = await Promise.all([
+            limiter.execute(() => admitBinancePhysicalAttempt(), 30, 0),
+            limiter.execute(() => admitBinancePhysicalAttempt(), 30, 0),
+        ]);
+        attemptA.observeResponse({ status: 200, usedWeight: 700 });
+        expect(limiter.getCurrentWeight()).toBe(730);
+
+        // Only the exchange's own sample expires with its interval. The send
+        // the desk has not heard back from is still charged at full weight.
+        vi.setSystemTime(61_000);
+        expect(limiter.getCurrentWeight()).toBe(30);
+    });
+
+    it('admits a small read once the boundary passes instead of deferring a full window', async () => {
+        vi.setSystemTime(59_000);
+        const limiter = new RateLimiter(800, 60_000, 0, { physicalAttempts: true });
+        const first = await limiter.execute(() => admitBinancePhysicalAttempt(), 1, 0);
+        first.observeResponse({ status: 200, usedWeight: 796 });
+
+        const admitted = vi.fn(() => admitBinancePhysicalAttempt());
+        const pending = limiter.execute(admitted, 5, 0);
+        // 796 + 5 has no room before the boundary and all of it after. The wait
+        // is the second to the boundary, not the 55 093ms the desk recorded on
+        // 2026-08-23 for room the exchange had already given back.
+        await vi.advanceTimersByTimeAsync(2_500);
+        expect(admitted).toHaveBeenCalled();
+        await pending;
+    });
+
     it('drops stale lifecycle work after spacing without booking physical weight', async () => {
         vi.setSystemTime(1_000);
         const summaries = [];

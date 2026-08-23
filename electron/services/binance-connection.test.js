@@ -9894,6 +9894,130 @@ describe('setupBinanceConnection user-data orchestration', () => {
         });
     });
 
+    // The answer to a mode change is the mode and the contract's re-read
+    // configuration. The account pass behind it prices consequences, and held
+    // inside the answer it held the per-contract lane too: on 2026-08-23 the
+    // operator's repeat toggles waited 45–57s behind a pass the desk's own
+    // budget had deferred, while the exchange answered each POST in ~340ms.
+    it('answers a margin-mode change and the next toggle while the account pass is still out', async () => {
+        setupBinanceConnection({ localWebSocketAccess: { host: '127.0.0.1' } });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        await activateMarket('futures-live');
+        moduleMocks.futuresAdapter.getSymbolConfig.mockResolvedValue({
+            symbol: 'EPICUSDT', leverage: 2, marginType: 'CROSSED', maxNotionalValue: '500000',
+        });
+        // A pass that never answers inside the test, standing in for one the
+        // read budget has deferred to the next minute.
+        const heldPayload = vi.fn(() => new Promise(() => {}));
+        moduleMocks.futuresAdapter.getAccountRefreshOperations.mockReturnValue([{
+            type: 'positions', weight: 5, errorLabel: 'positions',
+            loadPayload: heldPayload,
+        }]);
+        moduleMocks.futuresAdapter.setMarginType
+            .mockResolvedValueOnce({ code: 200, msg: 'success' })
+            .mockRejectedValueOnce(
+                Object.assign(new Error('No need to change margin type.'), { code: -4046 }),
+            );
+
+        const first = startFuturesCommandWithoutAdvancing({
+            action: 'trade.setMarginType',
+            clientOrderId: 'margin-lane-1',
+            symbol: 'EPICUSDT',
+            marginType: 'CROSSED',
+        });
+        const second = startFuturesCommandWithoutAdvancing({
+            action: 'trade.setMarginType',
+            clientOrderId: 'margin-lane-2',
+            symbol: 'EPICUSDT',
+            marginType: 'CROSSED',
+        });
+        const both = Promise.all([first, second]);
+        let settled = false;
+        both.then(() => { settled = true; }, () => { settled = true; });
+        for (let step = 0; step < 6 && !settled; step += 1) {
+            await vi.advanceTimersByTimeAsync(5_000);
+        }
+        await both;
+
+        expect(moduleMocks.futuresAdapter.setMarginType).toHaveBeenCalledTimes(2);
+        // The pass really is in flight — the answers just did not wait for it.
+        expect(heldPayload).toHaveBeenCalled();
+        const payloads = moduleMocks.rendererConnection.sendUTF.mock.calls
+            .map(([message]) => JSON.parse(message));
+        expect(payloads.filter(payload => payload.futures_symbol_configs?.EPICUSDT).length)
+            .toBeGreaterThanOrEqual(2);
+        expect(payloads.some(payload => payload.command_rejected)).toBe(false);
+    });
+
+    it('answers a leverage change while the account pass behind it is still out', async () => {
+        setupBinanceConnection({ localWebSocketAccess: { host: '127.0.0.1' } });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        await activateMarket('futures-live');
+        moduleMocks.futuresAdapter.getSymbolConfig.mockResolvedValue({
+            symbol: 'EPICUSDT', leverage: 3, marginType: 'CROSSED', maxNotionalValue: '500000',
+        });
+        const heldPayload = vi.fn(() => new Promise(() => {}));
+        moduleMocks.futuresAdapter.getAccountRefreshOperations.mockReturnValue([{
+            type: 'positions', weight: 5, errorLabel: 'positions',
+            loadPayload: heldPayload,
+        }]);
+
+        await runFuturesCommand({
+            action: 'trade.setLeverage',
+            clientOrderId: 'leverage-lane-1',
+            symbol: 'EPICUSDT',
+            leverage: 3,
+        });
+
+        expect(heldPayload).toHaveBeenCalled();
+        const payloads = moduleMocks.rendererConnection.sendUTF.mock.calls
+            .map(([message]) => JSON.parse(message));
+        const [configs] = payloads.filter(payload => payload.futures_symbol_configs);
+        expect(configs.futures_symbol_configs.EPICUSDT.leverage).toBe(3);
+        expect(payloads.some(payload => payload.command_rejected)).toBe(false);
+    });
+
+    // The ceiling is not a function of the mode. The re-read behind a mode
+    // change asks for the contract alone, and the ceiling read when the
+    // contract was selected survives the bracket-less answer.
+    it('re-reads a margin-mode change without the bracket table and keeps the held ceiling', async () => {
+        setupBinanceConnection({ localWebSocketAccess: { host: '127.0.0.1' } });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        await activateMarket('futures-live');
+        moduleMocks.futuresAdapter.getSymbolConfig.mockResolvedValue({
+            symbol: 'EPICUSDT', leverage: 2, marginType: 'ISOLATED', maxNotionalValue: '500000',
+        });
+        await runFuturesCommand({
+            action: 'account.symbolConfig', clientOrderId: 'config-ceiling', symbol: 'EPICUSDT',
+        });
+        const bracketsBefore = moduleMocks.futuresAdapter.getLeverageBracketTable.mock.calls.length;
+        expect(bracketsBefore).toBeGreaterThan(0);
+
+        await runFuturesCommand({
+            action: 'trade.setMarginType',
+            clientOrderId: 'margin-ceiling',
+            symbol: 'EPICUSDT',
+            marginType: 'CROSSED',
+        });
+
+        expect(moduleMocks.futuresAdapter.getLeverageBracketTable.mock.calls.length)
+            .toBe(bracketsBefore);
+        const config = moduleMocks.rendererConnection.sendUTF.mock.calls
+            .map(([message]) => JSON.parse(message))
+            .filter(payload => payload.futures_symbol_configs?.EPICUSDT)
+            .at(-1).futures_symbol_configs.EPICUSDT;
+        expect(config.maxLeverage).toBe(125);
+    });
+
     it('refuses a leverage change while trading is paused and reports the refusal', async () => {
         setupBinanceConnection({ localWebSocketAccess: { host: '127.0.0.1' } });
         moduleMocks.websocketServerHandlers.request({

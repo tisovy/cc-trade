@@ -260,6 +260,14 @@ const RECORDED_FIELDS = Object.freeze({
     // and when; without its answer the record cannot be asked the one question
     // an operator asks of a slow desk — how long an order actually took, and
     // whether the wait was the exchange's or the desk's own.
+    //
+    // What "handling it" contains differs by command, so durations compare only
+    // within one action. For the Futures configuration commands — the leverage
+    // multiple, the margin mode — it is the exchange round trip and the
+    // contract's configuration re-read; the account pass those commands trigger
+    // runs detached and prices consequences, not the answer. A Spot order's
+    // answer still contains its account re-read — two `answer` lines from two
+    // markets are not the same measurement.
     answer: Object.freeze([
         ['action', text(ACTION)],
         ['market', text(MARKET)],
