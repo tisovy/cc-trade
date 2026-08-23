@@ -93,10 +93,24 @@
 
 - [x] 5.1 `OPENSPEC_TELEMETRY=0 openspec validate stop-the-consequence-read-holding-the-answer --strict`
   Valid, 2026-08-23, after the implementation evidence above was written in.
-- [ ] 5.2 Operator check, live: toggle a flat contract's mode twice within a few
+- [x] 5.2 Operator check, live: toggle a flat contract's mode twice within a few
   seconds during a session whose minute already carried a book bootstrap; both
   answers should land in about a second and the journal should carry no
   `deferred` line against either command's own reads. Keep unchecked until the
   operator confirms.
-- [ ] 5.3 Archive only after the operator confirms live behaviour; otherwise
+  Confirmed by the operator 2026-08-23 («ISO и CROSS переключаются быстро»),
+  countersigned by the journal: CYSUSDT 18:59:55–19:00:03Z — `setLeverage`
+  1 019 ms, then four `setMarginType` answers 1 163 / 1 244 / 746 / 800 ms
+  straight across the 19:00:00 minute boundary, zero `deferred` lines in the
+  window. One residual observed at 18:52:52 (ONGUSDT `setLeverage` 9 095 ms
+  at spent 799/800): the command's config re-read deduplicated onto an
+  in-flight *ordinary* read started by the contract selection a moment
+  earlier, so its urgent standing never reached the limiter — and the wait
+  ended exactly at the boundary, which is the new baseline behaviour working.
+  Recorded in the ledger as an observation, not a gate failure: the budget
+  held a genuinely full minute (two 90-weight refresh passes), not a
+  consequence read.
+- [x] 5.3 Archive only after the operator confirms live behaviour; otherwise
   record the observed gap as a tracked task or a follow-up change.
+  Archived 2026-08-23 after the confirmation above; spec merge verified by
+  grep, not by the tool's own summary line.

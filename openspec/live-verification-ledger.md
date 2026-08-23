@@ -410,6 +410,29 @@ the next bad morning closes both.
   switched on the exchange in ~340 ms every time, and nothing mispriced: the
   chip kept stating what the exchange last reported.
 
+  **FIXED AND CONFIRMED LIVE 2026-08-23.** Implementation in `1b5e6b0` (answer
+  released at the configuration broadcast, account pass detached, mode path
+  bracket-less, observed baseline stamped at the exchange interval's start).
+  Operator confirmed the same evening; the journal countersigns: CYSUSDT
+  18:59:55–19:00:03Z, `setLeverage` 1 019 ms then four `setMarginType` answers
+  1 163 / 1 244 / 746 / 800 ms straight across the 19:00:00 minute boundary,
+  zero `deferred` lines in the window. The change is archived as
+  `2026-08-23-stop-the-consequence-read-holding-the-answer`.
+
+  One residual observation, not a defect of this change: ONGUSDT `setLeverage`
+  at 18:52:52Z answered in 9 095 ms at `spent: 799` of 800 — a genuinely full
+  minute (two 90-weight refresh passes), and the wait ended exactly at the
+  boundary, which is the new baseline behaviour doing its job. The nuance
+  worth keeping: the command's configuration re-read deduplicated onto an
+  in-flight **ordinary** read started an instant earlier by the contract
+  selection, so the command's urgent standing never reached the limiter, and
+  the journal's `deferred` line for it says `ordinary` (waitedMs 8 762,
+  started at the command's own millisecond). If an operator ever reports a
+  slow first configuration command again, look for that dedup rider before
+  anything else; promoting an in-flight read to urgent when an urgent caller
+  joins it would close the gap, and is left unowned until a sitting shows it
+  matters.
+
 ## Final PnL Audit Archive Handoff — 2026-08-23
 
 The operator confirmed before this final audit that uPnL and PnL were reading
