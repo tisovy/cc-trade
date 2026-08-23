@@ -6681,6 +6681,61 @@ describe('setupBinanceConnection user-data orchestration', () => {
         expect(history.futures_history.discoveryComplete).toBe(true);
     });
 
+    // Measured 2026-08-23: four pages of per-fill REALIZED_PNL reached about two
+    // days of the operator's week. The six contracts traded early in the week
+    // never entered any read, and the review self-sustained at the contracts it
+    // already knew. A Full read is the one place discovery claims the week, so
+    // it is the one place the older half is allowed the pages the week costs —
+    // and the fan-out cap must not then drop the contracts that walk just found.
+    it('walks the older income half deep on a Full read and keeps the early-week contract', async () => {
+        setupBinanceConnection({ localWebSocketAccess: { host: '127.0.0.1' } });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        await activateMarket('futures-live');
+        const DAY_MS = 24 * 60 * 60 * 1000;
+        moduleMocks.futuresAdapter.getTradedSymbolPage.mockImplementation(({
+            startTime, endTime, page,
+        }) => {
+            if (endTime - startTime < 2 * DAY_MS) {
+                // The recent (last-day) half: one short page.
+                return Promise.resolve({ symbols: ['RECENTUSDT'], full: false, lastTime: 900 });
+            }
+            // The older six days: eleven full pages that only restate contracts
+            // already known, before the early-week contract surfaces on the
+            // twelfth — the shape of a week of per-fill realized-PnL rows.
+            return Promise.resolve(page < 12
+                ? { symbols: ['RECENTUSDT'], full: true, lastTime: 900 }
+                : { symbols: ['EARLYUSDT'], full: false, lastTime: 900 });
+        });
+
+        await runFuturesCommand({
+            action: 'account.history',
+            clientOrderId: 'history-shallow-walk',
+            symbol: 'ETHUSDT',
+            views: ['trades'],
+        });
+        const ordinary = futuresHistoryAnswers().at(-1);
+        // The bounded ordinary walk stops at its four pages and says so.
+        expect(ordinary.symbols).not.toContain('EARLYUSDT');
+        expect(ordinary.discoveryComplete).toBe(false);
+
+        // A new budget minute: the deep walk is an explicit press, not a bonus
+        // spent from the same minute the shallow read already used.
+        await vi.advanceTimersByTimeAsync(60_000);
+        await runFuturesCommand({
+            action: 'account.history',
+            clientOrderId: 'history-deep-walk',
+            symbol: 'ETHUSDT',
+            full: true,
+            views: ['trades'],
+        });
+        const deep = futuresHistoryAnswers().at(-1);
+        expect(deep.symbols).toContain('EARLYUSDT');
+        expect(deep.discoveryComplete).toBe(true);
+    });
+
     // Walking income is the most expensive thing a review does — up to eight
     // pages at weight 30, against an 800-weight minute — and it answers a
     // question that only moves when a trade is made somewhere other than this
@@ -7119,10 +7174,12 @@ describe('setupBinanceConnection user-data orchestration', () => {
                 views: ['orders'],
             }),
         });
-        const olderSymbols = Array.from({ length: 11 }, (_, index) => (
+        // Fifteen discovered contracts plus the selected seed fill the sixteen-
+        // contract fan-out, so no older income page runs behind either answer.
+        const olderSymbols = Array.from({ length: 15 }, (_, index) => (
             `OLD${String(index + 1).padStart(2, '0')}USDT`
         ));
-        const newerSymbols = Array.from({ length: 11 }, (_, index) => (
+        const newerSymbols = Array.from({ length: 15 }, (_, index) => (
             `NEW${String(index + 1).padStart(2, '0')}USDT`
         ));
 
@@ -7141,9 +7198,9 @@ describe('setupBinanceConnection user-data orchestration', () => {
         }
         expect(discoveryResolvers).toHaveLength(2);
 
-        // The later-issued renderer finishes and commits first. Eleven discovered
-        // contracts plus its selected seed fill the fan-out, so no older income
-        // page obscures which request owns each deferred answer.
+        // The later-issued renderer finishes and commits first. Fifteen
+        // discovered contracts plus its selected seed fill the fan-out, so no
+        // older income page obscures which request owns each deferred answer.
         discoveryResolvers[1]({ symbols: newerSymbols, full: false, lastTime: 2_000 });
         await vi.advanceTimersByTimeAsync(10_000);
         await newerRead;
@@ -8753,7 +8810,7 @@ describe('setupBinanceConnection user-data orchestration', () => {
             .toBeGreaterThan(frozenTargetTo);
     });
 
-    it('states the idle refresh weight as one thirty-sixth of the bounded full read', async () => {
+    it('states the idle refresh weight as one sixtieth of the bounded full read', async () => {
         setupBinanceConnection({ localWebSocketAccess: { host: '127.0.0.1' } });
         moduleMocks.websocketServerHandlers.request({
             origin: 'http://localhost:5174',
@@ -8799,10 +8856,13 @@ describe('setupBinanceConnection user-data orchestration', () => {
         const fullEndpointReads = moduleMocks.futuresAdapter.getOrderHistory.mock.calls.length
             + moduleMocks.futuresAdapter.getTradeHistory.mock.calls.length;
         const fullWeight = (fullIncomeReads * 30) + (fullEndpointReads * 5);
+        // 2026-08-23: a Full read's older income half deepened to twelve pages
+        // so early-week contracts are discoverable again — the bounded ceiling
+        // rose with it, and it stays under one 800-weight minute.
         expect({ fullIncomeReads, fullEndpointReads, fullWeight }).toEqual({
-            fullIncomeReads: 8,
+            fullIncomeReads: 16,
             fullEndpointReads: 24,
-            fullWeight: 360,
+            fullWeight: 600,
         });
 
         moduleMocks.futuresAdapter.getTradedSymbolPage.mockClear();
@@ -8823,7 +8883,7 @@ describe('setupBinanceConnection user-data orchestration', () => {
             idleEndpointReads: 2,
             idleWeight: 10,
         });
-        expect(fullWeight / idleWeight).toBe(36);
+        expect(fullWeight / idleWeight).toBe(60);
     });
 
     // Every USDⓈ-M history endpoint is read per contract, and the panel shows one
@@ -9107,7 +9167,7 @@ describe('setupBinanceConnection user-data orchestration', () => {
         expect(admitted.filter(entry => entry.label === 'history')).toHaveLength(24);
     });
 
-    // The fan-out reads twelve contracts. Once the last day alone has named that
+    // The fan-out reads sixteen contracts. Once the last day alone has named that
     // many, reading further back cannot add one — and the review must say that the
     // rest of the week went unlooked-at rather than report a complete discovery.
     it('stops discovering once the recent end has filled the fan-out, and says so', async () => {
@@ -9120,7 +9180,8 @@ describe('setupBinanceConnection user-data orchestration', () => {
         });
         await activateMarket('futures-live');
         const today = ['B1USDT', 'B2USDT', 'B3USDT', 'B4USDT', 'B5USDT', 'B6USDT',
-            'B7USDT', 'B8USDT', 'B9USDT', 'B10USDT', 'B11USDT', 'B12USDT', 'B13USDT'];
+            'B7USDT', 'B8USDT', 'B9USDT', 'B10USDT', 'B11USDT', 'B12USDT', 'B13USDT',
+            'B14USDT', 'B15USDT', 'B16USDT', 'B17USDT'];
         moduleMocks.futuresAdapter.getTradedSymbolPage
             .mockResolvedValueOnce({ symbols: today, full: false, lastTime: 900 });
 
@@ -9135,8 +9196,8 @@ describe('setupBinanceConnection user-data orchestration', () => {
             .map(([message]) => JSON.parse(message))
             .filter(payload => payload.futures_history);
         const { symbols, discovered, discoveryComplete } = history.futures_history;
-        expect(discovered).toBe(14);
-        expect(symbols).toHaveLength(12);
+        expect(discovered).toBe(18);
+        expect(symbols).toHaveLength(16);
         expect(symbols.slice(0, 7)).toEqual(['ETHUSDT', ...today.slice(0, 6)]);
         expect(discoveryComplete).toBe(false);
     });

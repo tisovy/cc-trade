@@ -27,6 +27,26 @@
   discovery did not finish, so a review narrowed by a coverage wipe can heal
   without the removed Full button.
 
+## 2a. The week's contracts (second wave, same day)
+
+- [x] 2a.1 Measured offline against the operator's own store (LevelDB log +
+  Snappy + SSV parsed in scratchpad): the v2 re-key **deleted** the old object
+  store outright (`deleteObjectStore`, futuresHistoryStore.js:435), so the
+  legacy records naming the week's contracts are unreachable by the app; the
+  bounded 4-page income walk re-found only the last ~2 days (8 contracts of
+  16); the fold over the v2 store yields 8 resolved closed rounds + 7 honest
+  oldest-chain unresolved — the operator's "3 закрытые позиции вместо ~20".
+- [x] 2a.2 A Full read's older-half income walk now takes up to 12 pages
+  (`FUTURES_INCOME_MAX_PAGES_FULL`), and the fan-out cap rose 12 → 16 so the
+  contracts the deep walk finds are not dropped by the slice behind it.
+  Bite-tested: the ordinary read stops at four pages and says incomplete; the
+  Full read reaches the early-week contract and completes.
+- [ ] 2a.3 Not taken: teaching the fold to prove a chain's left boundary by
+  anchoring backward from the terminal snapshot (would resolve most of the 7
+  suppressed oldest chains). Recorded in the ledger for the round-fold owner.
+- [ ] 2a.4 Not taken: a store-version bump that migrates contract names
+  instead of deleting the store. Matters only at the next re-key.
+
 ## 3. Verification
 
 - [x] 3.1 Suites: FuturesHistoryPanel (43), FuturesPortfolioDock (69),

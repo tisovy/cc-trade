@@ -344,6 +344,29 @@ the next bad morning closes both.
   in the tree right now: the shared-adjustment amounts it expects (`−3 USDT`)
   changed shape (`−3.00 USDT`) under the in-flight formatter. Left to its
   author; nothing of it was touched by `04b1c9c`.
+  **Resolved by that session the same hour**: `formatSettledAmountForCell`
+  rounds the cell to cents matching Closed Positions, and the red test was
+  updated. Nothing further owed here.
+- **Measured 2026-08-23 ~12:00 UTC, offline against the operator's own store
+  (LevelDB write-ahead log + Snappy + SSV parsed in scratchpad; desk was down) —
+  why Closed Positions showed 3 rounds against a week the operator counts ~20
+  in.** Three legs, two fixed, one recorded: (1) the v2 re-key **deleted** the
+  old object store outright (`deleteObjectStore`, `futuresHistoryStore.js:435`),
+  so the legacy records naming the week's sixteen contracts are unreachable by
+  the app — six of them (BLUAI, BMT, AKE, BICO, EPIC, PUMP) were traded only in
+  the older half of the week, and (2) the bounded 4-page income walk cannot
+  reach them, so no read ever named them again. Fixed: a Full read's older-half
+  walk now takes up to 12 pages (`FUTURES_INCOME_MAX_PAGES_FULL`) and the
+  fan-out cap rose 12 → 16; with `04b1c9c`'s ↻-escalation one press of ↻ on the
+  narrowed review runs it. (3) The fold over the healed v2 store yields 8
+  resolved closed rounds and suppresses 7 more as `left-boundary-unproven` —
+  each contract's oldest chain — even where trade coverage is complete for the
+  whole window and the terminal snapshot is flat. Anchoring the chain backward
+  from the terminal position would prove most of those boundaries; that
+  inference belongs to the round-fold owner
+  (`make-futures-rounds-leg-and-window-correct`) and is deliberately not
+  attempted here. BEAT and BTW carry `history-page-limited` windows that heal
+  through the existing reacquisition checkpoints.
 - `runbook.md` result 19 is the only literal `FAIL`. It has the separate
   `let-the-chart-ask-again` change; because no post-fix repeat exists, its live
   tasks remain open.

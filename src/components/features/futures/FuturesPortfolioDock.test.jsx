@@ -1734,7 +1734,16 @@ describe('FuturesPortfolioDock', () => {
     fireEvent.pointerUp(handle, { pointerId: 8, clientY: 9_000 })
     expect(dock.style.getPropertyValue('--fx-dock-panel-height')).toBe('120px')
 
+    // Two quick drags land as a double-click; a reset the operator did not ask
+    // for must not throw away the height they just set.
     fireEvent.doubleClick(handle)
+    expect(dock.style.getPropertyValue('--fx-dock-panel-height')).toBe('120px')
+
+    // A deliberate double-click, past the disarm beat, hands the height back.
+    const realNow = Date.now()
+    const now = vi.spyOn(Date, 'now').mockReturnValue(realNow + 600)
+    fireEvent.doubleClick(handle)
+    now.mockRestore()
     expect(dock.style.getPropertyValue('--fx-dock-panel-height')).toBe('')
     expect(window.localStorage.getItem('futuresDockPanelHeight')).toBeNull()
   })

@@ -43,13 +43,15 @@ export const FUTURES_DOCK_PANEL_HEIGHT_KEY = 'futuresDockPanelHeight'
 const DOCK_PANEL_DEFAULT_HEIGHT = 260
 const DOCK_PANEL_MIN_HEIGHT = 120
 
-const clampDockPanelHeight = (value) => {
-  const ceiling = Math.max(
-    DOCK_PANEL_MIN_HEIGHT,
-    Math.round((window.innerHeight || 900) * 0.7),
-  )
-  return Math.min(ceiling, Math.max(DOCK_PANEL_MIN_HEIGHT, Math.round(value)))
-}
+const dockPanelHeightCeiling = () => Math.max(
+  DOCK_PANEL_MIN_HEIGHT,
+  Math.round((window.innerHeight || 900) * 0.7),
+)
+
+const clampDockPanelHeight = value => Math.min(
+  dockPanelHeightCeiling(),
+  Math.max(DOCK_PANEL_MIN_HEIGHT, Math.round(value)),
+)
 
 const readStoredDockPanelHeight = () => {
   try {
@@ -537,6 +539,7 @@ export const FuturesPortfolioDock = ({
   const [panelHeight, setPanelHeight] = useState(readStoredDockPanelHeight)
   const dockRef = useRef(null)
   const dockDragRef = useRef(null)
+  const dockResetArmedAtRef = useRef(0)
   useEffect(() => {
     try {
       if (panelHeight === null) {
@@ -561,6 +564,7 @@ export const FuturesPortfolioDock = ({
       pointerId: event.pointerId,
       y: event.clientY,
       height: measuredPanelHeight(),
+      moved: false,
     }
     event.currentTarget.setPointerCapture?.(event.pointerId)
     event.preventDefault()
@@ -568,12 +572,22 @@ export const FuturesPortfolioDock = ({
   const moveDockResize = (event) => {
     const drag = dockDragRef.current
     if (drag === null || drag.pointerId !== event.pointerId) return
+    if (Math.abs(event.clientY - drag.y) >= 3) drag.moved = true
     // The handle sits on the dock's top edge: dragging up grows the dock.
     setPanelHeight(clampDockPanelHeight(drag.height + (drag.y - event.clientY)))
   }
   const endDockResize = (event) => {
-    if (dockDragRef.current?.pointerId !== event.pointerId) return
+    const drag = dockDragRef.current
+    if (drag?.pointerId !== event.pointerId) return
+    // Two quick drags land as a double-click. A reset the operator did not ask
+    // for throws away the height they just set, so a press that moved keeps
+    // the double-click reset disarmed for a beat.
+    if (drag.moved) dockResetArmedAtRef.current = Date.now() + 500
     dockDragRef.current = null
+  }
+  const resetDockPanelHeight = () => {
+    if (Date.now() < dockResetArmedAtRef.current) return
+    setPanelHeight(null)
   }
   const keyboardDockResize = (event) => {
     const step = event.key === 'ArrowUp' ? 32 : event.key === 'ArrowDown' ? -32 : null
@@ -735,6 +749,7 @@ export const FuturesPortfolioDock = ({
         aria-orientation="horizontal"
         aria-label="Resize the portfolio dock"
         aria-valuemin={DOCK_PANEL_MIN_HEIGHT}
+        aria-valuemax={dockPanelHeightCeiling()}
         aria-valuenow={Math.round(panelHeight ?? DOCK_PANEL_DEFAULT_HEIGHT)}
         tabIndex={0}
         title={'Drag to change how many rows the dock shows. '
@@ -744,7 +759,7 @@ export const FuturesPortfolioDock = ({
         onPointerUp={endDockResize}
         onPointerCancel={endDockResize}
         onKeyDown={keyboardDockResize}
-        onDoubleClick={() => setPanelHeight(null)}
+        onDoubleClick={resetDockPanelHeight}
       />
       <div className="futures-workstation-dock-panel">
         <header>

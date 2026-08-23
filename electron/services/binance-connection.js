@@ -1706,14 +1706,15 @@ export function setupBinanceConnection({
     // therefore discovered no contract it traded today, and the review covered
     // only what the account still holds a position or an order on.
     const FUTURES_HISTORY_RECENT_WINDOW_MS = 24 * 60 * 60 * 1000;
-    // Each contract costs two signed reads at weight 5. Twelve is a session's worth
-    // of contracts against a 800/minute budget — eight was not: the contract on
-    // screen, the contracts holding positions and the contracts holding working
-    // orders are seeded first, and a desk in three positions with four resting
-    // orders had spent seven of the eight before the traded-symbol read was
-    // consulted at all. What is still dropped is reported in the payload, not only
-    // logged, because a bounded list that does not say so reads as a complete one.
-    const FUTURES_HISTORY_MAX_SYMBOLS = 12;
+    // Each contract costs two signed reads at weight 5. Twelve was a session's
+    // worth of contracts against a 800/minute budget — and then it was not:
+    // the operator's 2026-08-23 week held sixteen traded contracts, and after
+    // the seeds took their seats the cap dropped the very contracts the wider
+    // discovery below had just paid thirty a page to find. Sixteen at ~10
+    // weight each still fits the minute beside a discovery walk. What is still
+    // dropped is reported in the payload, not only logged, because a bounded
+    // list that does not say so reads as a complete one.
+    const FUTURES_HISTORY_MAX_SYMBOLS = 16;
     // Leverage per open position is a different read with a different budget; it
     // is bounded on its own so that widening the history fan-out does not widen it.
     const FUTURES_POSITION_CONFIG_MAX_SYMBOLS = 8;
@@ -1729,6 +1730,14 @@ export function setupBinanceConnection({
     // Income is paged forward from the oldest end of the window. The pages are
     // bounded: this walks to the recent end of a busy week, it does not download it.
     const FUTURES_INCOME_MAX_PAGES = 4;
+    // A Full read is the one place discovery claims the whole week, and four
+    // pages of per-fill REALIZED_PNL reach about two days of this account's
+    // trading. Measured 2026-08-23: the bounded walk named eight contracts and
+    // the operator's week held sixteen — six of them were traded early in the
+    // week, invisible to every ordinary read, and the review self-sustained at
+    // the contracts it already knew. Twelve pages on the older half is ~360
+    // weight once, on the operator's explicit press, spread by the limiter.
+    const FUTURES_INCOME_MAX_PAGES_FULL = 12;
     // How long the contracts an income walk found are held before it is walked
     // again. The walk costs up to eight pages at weight 30 — the most expensive
     // thing a review does — and it answers a question that only moves when a
@@ -5592,10 +5601,10 @@ export function setupBinanceConnection({
             // walk: the pages already in hand are contracts the review can cover,
             // and throwing them away because the third read timed out would drop
             // history the desk had already paid for.
-            const walkIncome = async (from, until) => {
+            const walkIncome = async (from, until, maxPages = FUTURES_INCOME_MAX_PAGES) => {
                 const pages = [];
                 let complete = true;
-                for (let page = 0; page < FUTURES_INCOME_MAX_PAGES; page += 1) {
+                for (let page = 0; page < maxPages; page += 1) {
                     if (!isCurrent()) {
                         complete = false;
                         break;
@@ -5627,7 +5636,7 @@ export function setupBinanceConnection({
                     if (!traded?.full) break;
                     // The last page still came back full: there are contracts behind it
                     // this walk will not reach, and the review must not imply otherwise.
-                    if (page === FUTURES_INCOME_MAX_PAGES - 1) complete = false;
+                    if (page === maxPages - 1) complete = false;
                 }
                 return { pages, complete };
             };
@@ -5694,7 +5703,15 @@ export function setupBinanceConnection({
             let complete = recent.complete;
             rememberPages(recent.pages);
             if (full || symbols.length < FUTURES_HISTORY_MAX_SYMBOLS) {
-                const older = await walkIncome(now - FUTURES_HISTORY_WINDOW_MS, recentFrom - 1);
+                // The whole week, only when the operator explicitly asked for
+                // the whole week. Ordinary reads keep the four-page bound: they
+                // run behind tab opens and reconnects, and their answer is
+                // seeded by the persisted coverage anyway.
+                const older = await walkIncome(
+                    now - FUTURES_HISTORY_WINDOW_MS,
+                    recentFrom - 1,
+                    full ? FUTURES_INCOME_MAX_PAGES_FULL : FUTURES_INCOME_MAX_PAGES,
+                );
                 if (!isCurrent()) {
                     return { symbols: [], discovered: 0, discoveryComplete: false };
                 }
