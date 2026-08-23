@@ -319,6 +319,29 @@ the next bad morning closes both.
   transcripts held the identifier, and both belonged to the investigation rather
   than the work. Authorship is the identifier inside an `Edit`/`Write` whose
   `file_path` is the file in question, cross-checked against that file's mtime.
+
+  **Closed 2026-08-23 in `04b1c9c`**, after the work landed in `ac1800e` and
+  the operator reported the symptom it fed ("Closed Positions used to show all
+  symbols"). The refusal was one of three legs: the reconcile fired with no
+  symbol and never retried (send success recorded as done); a one-contract
+  `basisOnly` read stamped `readViews.trades` so the tab's account-wide read
+  never ran; and the `ac1800e` v2 store re-key emptied persisted coverage while
+  discovery short-circuits on any covered contract, so the review self-sustained
+  at one contract. All three fixed renderer-side (`useFuturesTrading.js`,
+  `futuresHeldHistory.js`, dock ↻ escalates to full while discovery is
+  incomplete); journals 2026-08-23 07:43–08:23 UTC hold the refusals and the
+  one-request "wide" read that proved the chain.
+- **For the session working the exact-settled money in `FuturesPortfolioDock.jsx`
+  (in flight 2026-08-23 ~08:30 UTC):** the operator ruled the same morning that
+  row surfaces show rounded cents with the exact string on the element, and that
+  no badge or measure word rides a money cell (screenshots: the closed-row NET
+  column and the open-row `PARTIAL` badge, both removed in `04b1c9c`).
+  `formatExactSettledAmount` currently prints the full fraction into the
+  open-position PnL cell — the same complaint will land on it. Also
+  `renders open contract and account adjustments once outside leg rows` is red
+  in the tree right now: the shared-adjustment amounts it expects (`−3 USDT`)
+  changed shape (`−3.00 USDT`) under the in-flight formatter. Left to its
+  author; nothing of it was touched by `04b1c9c`.
 - `runbook.md` result 19 is the only literal `FAIL`. It has the separate
   `let-the-chart-ask-again` change; because no post-fix repeat exists, its live
   tasks remain open.
