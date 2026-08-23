@@ -1682,6 +1682,124 @@ describe('buildFuturesTradeRoundIndex', () => {
     }
   })
 
+  // The same chain as above, but the account's complete snapshot vouches the
+  // terminal: the sum of the held fills lands exactly on the present (flat)
+  // position, which is only possible when the chain began flat. The first
+  // round's boundary is thereby proven backward and both rounds resolve.
+  it('anchors a chain backward from a terminal the complete snapshot vouches', () => {
+    const exact = coverageFor('BTCUSDT:BOTH')
+    const index = buildFuturesTradeRoundIndex([
+      indexedFill({ id: '1', side: 'BUY', quantity: '1', price: '100', time: 1_000 }),
+      indexedFill({ id: '2', side: 'SELL', quantity: '1', price: '110', realizedPnl: '10', time: 2_000 }),
+      indexedFill({ id: '3', side: 'BUY', quantity: '1', price: '120', time: 3_000 }),
+      indexedFill({ id: '4', side: 'SELL', quantity: '1', price: '130', realizedPnl: '10', time: 4_000 }),
+    ], {
+      coverage: {
+        'BTCUSDT:BOTH': {
+          ...exact['BTCUSDT:BOTH'],
+          flatBoundary: false,
+        },
+      },
+      generation,
+      positions: [],
+      snapshotComplete: true,
+    })
+
+    expect(index.unresolved).toEqual([])
+    expect(index.closed).toHaveLength(2)
+    expect(index.closed.every(round => round.resolved)).toBe(true)
+    expect(index.closed.map(round => round.realizedPnl)).toEqual([10, 10])
+    expect(index.byPosition['BTCUSDT:BOTH'].coverage.leftBoundaryAnchor)
+      .toBe('terminal-snapshot')
+  })
+
+  it('does not anchor when the snapshot contradicts the held fills', () => {
+    const exact = coverageFor('BTCUSDT:BOTH')
+    const index = buildFuturesTradeRoundIndex([
+      indexedFill({ id: '1', side: 'BUY', quantity: '1', price: '100', time: 1_000 }),
+      indexedFill({ id: '2', side: 'SELL', quantity: '1', price: '110', realizedPnl: '10', time: 2_000 }),
+      indexedFill({ id: '3', side: 'BUY', quantity: '1', price: '120', time: 3_000 }),
+      indexedFill({ id: '4', side: 'SELL', quantity: '1', price: '130', realizedPnl: '10', time: 4_000 }),
+    ], {
+      coverage: {
+        'BTCUSDT:BOTH': {
+          ...exact['BTCUSDT:BOTH'],
+          flatBoundary: false,
+        },
+      },
+      generation,
+      // The account still holds two contracts the fills never delivered, so the
+      // held sum cannot be the whole story and no boundary is proven by it.
+      positions: [
+        { symbol: 'BTCUSDT', positionSide: 'BOTH', quantity: '2', entryPrice: '100' },
+      ],
+      snapshotComplete: true,
+    })
+
+    expect(index.byPosition['BTCUSDT:BOTH'].coverage.leftBoundaryAnchor).toBeUndefined()
+    expect(index.closed).toHaveLength(1)
+    expect(index.unresolved.some(segment => (
+      segment.reasons.includes('left-boundary-unproven')
+    ))).toBe(true)
+  })
+
+  // A trial fold that has to read its first fill as closing something older
+  // (its realized PnL says so) disproves the flat-base assumption on its own,
+  // even when the terminal happens to land on the snapshot.
+  it('does not anchor a chain that begins by realizing PnL', () => {
+    const exact = coverageFor('BTCUSDT:BOTH')
+    const index = buildFuturesTradeRoundIndex([
+      indexedFill({ id: '1', side: 'SELL', quantity: '1', price: '110', realizedPnl: '7', time: 1_000 }),
+      indexedFill({ id: '2', side: 'BUY', quantity: '1', price: '100', time: 2_000 }),
+      indexedFill({ id: '3', side: 'SELL', quantity: '1', price: '105', realizedPnl: '5', time: 3_000 }),
+    ], {
+      coverage: {
+        'BTCUSDT:BOTH': {
+          ...exact['BTCUSDT:BOTH'],
+          flatBoundary: false,
+        },
+      },
+      generation,
+      positions: [],
+      snapshotComplete: true,
+    })
+
+    expect(index.byPosition['BTCUSDT:BOTH'].coverage.leftBoundaryAnchor).toBeUndefined()
+  })
+
+  // A truncated read can only be missing whole rounds once the terminal is
+  // vouched — a truncation cutting into a round would shift the sum. The open
+  // round resolves; the coverage keeps saying the read itself was truncated.
+  it('anchors an endpoint-page chain whose terminal the account vouches', () => {
+    const exact = coverageFor('BTCUSDT:BOTH')
+    const trades = Array.from({ length: 1_000 }, (_, offset) => indexedFill({
+      id: String(offset + 1),
+      side: 'BUY',
+      quantity: '1',
+      price: '100',
+      time: 10_000 + offset,
+    }))
+    const index = buildFuturesTradeRoundIndex(trades, {
+      coverage: {
+        'BTCUSDT:BOTH': {
+          ...exact['BTCUSDT:BOTH'],
+          flatBoundary: false,
+          pageLimited: true,
+        },
+      },
+      generation,
+      positions: [
+        { symbol: 'BTCUSDT', positionSide: 'BOTH', quantity: '1000', entryPrice: '100' },
+      ],
+      snapshotComplete: true,
+    })
+
+    expect(index.unresolved).toEqual([])
+    expect(index.open).toHaveLength(1)
+    expect(index.open[0].resolved).toBe(true)
+    expect(index.byPosition['BTCUSDT:BOTH'].coverage.pageLimited).toBe(true)
+  })
+
 })
 
 describe('buildFuturesTradeRounds fill money', () => {

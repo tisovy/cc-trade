@@ -1635,6 +1635,53 @@ describe('FuturesPortfolioDock', () => {
     )
   })
 
+  // The popup announcing a failed wallet-adjustment reading says "press \u21bb to
+  // retry", so the one control must be the way back: while the settled resource
+  // reports a failure, the same press also asks the account to refresh. While
+  // it reports ready, the press stays a history read alone.
+  it('retries a failed wallet-adjustment reading with the same re-read press', () => {
+    const onLoadHistory = vi.fn()
+    const onRefreshAccount = vi.fn()
+    const dock = settledIncome => (
+      <FuturesPortfolioDock
+        selectedSymbol="BTCUSDT"
+        onLoadHistory={onLoadHistory}
+        onRefreshAccount={onRefreshAccount}
+        settledIncome={settledIncome}
+        history={{
+          symbol: 'BTCUSDT',
+          status: 'ready',
+          readAt: 1_784_000_100_000,
+          orders: [],
+          trades: [],
+          error: null,
+          discoveryComplete: true,
+          readViews: { orders: 1_784_000_100_000, trades: 1_784_000_100_000 },
+        }}
+      />
+    )
+    const { rerender } = render(dock({
+      version: 2,
+      status: 'ready',
+      successfulAt: 1_784_000_100_000,
+      error: null,
+    }))
+    fireEvent.click(screen.getByRole('tab', { name: 'Closed positions' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Re-read account history' }))
+    expect(onLoadHistory).toHaveBeenCalledTimes(1)
+    expect(onRefreshAccount).not.toHaveBeenCalled()
+
+    rerender(dock({
+      version: 2,
+      status: 'stale',
+      successfulAt: 1_784_000_100_000,
+      error: { code: 'FUTURES_API_ERROR', message: 'Funding verification failed.' },
+    }))
+    fireEvent.click(screen.getByRole('button', { name: 'Re-read account history' }))
+    expect(onLoadHistory).toHaveBeenCalledTimes(2)
+    expect(onRefreshAccount).toHaveBeenCalledExactlyOnceWith('BTCUSDT')
+  })
+
   // Every USDⓈ-M history endpoint is read per contract, so a review that reads
   // both endpoints pays a whole fan-out — twelve contracts, 150ms apart — for a
   // panel that shows one of them at a time.

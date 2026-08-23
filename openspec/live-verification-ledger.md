@@ -360,6 +360,15 @@ the next bad morning closes both.
   (`make-futures-rounds-leg-and-window-correct`) and is deliberately not
   attempted here. BEAT and BTW carry `history-page-limited` windows that heal
   through the existing reacquisition checkpoints.
+  **Leg (3) closed 2026-08-23 evening.** The operator pressed ↻ live, the deep
+  walk ran (journal 18:52:44–18:53:01Z: five 30-weight income pages, the
+  fan-out behind them), and Closed Positions settled at exactly the predicted
+  8 rounds against "all of them" in the Binance app — so the anchoring was
+  implemented inside `show-one-pnl-and-let-the-operator-size-the-dock`
+  (task 2a.3) rather than left recorded: the fold now adopts a flat-base trial
+  fold when it conserves fills, reads every round from flat, and lands its
+  terminal exactly on the delivered account snapshot. The handoff to the
+  round-fold owner is therefore withdrawn.
 - `runbook.md` result 19 is the only literal `FAIL`. It has the separate
   `let-the-chart-ask-again` change; because no post-fix repeat exists, its live
   tasks remain open.
@@ -468,3 +477,35 @@ retained.
 | `make-settled-income-acquisition-lossless` | 5.4 | `ARCHIVE AUTHORIZED WITH LIVE CHECK OUTSTANDING` | 2026-08-23 | Production | this archive commit | The operator explicitly requested archive; task 5.3 and any future live ordering observation remain in this ledger. |
 | `make-settled-income-resource-truthful` | 5.3 | `OUTSTANDING` | `NOT RECORDED` | Production | this archive commit | Live success → failure → recovery and same-shape correction were not forced after the numeric-money and lane-target fixes. |
 | `make-settled-income-resource-truthful` | 5.4 | `ARCHIVE AUTHORIZED WITH LIVE CHECK OUTSTANDING` | 2026-08-23 | Production | this archive commit | The operator explicitly requested archive; task 5.3 remains outstanding and archive is not recovery evidence. |
+
+## Live Settled-Income Failure Surfaced — 2026-08-23 evening
+
+The failure half of `make-settled-income-resource-truthful` task 5.3 has now
+been observed live, unforced. Since the 18:52Z restart every non-bootstrap
+settled read in the journal ends `outcome: "partial"` while every HTTP request
+under it is `ok, 200` — `refresh` 19:01:33Z (6 pages, 180 weight, restored 0,
+verified 0), `credit-confirm` 18:55:16Z, `funding` 19:00:01Z, `confirm`
+19:02:03Z; the morning session shows the same pattern (08:30, 08:48). The
+resource surfaced it to the operator as "Wallet-adjustment refresh failed.
+Showing the confirmed reading from 21:52:00" — the 21:52 stamp is the
+bootstrap's `successfulAt`, so the truthful-resource plumbing works. Two
+things remain and are not this session's to close:
+
+- **Why is every refresh-class read `partial` while bootstrap completes?**
+  `verified: 0` on all of them suggests the verification leg never confirms
+  on the refresh path (rows 62, kept 62, missing 0, differing 0, coverage a
+  full week). Chronic `partial` means the operator's screen carries a stale
+  wallet-adjustment reading essentially always outside the seconds after
+  bootstrap. Owned by the settled-income owner
+  (`make-settled-income-resource-truthful` / `read-the-settled-money-from-
+  the-newest-end`); journal `desk-2026-08-23-000.jsonl` lines above are the
+  evidence.
+- **Recovery** (failure → later verified success without restart) still has
+  no live observation.
+
+The surface itself moved on the operator's word the same evening: the panel
+banner is gone, the failure is announced once per episode in the popup
+channel, and the one ↻ control also retries the settled reading
+(`show-one-pnl-and-let-the-operator-size-the-dock` tasks 1.7). The popup will
+therefore fire once per session under the chronic-partial fault above — one
+more reason the root cause deserves its owner's sitting.

@@ -1944,6 +1944,14 @@ const useFuturesTrading = ({
   // answers must come from one walk — a position whose start is taken from one
   // fold and whose costs are taken from another can be charged for what happened
   // before it opened.
+  // Whether the position basis is the account's complete open-position set. A
+  // key absent from a delivered snapshot proves that position flat, which is
+  // what lets the fold anchor a chain's left boundary backward from its
+  // terminal. `stale` stays authoritative: it is the last confirmed snapshot
+  // held across a transport loss, and no fill can arrive through the same
+  // lost transport to move the account away from it.
+  const positionSnapshotComplete = state.accountResources.positions?.status === 'ready'
+    || state.accountResources.positions?.status === 'stale'
   const baseTradeRoundIndex = useMemo(() => (
     buildFuturesTradeRoundIndex(roundTradeHistory.trades, {
       coverage: roundCoverageByPosition(
@@ -1953,9 +1961,11 @@ const useFuturesTrading = ({
         roundTradeHistory.foldedTrades,
       ),
       positions: roundPositionBasis,
+      snapshotComplete: positionSnapshotComplete,
       generation: roundTradeHistory.generation,
     })
   ), [
+    positionSnapshotComplete,
     roundPositionBasis,
     roundTradeHistory,
   ])

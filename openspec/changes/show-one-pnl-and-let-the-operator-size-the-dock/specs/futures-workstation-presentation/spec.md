@@ -22,7 +22,8 @@ applies only while the operator has not chosen one.
 ### Requirement: A closed round states one money quantity in its row
 
 A closed-position row SHALL carry exactly one money column, named PnL, showing
-the exchange's own realized PnL rounded to cents; rounding SHALL be performed
+the exchange's own realized PnL rounded to cents and set in bold; rounding
+SHALL be performed
 on the exchange's decimal string so no figure is altered by float precision,
 and a sub-cent amount that would render as zero SHALL keep its exact text. The
 exact figure, and what reached the wallet — the exact Wallet Net, or the
@@ -56,6 +57,27 @@ surface through the dock's own alert line, never as a badge in the row.
 
 - **WHEN** an open position's settled money does not cover the whole life of the position
 - **THEN** the cell shows the amounts with the partial marking on the figure itself, the element names the coverage, and no badge word appears in the row
+
+### Requirement: Wallet-adjustment trouble is announced in the popup channel
+
+A failed or stale wallet-adjustment (settled-income) reading SHALL NOT place a
+status banner inside the Closed Positions panel. The failure SHALL be
+announced once per failure episode through the desk's popup notification
+channel, naming the confirmed reading the rows keep and the re-read control as
+the way back; the rows themselves keep showing the confirmed reading with
+their qualifications on the row elements. Loading, ready, and never-read
+states are announced nowhere. While the settled reading reports failure or has
+never been read, the history re-read control SHALL also retry it.
+
+#### Scenario: A refresh fails behind held rows
+
+- **WHEN** a wallet-adjustment refresh fails while the operator reads Closed Positions
+- **THEN** one popup announces the failure and the confirmed reading's time, no inline banner appears, the rows keep their qualified confirmed values, and the same failure on later renders is not announced again
+
+#### Scenario: The re-read control is the way back
+
+- **WHEN** the operator presses the history re-read control while the settled reading reports failure
+- **THEN** the press issues the history read and retries the wallet-adjustment reading in the same gesture
 
 ### Requirement: The history header holds one read control
 

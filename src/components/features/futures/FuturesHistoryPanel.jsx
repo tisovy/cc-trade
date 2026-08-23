@@ -1,4 +1,6 @@
-import { memo, useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useContext, useEffect, useMemo, useRef, useState } from 'react'
+
+import { NotificationContext } from '../../../context/NotificationContext.js'
 import {
   formatCompactUsdt,
   formatExchangePrice,
@@ -385,7 +387,6 @@ export const FuturesHistoryPanel = ({
   tradeRoundIndex = null,
   tickSizes = EMPTY_TICKS,
   onSymbolChange,
-  onRetrySettledIncome,
 }) => {
   // Narrowing is local to the reading already held: it issues no read, and the
   // scope statement beneath the table keeps describing the read rather than what
@@ -601,38 +602,38 @@ export const FuturesHistoryPanel = ({
   const settledSuccessfulAt = Number.isSafeInteger(settledIncome?.successfulAt)
     ? settledIncome.successfulAt
     : null
-  const settledNotice = settledStatus === null ? null : (
-    <p
-      className={`futures-workstation-history-notice${
-        settledStatus === 'stale' || settledStatus === 'error' ? ' is-error' : ''}`}
-      role={settledStatus === 'stale' || settledStatus === 'error' ? 'alert' : 'status'}
-    >
-      <span>
-        {settledStatus === 'loading'
-          ? 'Wallet adjustments are loading. Confirmed values remain visible but qualified.'
-          : settledStatus === 'ready'
-            ? `Wallet adjustments ready${settledSuccessfulAt === null
-              ? ''
-              : ` · verified ${formatFuturesDeskTime(settledSuccessfulAt)}`}.`
-            : settledStatus === 'stale' || settledStatus === 'error'
-              ? `${settledIncome?.error?.message ?? 'Wallet-adjustment refresh failed.'}${
-                settledSuccessfulAt === null
-                  ? ''
-                  : ` Showing the confirmed reading from ${formatFuturesDeskTime(settledSuccessfulAt)}.`}`
-              : 'Wallet adjustments have not been read.'}
-      </span>
-      {(settledStatus === 'stale' || settledStatus === 'error' || settledStatus === 'idle')
-        && typeof onRetrySettledIncome === 'function' ? (
-          <button
-            type="button"
-            className="futures-workstation-history-filter"
-            onClick={onRetrySettledIncome}
-          >
-            Retry wallet adjustments
-          </button>
-        ) : null}
-    </p>
-  )
+  // Wallet-adjustment trouble goes to the popup channel, not into the panel:
+  // the operator ruled inline status banners here noise (2026-08-23). The rows
+  // keep the confirmed reading either way — the popup only says the refresh
+  // behind them failed and that the one re-read control is the way back. One
+  // popup per failure episode: the key changes when a later verify succeeds
+  // and the reading fails anew, not on every render while it stays failed.
+  const notifications = useContext(NotificationContext)
+  const notifyError = notifications?.notifyError
+  const settledFailureKey = settledStatus === 'stale' || settledStatus === 'error'
+    ? `${settledStatus}:${settledSuccessfulAt ?? 'never'}`
+    : null
+  const settledFailureMessage = settledFailureKey === null
+    ? null
+    : [
+      settledIncome?.error?.message ?? 'Wallet-adjustment refresh failed.',
+      settledSuccessfulAt === null
+        ? null
+        : `Closed-position PnL keeps the confirmed reading from ${
+          formatFuturesDeskTime(settledSuccessfulAt)}.`,
+      'Press ↻ to retry.',
+    ].filter(Boolean).join(' ')
+  const notifiedSettledFailureRef = useRef(null)
+  useEffect(() => {
+    if (settledFailureKey === null) {
+      notifiedSettledFailureRef.current = null
+      return
+    }
+    if (typeof notifyError !== 'function') return
+    if (notifiedSettledFailureRef.current === settledFailureKey) return
+    notifiedSettledFailureRef.current = settledFailureKey
+    notifyError(settledFailureMessage)
+  }, [notifyError, settledFailureKey, settledFailureMessage])
   const closedScopeIncomplete = view === 'tradeHistory'
     && (canonicalModelMissing
       || history?.discoveryComplete === false
@@ -752,7 +753,6 @@ export const FuturesHistoryPanel = ({
       return (
         <>
           {notice}
-          {settledNotice}
           <p className="futures-workstation-empty">
             {closedScopeIncomplete
               ? `No resolved closed positions${scope}. This partial review cannot prove that none exist.`
@@ -765,7 +765,6 @@ export const FuturesHistoryPanel = ({
     return (
       <>
         {notice}
-        {settledNotice}
         {rounds.length > FUTURES_CLOSED_POSITION_WINDOW_SIZE ? (
           <div
             className="futures-workstation-history-window"

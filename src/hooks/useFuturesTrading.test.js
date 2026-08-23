@@ -803,6 +803,77 @@ describe('useFuturesTrading', () => {
     ])
   })
 
+  // The same restored chain, but its stored coverage never witnessed flat
+  // before the first fill. Delivered-and-flat account positions prove the
+  // boundary backward — the sum of the held fills lands exactly on the
+  // account's present (absent, hence flat) position — so the round resolves.
+  // Until the account snapshot is delivered, the review stays withheld: an
+  // empty positions array that merely has not arrived proves nothing.
+  it('anchors a restored chain on the delivered account snapshot', async () => {
+    const storeReading = () => [{
+      version: 2,
+      key: `${ACCOUNT_FINGERPRINT}:BTCUSDT`,
+      fingerprint: ACCOUNT_FINGERPRINT,
+      symbol: 'BTCUSDT',
+      orders: [],
+      trades: [{
+        id: '1', orderId: '101', symbol: 'BTCUSDT', positionSide: 'BOTH',
+        side: 'BUY', price: '100', quantity: '1', realizedPnl: '0',
+        commission: '0.1', commissionAsset: 'USDT', marginAsset: 'USDT', time: 2_000,
+      }, {
+        id: '2', orderId: '102', symbol: 'BTCUSDT', positionSide: 'BOTH',
+        side: 'SELL', price: '110', quantity: '1', realizedPnl: '10',
+        commission: '0.1', commissionAsset: 'USDT', marginAsset: 'USDT', time: 3_000,
+      }],
+      orderCursor: null,
+      tradeCursor: '2',
+      tradeCoverage: {
+        version: 2,
+        targetFrom: 0,
+        targetTo: 5_000,
+        coveredFrom: 1_000,
+        coveredTo: 5_000,
+        complete: false,
+        flatBoundary: false,
+        pageLimited: true,
+        retentionLimited: false,
+        continuityComplete: true,
+      },
+      readAt: 5_000,
+    }]
+    const withPositions = async (resources) => {
+      const socket = createSocket()
+      const historyStore = {
+        readContracts: vi.fn(async () => storeReading()),
+        writeReading: vi.fn(async () => true),
+      }
+      const { result } = renderHook(() => useFuturesTrading({
+        enabled: true,
+        symbol: 'BTCUSDT',
+        wsConnection: socket,
+        historyStore,
+      }))
+      authorizeAccount(socket, resources)
+      await waitFor(() => expect(result.current.history.status).toBe('ready'))
+      return result
+    }
+
+    const delivered = await withPositions({
+      positions: { status: 'ready', data: [], lastSuccessfulAt: 5_000 },
+    })
+    expect(delivered.current.tradeRoundIndex.closed).toEqual([
+      expect.objectContaining({
+        symbol: 'BTCUSDT',
+        positionKey: 'BTCUSDT:BOTH',
+        realizedPnlExact: '10',
+        resolved: true,
+      }),
+    ])
+
+    const undelivered = await withPositions({})
+    expect(undelivered.current.tradeRoundIndex.closed).toEqual([])
+  })
+
   it('carries the stored coverage on an incremental read and marks an explicit full read', async () => {
     const socket = createSocket()
     const historyStore = {

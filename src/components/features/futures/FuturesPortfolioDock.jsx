@@ -1011,10 +1011,22 @@ export const FuturesPortfolioDock = ({
                   ? 'Contract discovery did not finish — this re-read runs the full account discovery'
                   : 'Read only the account history that may have changed'}
                 disabled={historyReading || typeof onLoadHistory !== 'function'}
-                onClick={() => onLoadHistory?.(selectedSymbol, {
-                  ...(history?.discoveryComplete === false ? { full: true } : {}),
-                  views: historyView === null ? null : [historyView],
-                })}
+                onClick={() => {
+                  onLoadHistory?.(selectedSymbol, {
+                    ...(history?.discoveryComplete === false ? { full: true } : {}),
+                    views: historyView === null ? null : [historyView],
+                  })
+                  // The same press heals a failed wallet-adjustment reading:
+                  // its failure is announced in the popup channel with "press
+                  // ↻ to retry", so the one control must actually be the way
+                  // back rather than a second control existing for it.
+                  if (settledIncome?.version === 2
+                    && (settledIncome.status === 'stale'
+                      || settledIncome.status === 'error'
+                      || settledIncome.status === 'idle')) {
+                    retryAccount()
+                  }
+                }}
               >
                 ↻
               </button>
@@ -1031,9 +1043,6 @@ export const FuturesPortfolioDock = ({
             tradeRoundIndex={tradeRoundIndex}
             tickSizes={tickSizes}
             onSymbolChange={onSymbolChange}
-            onRetrySettledIncome={typeof onRefreshAccount === 'function'
-              ? retryAccount
-              : undefined}
           />
         ) : openOrders.length === 0 ? (
           <>

@@ -36,3 +36,31 @@ reporting the discovery incomplete.
 
 - **WHEN** the persisted coverage names only a subset of the account's traded contracts (for example after a store re-key emptied it)
 - **THEN** the one refresh control runs the Full read while the held reading says discovery did not finish, so the subset cannot become the permanent account
+
+### Requirement: A terminal the account vouches proves a chain's left boundary
+
+When the account's complete open-position snapshot has been delivered, the
+round fold SHALL prove a chain's left boundary backward from its terminal: a
+trial fold assuming the chain began flat is adopted only when it conserves
+every fill, reads every round from flat with none continuing an older
+position (an opening fill realizing PnL disproves the assumption by itself),
+and its terminal position lands exactly on the snapshot — absence from the
+complete snapshot meaning flat. Rounds of an adopted chain resolve without a
+forward-observed flat boundary. An undelivered snapshot proves nothing, and a
+snapshot the trial terminal contradicts leaves the chain withheld exactly as
+before.
+
+#### Scenario: Closed chains of a contract the account no longer holds
+
+- **WHEN** the held fills of a fully-closed contract sum to zero and the delivered account snapshot holds no position in it, while the stored coverage never witnessed flat before the first fill
+- **THEN** the chain's rounds resolve and its closed positions appear in the review, matching what the exchange's own app lists
+
+#### Scenario: The snapshot contradicts the held fills
+
+- **WHEN** the account still holds contracts the held fills never delivered
+- **THEN** no boundary is proven, the withheld rounds stay withheld, and the missing terminal remains an acquisition target
+
+#### Scenario: A chain that begins by realizing PnL
+
+- **WHEN** the first held fill of a chain realizes PnL even though the trial terminal would land on the snapshot
+- **THEN** the flat-base assumption is rejected and the chain stays withheld

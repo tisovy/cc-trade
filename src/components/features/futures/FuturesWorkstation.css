@@ -2529,6 +2529,12 @@
   color: #93a6b7;
 }
 
+/* The one money figure on a closed row, held at the same weight as the open
+   table's money. Bold on the operator's word (2026-08-23). */
+.futures-workstation-dock-row.is-rounds .futures-workstation-dock-pnl {
+  font-weight: 700;
+}
+
 .futures-workstation-dock-close,
 .futures-workstation-dock-cancel {
   padding: 4px 10px;

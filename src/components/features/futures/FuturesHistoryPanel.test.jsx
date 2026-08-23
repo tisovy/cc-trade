@@ -5,6 +5,7 @@ import FuturesHistoryPanel, {
   FUTURES_CLOSED_POSITION_WINDOW_STEP,
 } from './FuturesHistoryPanel.jsx'
 import FuturesPortfolioDock from './FuturesPortfolioDock.jsx'
+import { NotificationContext } from '../../../context/NotificationContext.js'
 import { buildFuturesTradeRounds } from '../../../utils/futuresTradeRounds.js'
 
 const ticks = Object.freeze({
@@ -766,8 +767,8 @@ describe('FuturesHistoryPanel', () => {
     )
   })
 
-  it('keeps Closed values visible through every v2 settled-resource state and exposes retry', () => {
-    const onRetrySettledIncome = vi.fn()
+  it('keeps Closed values qualified through every settled state and moves failure to the popup', () => {
+    const notifyError = vi.fn()
     const resource = (status, overrides = {}) => ({
       version: 2,
       status,
@@ -776,19 +777,20 @@ describe('FuturesHistoryPanel', () => {
       ...overrides,
     })
     const panel = settledIncome => (
-      <FuturesHistoryPanel
-        view="tradeHistory"
-        symbol="BTCUSDT"
-        tickSizes={ticks}
-        history={history}
-        settledIncome={settledIncome}
-        onRetrySettledIncome={onRetrySettledIncome}
-        tradeRoundIndex={{
-          closed: [indexedClosedRound()],
-          unresolved: [],
-          sharedAdjustments: [],
-        }}
-      />
+      <NotificationContext.Provider value={{ notifyError }}>
+        <FuturesHistoryPanel
+          view="tradeHistory"
+          symbol="BTCUSDT"
+          tickSizes={ticks}
+          history={history}
+          settledIncome={settledIncome}
+          tradeRoundIndex={{
+            closed: [indexedClosedRound()],
+            unresolved: [],
+            sharedAdjustments: [],
+          }}
+        />
+      </NotificationContext.Provider>
     )
     const walletResult = () => within(screen.getByRole('row', { name: /BTCUSDT/ }))
       .getAllByRole('cell')[6]
@@ -802,40 +804,50 @@ describe('FuturesHistoryPanel', () => {
       expect(result.getAttribute('title')).not.toContain('Wallet Net')
     }
 
+    // No settled state takes a banner into the panel any more: the operator
+    // ruled the inline narration noise, so the rows qualify themselves and a
+    // failed refresh is announced once in the popup channel instead.
     const { rerender } = render(panel(resource('loading')))
-    expect(screen.getByRole('status')).toHaveTextContent(
-      'Wallet adjustments are loading. Confirmed values remain visible but qualified.',
-    )
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
     expectQualifiedRetainedValue()
+    expect(notifyError).not.toHaveBeenCalled()
 
     rerender(panel(resource('ready', { successfulAt: 1_784_000_100_000 })))
-    expect(screen.getByRole('status')).toHaveTextContent('Wallet adjustments ready · verified')
-    expect(screen.queryByRole('button', { name: 'Retry wallet adjustments' }))
-      .not.toBeInTheDocument()
     expect(walletResult().getAttribute('title')).toContain('Wallet Net: +9 USDT')
     expect(walletResult().getAttribute('title')).not.toContain('Visible net')
+    expect(notifyError).not.toHaveBeenCalled()
 
-    rerender(panel(resource('stale', {
+    const failed = () => resource('stale', {
       successfulAt: 1_784_000_100_000,
       error: { code: 'FUTURES_API_ERROR', message: 'Funding verification failed.' },
-    })))
-    expect(screen.getByRole('alert')).toHaveTextContent('Funding verification failed.')
-    expect(screen.getByRole('alert')).toHaveTextContent('Showing the confirmed reading from')
+    })
+    rerender(panel(failed()))
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Retry wallet adjustments' }))
+      .not.toBeInTheDocument()
     expectQualifiedRetainedValue()
-    fireEvent.click(screen.getByRole('button', { name: 'Retry wallet adjustments' }))
+    expect(notifyError).toHaveBeenCalledTimes(1)
+    expect(notifyError.mock.calls[0][0]).toContain('Funding verification failed.')
+    expect(notifyError.mock.calls[0][0]).toContain('confirmed reading from')
+    expect(notifyError.mock.calls[0][0]).toContain('Press \u21bb to retry.')
 
+    // Still failed on a later render: one failure is one announcement.
+    rerender(panel(failed()))
+    expect(notifyError).toHaveBeenCalledTimes(1)
+
+    // Recovered, then failed anew: that is a new episode and is announced.
+    rerender(panel(resource('ready', { successfulAt: 1_784_000_200_000 })))
     rerender(panel(resource('error', {
       error: { code: 'FUTURES_API_ERROR', message: 'Wallet history is unavailable.' },
     })))
-    expect(screen.getByRole('alert')).toHaveTextContent('Wallet history is unavailable.')
     expectQualifiedRetainedValue()
-    fireEvent.click(screen.getByRole('button', { name: 'Retry wallet adjustments' }))
+    expect(notifyError).toHaveBeenCalledTimes(2)
+    expect(notifyError.mock.calls[1][0]).toContain('Wallet history is unavailable.')
 
+    // Never-read is not a failure and says nothing anywhere.
     rerender(panel(resource('idle')))
-    expect(screen.getByRole('status')).toHaveTextContent('Wallet adjustments have not been read.')
     expectQualifiedRetainedValue()
-    fireEvent.click(screen.getByRole('button', { name: 'Retry wallet adjustments' }))
-    expect(onRetrySettledIncome).toHaveBeenCalledTimes(3)
+    expect(notifyError).toHaveBeenCalledTimes(2)
   })
 
   it('keeps closed shared-adjustment DOM identity when reconciliation reorders and extends it', () => {

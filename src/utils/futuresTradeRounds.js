@@ -1414,6 +1414,11 @@ const partialFillConflictsWithCanonical = (fill, canonical) => {
 export const buildFuturesTradeRoundIndex = (trades, {
   coverage = {},
   positions = null,
+  // Whether `positions` is the account's complete open-position set, so that a
+  // key absent from it is authoritative evidence of a flat position — not
+  // merely a snapshot that has not arrived yet. Only a complete snapshot may
+  // anchor a chain's left boundary backward from its terminal state.
+  snapshotComplete = false,
   generation = null,
   pageLimit = DEFAULT_HISTORY_PAGE_LIMIT,
   settlementDigits = DEFAULT_SETTLEMENT_DIGITS,
@@ -1530,10 +1535,39 @@ export const buildFuturesTradeRoundIndex = (trades, {
         continuityComplete: false,
       })
     }
-    const foldResult = foldContractFills(entries, {
+    const snapshot = snapshots === null ? null : snapshots.get(positionKey) ?? null
+    let foldResult = foldContractFills(entries, {
       leftBoundaryProven: positionCoverage.flatBoundary,
       settlementDigits: digits,
     })
+    // The left boundary can also be proven backward, from the right. If a fold
+    // that assumes the chain began flat conserves every fill, never has to read
+    // a round as continuing something older (no partial rounds, every round
+    // from flat — the fold itself rejects the assumption when an opening fill
+    // realizes PnL), and lands exactly on the authoritative account snapshot,
+    // then the assumption is arithmetic rather than faith: the sum of held
+    // fills equals the present position only when the position before them was
+    // zero. Missing older fills would shift the terminal by exactly their net.
+    // Only a complete snapshot may say "absent means flat", and a coverage
+    // record that already proved the boundary forward needs no trial.
+    if (snapshotComplete && snapshots !== null && positionCoverage.flatBoundary !== true) {
+      const trial = foldContractFills(entries, {
+        leftBoundaryProven: true,
+        settlementDigits: digits,
+      })
+      const anchored = trial.fillConservation.conserved === true
+        && trial.rounds.every(round => (
+          round.flatBoundaryProven === true && round.partial !== true
+        ))
+        && terminalMatchesSnapshot(terminalExposureOf(trial.rounds, leg), snapshot, leg, digits)
+      if (anchored) {
+        foldResult = trial
+        positionCoverage = Object.freeze({
+          ...positionCoverage,
+          leftBoundaryAnchor: 'terminal-snapshot',
+        })
+      }
+    }
     const folded = foldResult.rounds
     const fillConservation = foldResult.fillConservation
     fillConservationResults.set(positionKey, fillConservation)
@@ -1542,7 +1576,6 @@ export const buildFuturesTradeRoundIndex = (trades, {
       fillConservationComplete: fillConservation.conserved,
     })
     const terminal = terminalExposureOf(folded, leg)
-    const snapshot = snapshots === null ? null : snapshots.get(positionKey) ?? null
     if (snapshots !== null) {
       positionCoverage = Object.freeze({
         ...positionCoverage,
