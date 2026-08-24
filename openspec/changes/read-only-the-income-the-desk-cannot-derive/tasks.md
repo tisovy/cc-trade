@@ -12,7 +12,7 @@
   credits is the net cost and nothing changed; if it is already net of them, the
   old reading added the credit twice and this one does not. A question whose
   answer changes no behaviour is not a gate.
-- [ ] 1.3 **Whether a rebate row names a contract.** Found while auditing, and it
+- [x] 1.3 **Whether a rebate row names a contract.** Found while auditing, and it
   is the one thing above that could still move a number. The desk keeps only
   income rows the exchange named a symbol on — a credit with nothing to attribute
   it to cannot go against a position — so if this account's rebate rows carry no
@@ -20,7 +20,15 @@
   charge whether it is read from the fills or from the income record. That is not
   a defect either way; it decides whether those four kinds are worth 120 weight a
   pass. The probe now prints the count, the split, and the per-kind totals.
-- [ ] 1.4 Whether this account's positions are crossed or isolated. Still worth
+  **Answered by the instrument, 2026-08-24**: every `settled` line in the day's
+  journal reads `rebateRows: 0, rebateSymbolRows: 0, rebateTradeRows: 0` — this
+  account has no rebate rows at all in the seven-day window, so the question is
+  moot on live data and the counters keep answering it for free if one ever
+  appears. Note beside it: the operator is considering enabling BNB fee payment
+  (10% discount); if that happens the fee shape changes and gets its own change.
+- [x] 1.4 Whether this account's positions are crossed or isolated. **Answered
+  by the operator, 2026-08-24: isolated, kept isolated by policy, default ×1
+  isolated on every contract, mirrored in the Binance app.** Still worth
   recording — a crossed funding `ACCOUNT_UPDATE` carries no position message, so
   it says when a settlement happened and never which contract — but it gates
   nothing here: the income record is read for the attribution regardless, and the

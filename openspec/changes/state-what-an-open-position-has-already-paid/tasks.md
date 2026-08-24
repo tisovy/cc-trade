@@ -150,10 +150,12 @@
   2189/2189 against the staged index tree extracted with `git write-tree` +
   `git archive` (the difference is another session's uncommitted tests, which are
   not mine to commit). `npx eslint` clean on all nine touched files.
-- [ ] 5.7 Operator checks one open position's settled money against the Binance
-  app's own figures for the same contract, and confirms the breakdown in the
-  cell's title decomposes to what the app shows. Record in
-  `openspec/live-verification-ledger.md`.
+- [x] 5.7 Confirmed by the operator, 2026-08-24 sitting (desk revision
+  `4d2cb45`), on a VELVETUSDT position opened for the test: the desk read
+  0.37 USDT of commission against the app's 0.38 — a one-cent difference of
+  two independent roundings of the same figure, the same class the ledger's
+  four-rows table already settled as not-a-defect — and uPnL matched the app
+  exactly. Recorded in `openspec/live-verification-ledger.md`.
 - [ ] 5.8 Operator confirms the funding component appears after a funding
   boundary passes with a position open — the read is triggered by the
   `FUNDING_FEE` cause, and that path cannot be exercised from this tree.

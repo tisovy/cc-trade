@@ -137,7 +137,7 @@ that archival implied verification.
 | `bound-depth-delivery-through-standing-stale` | 4.1 | `OUTSTANDING` | `NOT RECORDED` | `NOT RECORDED` | `NOT RECORDED` | Archived 2026-08-20 with the gate open: no journal reading yet of the delivery cadence on a contract whose book stands stale (expect the 200 ms bound, not per-diff delivery); the same reading should say whether the band-edge flapping regime recorded in the change's 5.2 occurs in practice. |
 | `value-filled-orders-at-their-fill-price` | 4.4 | `OUTSTANDING` | `NOT RECORDED` | `NOT RECORDED` | `NOT RECORDED` | Archived 2026-08-20 with the gate open: the operator has not yet read the Filled column against a real gapped or partial fill on the live desk. |
 | `let-the-operator-own-the-margin-mode` | 5.5 | `CONFIRMED` | 2026-08-21 and 2026-08-23 | Production | `NOT RECORDED` | Position half 2026-08-21: the chip stated the reason and no `trade.setMarginType` reached the exchange. Flat half 2026-08-23: BEATUSDT toggled `ISOLATED → CROSSED` from the ticket at 08:26:56Z (`ok`, 1 823 ms), the mode held in the Binance app, two repeat presses answered `-4046 NO_NEED_TO_CHANGE_MARGIN_TYPE` — the exchange itself countersigning the held mode — and a cross BUY LIMIT filled on that contract at 08:28:16Z while two other contracts stood isolated. |
-| `let-the-operator-own-the-margin-mode` | 5.4 | `OUTSTANDING` | `NOT RECORDED` | `NOT RECORDED` | `NOT RECORDED` | Archived 2026-08-23 with this gate open. The record half is closed by the change's 5.6 (zero `trade.setMarginType` in a day of eight starts); the display half is not: with the desk stopped, set a flat contract to cross ×1 in the Binance app, start the desk on it, and confirm it states `CROSS 1×` from the first frame. |
+| `let-the-operator-own-the-margin-mode` | 5.4 | `CONFIRMED` | 2026-08-24 | Production | `4d2cb45` | The record half was closed by the change's 5.6. Display half closed in the 2026-08-24 sitting: with the desk stopped the operator set a flat contract to cross ×1 in the Binance app, restarted, opened that contract and saw `CROSS 1×` immediately — "сразу увидел кросс х1 без морганий". |
 | `find-the-read-that-fails-on-every-start` | 4.2 | `CONFIRMED BY DIAGNOSTIC RECORD` | 2026-08-19 record | Production | `NOT RECORDED` | The 2026-08-19 day carries six `exchange-info` lines with `outcome: "aborted"`, `code: "REQUEST_ABORTED"` at 1–5 ms — the expected losers of superseded generations, now named as such — while genuine failures are separately `REQUEST_DEADLINE_EXCEEDED` at the 10 s deadline. The operator's own reading across a few starts is not recorded; the archived box stays unchecked. |
 
 ## Test-Only Guarantees
@@ -509,3 +509,59 @@ channel, and the one ↻ control also retries the settled reading
 (`show-one-pnl-and-let-the-operator-size-the-dock` tasks 1.7). The popup will
 therefore fire once per session under the chronic-partial fault above — one
 more reason the root cause deserves its owner's sitting.
+
+**Re-read 2026-08-24, after the popup fired at the operator.** Two of the
+open questions above are now answered by code and journal, not by sitting:
+
+- `verified` is 1 only on hourly `verification` passes by construction
+  (`binance-connection.js:3310`) — `verified: 0` on refresh-class passes is
+  labeling, not a broken verification leg. The 2026-08-23 entry's suspicion
+  should not be read through that field.
+- A `partial` within ~2 minutes of a close or funding settlement is the
+  confirmation-debt accounting working: the socket announced a charge, the
+  income row is not yet written, `withFuturesSettledConfirmationDebt` holds
+  the lane `stale` until the confirming pass proves the row. The 2026-08-24
+  18:11:03 popup ("Wallet-adjustment refresh failed … press ↻") fired on
+  exactly that state — all six lanes answered `ok, 200`, nothing failed —
+  and is a mislabel, owned by the new change
+  `say-the-announced-charge-is-still-posting`.
+- What remains the settled-income owner's: whether 2026-08-23's *all-day*
+  partials were a debt that never cleared (a stuck debt is a real fault,
+  distinct from the mislabel), and the still-unobserved live recovery
+  (failure → later verified success without restart).
+
+## The 2026-08-24 Verification Sitting
+
+One sitting against desk revision `4d2cb45`, Production account, run from the
+runbook assembled the same day. Desk restarts in the journal: 17:40:15 UTC
+(bootstrap `restored: 75`, `complete`) and 18:06:47 UTC (`restored: 77`,
+`complete`). No `429` anywhere in the day's journal.
+
+| Change | Task | Status | Evidence |
+|---|---:|---|---|
+| `verify-final-futures-pnl-live-data` | 1.2, startup half | `CONFIRMED` | Operator: an already-open position showed its values immediately after start, before History was first opened. Hedge LONG+SHORT half remains unobserved (did not occur naturally). |
+| `verify-final-futures-pnl-live-data` | 1.4, restart half | `CONFIRMED` | Two restarts with settled data on hand: `restored: 75` then `restored: 77`, both bootstraps `complete`, columns full without operator action ("работает ок"). The failed-refresh → recovery half remains unobserved (proxy-stop step was not run). |
+| `make-futures-upnl-mark-authoritative` | 4.3–4.4 | `CONFIRMED` | uPnL on the test position identical to the app. Mark-vs-chart divergence recognized as designed. Cadence question answered by measurement: the row updates on `@markPrice@1s` — the exchange's 1 Hz stream — so 200 ms is not buyable desk-side. Change archived. |
+| `state-what-an-open-position-has-already-paid` | 5.7 | `CONFIRMED` | Test VELVETUSDT position: desk 0.37 commission vs app 0.38 — one-cent rounding class, already settled as not-a-defect; uPnL exact. 5.8 (funding boundary) did not fall inside the sitting and stays open. |
+| `let-the-operator-own-the-margin-mode` | 5.4 | `CONFIRMED` | Row updated above: `CROSS 1×` from the first frame after an app-side change with the desk down. |
+| `read-only-the-income-the-desk-cannot-derive` | 1.3–1.4 | `ANSWERED` | `rebateRows: 0` across every settled line of the day (no rebate rows on this account; counters keep watching). Operator: positions are isolated by policy, default ×1 isolated everywhere. |
+| `verify-final-futures-pnl-live-data` | 1.5, USDC half | `N/A BY OPERATOR, PERMANENT` | "USDC НИКОГДА не использовал и скорей всего НИКОГДА не буду" — USDC is officially unsupported; if that ever changes it gets its own announced change. Deterministic fixture coverage retained. BNB half is now **suspended, decision pending**: the operator is considering enabling BNB fee payment for the 10% discount — if enabled, BNB commission becomes applicable and needs its own change before the columns can value it. |
+| `show-one-pnl-and-let-the-operator-size-the-dock` | 3.4 | `MISMATCH RECORDED` | Desk listed 11 closed positions, 12 after ↻; the app lists 20 and lazy-loads older ones on scroll. The desk's window is exactly seven days (`coveredMs: 604800000`); the app's history reaches months back. Whether the missing eight are all older than the window start — which would make the count correct but the bound unstated on screen — is the one question the operator must answer before this is a defect or a display gap. |
+| `verify-final-futures-pnl-live-data` / `close-a-round-at-what-reached-the-wallet` / `read-the-settled-money-from-the-newest-end` | 1.1 / 4.5, 6c.3 / 5.2, 9.1 | `MISMATCH RECORDED` | Closed-row sums differ from the app by ~2–3 USDT, and the operator observed the desk's average entry prices are rounded where the app's are not. The tooltip decomposition (realized / commission / funding) was not captured for a disagreeing row; the probe's side-by-side record comparison is the designed instrument and has not run yet (needs `BFK`/`BFS` in the launching shell). Open, next action named below. |
+
+**Defects the sitting surfaced** — both owned by changes filed the same day:
+
+- 18:09:41.958 UTC: first market-close click on the displayed VELVETUSDT
+  position refused `FUTURES_REDUCTION_NOT_CONFIRMED` in 1 ms while the
+  positions reading was being re-stamped (refresh pass started 477 ms before
+  the click, after an 18:09:37 book recovery); second click ten seconds later
+  sent and closed in 349 ms. Owned by `close-the-position-the-desk-is-showing`.
+- 18:11:03 UTC: "Wallet-adjustment refresh failed" popup on a pass in which
+  nothing failed — a confirmation debt from the 18:09:51 close correctly held
+  the resource incomplete and the surface called the wait a failure. Owned by
+  `say-the-announced-charge-is-still-posting`.
+
+**Not run this sitting** and still open: the funding-boundary block (no
+boundary fell in the window), the proxy-stop block (stream states its
+silence; settled failure → recovery), the probe run, and the four-row /
+±2–3 USDT number comparison against the probe's side-by-side output.

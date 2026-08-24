@@ -29,8 +29,19 @@
 
 - [x] 4.1 Run `OPENSPEC_TELEMETRY=0 openspec validate make-futures-upnl-mark-authoritative --strict` and verify it passes
 - [x] 4.2 Run GitNexus `detect_changes` against `main`, confirm only valuation/feed/dock/history flows are affected, and resolve unexpected symbols before commit
-- [ ] 4.3 Compare live row uPnL/ROE/total with Binance mark/position readings through at least one mark change and one tape-only change; keep this unchecked until the operator confirms
-- [ ] 4.4 Archive only after the operator confirms live behavior; otherwise add the observed gap as a tracked task or follow-up change
+- [x] 4.3 Confirmed by the operator, 2026-08-24 sitting (desk revision
+      `4d2cb45`): a position opened for the test read uPnL identical to the
+      Binance app — "цифры одинаковые там и там" — and the tape-only case was
+      seen as the chart price diverging from the mark-valued row, recognized
+      as expected. The operator asked whether the update beat could drop from
+      ~500 ms to 200 ms; measured answer: the row updates on `@markPrice@1s`
+      arrival — the exchange's own 1 Hz mark stream, its fastest offering —
+      so there is no desk-side throttle to lower, and valuing off the tape
+      between marks is exactly what this change removed (the sign flip).
+      Recorded in `openspec/live-verification-ledger.md`.
+- [x] 4.4 Archive authorized: live behavior confirmed above; no observed gap
+      remains. The 200 ms wish is answered by measurement (exchange-bound
+      cadence), not tracked as a task.
 
 ## 5. Post-implementation audit
 
