@@ -12,6 +12,11 @@
       asset, and — in the Binance app — whether Position History's
       "Реализ. PnL" folds the converted fee in. Record all three in
       `openspec/live-verification-ledger.md` before writing the fold.
+- [x] 1.3 Operator ruling recorded, 2026-08-24 evening, from a screenshot of
+      the interim rendering (`0.00 USDT` over `−0.0011811 BNB` on a row
+      face): no per-row BNB line — one USDT number on the face, BNB in the
+      title only; and a single global BNB fee-reserve readout, marked low
+      below 50 USDT equivalent. Folded into the proposal and the spec delta.
 
 ## 2. Spec
 
@@ -29,16 +34,28 @@
       through it: nets include the valuation, `feesByAsset` keeps the exact
       BNB quantities, per-asset wallet conservation stays intact, mixed
       USDT+BNB windows sum exactly + value only the BNB part.
-- [ ] 3.3 Titles name both quantities and the price used; a failed price read
-      renders today's "not included" statement, never a wrong number.
+- [ ] 3.3 Titles name both quantities and the price used; the row face renders
+      one settlement-asset number and never a visible BNB line; a failed
+      price read renders today's "not included" statement, never a wrong
+      number.
+- [ ] 3.4 The BNB fee-reserve readout: one global element stating the Futures
+      wallet's BNB amount and its worth at the current BNBUSDT price (the
+      account snapshot already carries the balance; the same price source as
+      3.1 values it), marked low under 50 USDT equivalent
+      (`FUTURES_BNB_FEE_RESERVE_LOW_USDT = 50`, declared where it is
+      enforced), and stating absence/unreadability instead of a zero that
+      looks like a reading.
 
 ## 4. Proof
 
 - [ ] 4.1 Tests that bite against the current fold: a BNB-fee round's net
       includes the valued commission (fails today — today's net excludes it);
       a mixed-fee round; a price-read failure degrading to "not included";
-      per-asset conservation unchanged. Assert the kline address on the wire
-      for the price source, not only the behavior behind it.
+      per-asset conservation unchanged; the row face carries no visible BNB
+      line (fails against the interim rendering the operator screenshotted);
+      the reserve readout marks low under the bound and states absence
+      honestly. Assert the kline address on the wire for the price source,
+      not only the behavior behind it.
 - [ ] 4.2 Full suite, lint, and the repository guards.
 
 ## 5. Operator gate

@@ -35,6 +35,19 @@ every round. Truthful, and useless for the operator's arithmetic.
   the USDT valuation with the price it used — the column stays one number,
   the decomposition stays exact, and a valuation whose price read failed
   degrades to today's "not included" statement rather than to a wrong number.
+  **Operator ruling, 2026-08-24 evening, from a screenshot of the interim
+  state** (a PnL cell reading `0.00 USDT` over `−0.0011811 BNB`): "не надо
+  это показывать" — the row face never renders the BNB quantity as a second
+  line; one USDT number on the face, the BNB decomposition in the title
+  only. The same ruling as `name-the-quantity-not-the-column`, third time.
+- **A fee-reserve readout, from the same ruling**: "лучше где-то показывать
+  общий запас оставшегося BNB комсы и помечать его если его становится мало
+  <50 USDT эквивалент." The desk shows, once and globally (not per row), the
+  Futures wallet's remaining BNB fee reserve — the BNB amount and its worth
+  at the current BNBUSDT price — and marks it as low when that worth falls
+  below 50 USDT equivalent. The mark matters because Binance's fallback is
+  silent: an empty reserve reverts fees to undiscounted USDT with no
+  announcement, and the low mark is the desk's only warning ahead of it.
 - Mixed windows are first-class: a round whose fills paid partly in USDT and
   partly in BNB (the BNB balance ran out mid-window) sums the USDT fees
   exactly and values only the BNB part.
