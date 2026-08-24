@@ -601,3 +601,27 @@ The operator ran `scripts/probe-futures-settled.mjs` against Production
   conflicts` answered the question anyway.
 - The acquisition-shape section confirms `rebate rows in the window: 0` and
   an all-flat snapshot at run time.
+
+## The BNB Fee Valuation Archive Handoff — 2026-08-24
+
+`value-the-bnb-commission-in-the-result` is implemented (`cd1a42a`, audited
+and corrected in `9307a8f`): a BNB commission is valued at the BNBUSDT close
+of each charge's own minute through `/fapi/v1/klines` (cached per closed
+minute, never a fee-tier guess, never a forming minute), the valuation joins
+the round net and the open position's settled money while `feesByAsset` and
+per-asset wallet conservation stay untouched, the row face shows one USDT
+number with the BNB decomposition in the title, an unreadable price degrades
+to the "not included" statement, and the dock carries the global BNB
+fee-reserve readout (amount and worth, low under 50 USDT equivalent, absence
+and unreadability stated as themselves). Deterministic coverage bites: the
+valued-net, one-number-face, reserve and gate tests all fail against the
+pre-change code; full suite 128 files / 2,912 tests, lint, the four boundary
+guards and the build pass. The operator requested commit and archive; the
+account has not yet paid its first BNB fee, so archive records
+implementation completion and is not live evidence.
+
+| Change | Task / case | Status | Observation date | Account | Desk revision | Evidence / remaining check |
+|---|---:|---|---|---|---|---|
+| `value-the-bnb-commission-in-the-result` | 1.2 | `OUTSTANDING` | `NOT RECORDED` | Production | `9307a8f` | The account's first BNB-fee fill has not happened. To record: the fill's `commissionAsset`/amount on the wire, the matching income row's asset, and whether the Binance app's Position History "Реализ. PnL" folds the converted fee into its own figure — that third fact decides what "agrees with the app" means for 5.1, not the desk's arithmetic. |
+| `value-the-bnb-commission-in-the-result` | 5.1 | `OUTSTANDING` | `NOT RECORDED` | Production | `9307a8f` | First BNB-fee closed round against the Binance app: PnL column agrees to the settled one-cent rounding class; the row title names the BNB quantity, the USDT valuation and the price used; the reserve readout shows the drained amount. Until the first fill, rows state BNB fees as expected and only the reserve readout is observable live. |
+| `value-the-bnb-commission-in-the-result` | 5.1 archive | `ARCHIVE AUTHORIZED WITH LIVE CHECK OUTSTANDING` | 2026-08-24 | Production | `9307a8f` | The operator explicitly requested archive after the audit pass. Tasks 1.2 and 5.1 above remain outstanding here and archive is not their proof. |
