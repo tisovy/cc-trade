@@ -11173,6 +11173,56 @@ describe('setupBinanceConnection user-data orchestration', () => {
         await flushMicrotasks();
     });
 
+    // The literal 2026-08-24 window, without the activation change the test
+    // above adds: same activation, an account refresh mid-re-stamp (the pass
+    // started 477 ms before the click), the resource sitting `loading`. The
+    // click landed inside that window and bounced; it must send.
+    it('sends a reduce-only close while an account refresh is re-stamping the reading', async () => {
+        vi.stubEnv('FUTURES_MAX_ORDER_USDT', '100');
+        const loadPositions = vi.fn()
+            .mockResolvedValueOnce({
+                futures_positions: [{
+                    symbol: 'BTCUSDT', positionSide: 'LONG', quantity: '2',
+                    entryPrice: '50000', markPrice: '50000', unrealizedPnl: '0',
+                }],
+            })
+            .mockImplementation(() => new Promise(() => {}));
+        moduleMocks.futuresAdapter.getAccountRefreshOperations.mockReturnValue([{
+            type: 'positions', weight: 5, errorLabel: 'positions', loadPayload: loadPositions,
+        }]);
+        await connectRenderer();
+        await vi.advanceTimersByTimeAsync(2_000);
+        await flushMicrotasks();
+
+        // The operator's refresh: the second read hangs, holding the positions
+        // resource mid-re-stamp exactly as the 18:09:41.481 pass did.
+        const refresh = moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({
+                action: 'account.refresh', version: 1, marketType: 'futures',
+            }),
+        });
+        await vi.advanceTimersByTimeAsync(100);
+        await flushMicrotasks();
+
+        const close = moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({
+                action: 'trade.placeOrder', version: 1, marketType: 'futures',
+                symbol: 'BTCUSDT', side: 'SELL', orderType: 'MARKET', quantity: '1',
+                positionSide: 'LONG', reduceOnly: true,
+            }),
+        });
+        await vi.advanceTimersByTimeAsync(2_000);
+        await close;
+
+        expect(moduleMocks.futuresAdapter.placeOrder).toHaveBeenCalledOnce();
+        expect(emitted().some(payload => (
+            payload.command_rejected?.code === 'FUTURES_REDUCTION_NOT_CONFIRMED'
+        ))).toBe(false);
+        void refresh;
+    });
+
     // The operator's ruling of 2026-08-24: a close ordered while the desk has
     // no proof at all holds for the in-flight pass and fires at the first
     // reading that proves it — it is not bounced back for a retry.

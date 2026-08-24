@@ -170,10 +170,13 @@ export const summarizeDeskDiagnosticRecord = (text) => {
     if (line.kind === 'outcome' && (line.result === 'rejected' || line.result === 'unresolved')) {
       // Named with the market for the same reason answers are: the markets do
       // not share a code namespace, so one merged count reads as one problem
-      // when there may be two.
+      // when there may be two. A desk-side refusal has no exchange code but
+      // may name its own condition (`cause`, since 2026-08-24) — folding those
+      // into "(the exchange stated none)" would hide exactly the difference
+      // the named condition exists to state.
       bump(
         refusals,
-        `${line.exchangeCode ?? '(the exchange stated none)'}`
+        `${line.cause ?? line.exchangeCode ?? '(the exchange stated none)'}`
         + `[${typeof line.market === 'string' ? line.market : '-'}]`,
       )
     }
@@ -414,7 +417,9 @@ export const formatDeskDiagnosticSummary = (summary, { day = null } = {}) => {
   // empty heading saying so.
   if (summary.refusals.length > 0) {
     const refused = summary.refusals.reduce((sum, entry) => sum + entry.count, 0)
-    out.push('', `Refusals by the code the exchange gave (${refused})`)
+    // "Cause" is whichever word the line carries: the exchange's own code, or
+    // the condition a desk-side refusal named for itself.
+    out.push('', `Refusals by cause (${refused})`)
     for (const { key, count } of summary.refusals) {
       out.push(`  ${String(count).padStart(6)}  ${key}`)
     }

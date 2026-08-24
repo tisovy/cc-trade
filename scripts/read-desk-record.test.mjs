@@ -81,16 +81,35 @@ describe('summarizeDeskDiagnosticRecord', () => {
 
   // "Nine orders refused, all -2019" is one cause. "Nine FUTURES_API_ERROR" is
   // what the record said before the exchange's own word was kept.
-  it('counts refusals by the code the exchange gave', () => {
+  it('counts refusals by the cause the line names', () => {
     expect(summary.refusals).toEqual([
       { key: '-2019[futures]', count: 2 },
       { key: '(the exchange stated none)[futures]', count: 1 },
       { key: '-4164[futures]', count: 1 },
     ])
     const report = formatDeskDiagnosticSummary(summary)
-    expect(report).toContain('Refusals by the code the exchange gave (4)')
+    expect(report).toContain('Refusals by cause (4)')
     // The command that ended well is a warning being withdrawn, not a refusal.
     expect(summary.kinds.find(entry => entry.key === 'outcome').count).toBe(5)
+  })
+
+  // A desk-side refusal asked the exchange nothing, but since 2026-08-24 it
+  // names its own condition. Five NO_READING evenings and five SIDE_MISMATCH
+  // evenings are different problems, and the summary must not fold them back
+  // into one "(the exchange stated none)" bucket — that fold is the exact
+  // archaeology the named cause exists to end.
+  it('counts a desk refusal by the condition it named', () => {
+    const named = summarizeDeskDiagnosticRecord([
+      line({ at: '2026-08-24T18:09:41.958Z', kind: 'outcome', action: 'trade.placeOrder', result: 'rejected', code: 'FUTURES_REDUCTION_NOT_CONFIRMED', market: 'futures', symbol: 'VELVETUSDT', identity: 'f-1', cause: 'NO_READING', exchangeCode: null }),
+      line({ at: '2026-08-24T18:10:00.000Z', kind: 'outcome', action: 'trade.placeOrder', result: 'rejected', code: 'FUTURES_REDUCTION_NOT_CONFIRMED', market: 'futures', symbol: 'VELVETUSDT', identity: 'f-2', cause: 'NO_READING', exchangeCode: null }),
+      line({ at: '2026-08-24T18:11:00.000Z', kind: 'outcome', action: 'trade.placeOrder', result: 'rejected', code: 'FUTURES_REDUCTION_NOT_CONFIRMED', market: 'futures', symbol: 'VELVETUSDT', identity: 'f-3', cause: 'SIDE_MISMATCH', exchangeCode: null }),
+      line({ at: '2026-08-24T18:12:00.000Z', kind: 'outcome', action: 'trade.placeOrder', result: 'rejected', code: 'FUTURES_API_ERROR', market: 'futures', symbol: 'VELVETUSDT', identity: 'f-4', exchangeCode: '-2019' }),
+    ].join(''))
+    expect(named.refusals).toEqual([
+      { key: 'NO_READING[futures]', count: 2 },
+      { key: '-2019[futures]', count: 1 },
+      { key: 'SIDE_MISMATCH[futures]', count: 1 },
+    ])
   })
 
   it('counts the same code apart per market', () => {

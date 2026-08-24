@@ -18,7 +18,11 @@
 ## 2. Spec
 
 - [x] 2.1 Delta under `trading-command-integrity`: a displayed position closes
-      on the first command; a reduction refusal names its cause.
+      on the first command; a reduction refusal names its cause. Self-audit
+      added a `desk-diagnostic-record` delta: the outcome line may carry the
+      desk-named condition (amount-proof shape), and the summary counts desk
+      refusals by that condition instead of folding them into one uncoded
+      bucket.
 
 ## 3. Code
 
@@ -38,6 +42,10 @@
       `LEG_MISMATCH` / `SIDE_MISMATCH`. `details.cause` on the rejection, a
       `cause` field (tolerated, code-shaped) on the record's `outcome` kind,
       a per-cause message, and the ticket shows the cause beside the code.
+      Self-audit: `read-desk-record.mjs` refusal summary now keys a desk
+      refusal by its named condition (`NO_READING[futures]`), not by the
+      absent exchange code — the old fold was the same archaeology by
+      another door.
 
 ## 4. Proof
 
@@ -53,7 +61,14 @@
       cause display each failed before the fix and pass after. The wrong-
       reduction batch and the cap-exemption proof (MARKET order through an
       active cap) stay green as sentinels — they refused before and refuse
-      still, now by name.
+      still, now by name. Self-audit added the literal episode variant —
+      same activation, `account.refresh` re-stamping the reading, click
+      inside the window — run against the pre-change guard first (refused)
+      and against the fix (sent); the reader-summary cause test bit the same
+      way. Noted, not fixed: the pause flag is not re-checked after the
+      hold — the same sub-second window already exists behind the limiter
+      queue for every accepted command, and closing one door of the two
+      would be a claim, not a property.
 - [x] 4.2 Full suite, lint, and the repository guards: `npx vitest run`
       2872/2872 green, `npx eslint` clean on every touched file,
       `check-circular-imports` / `check-runtime-mock-layer` /
