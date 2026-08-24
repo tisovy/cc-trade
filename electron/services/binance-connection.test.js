@@ -11260,6 +11260,73 @@ describe('setupBinanceConnection user-data orchestration', () => {
         ))).toBe(false);
     });
 
+    // The pause gate runs before the hold, and the hold is the one await the
+    // proof added between that gate and the wire. A pause thrown while the
+    // close waits for its reading must still hold: nothing leaves a paused
+    // desk. Resuming and clicking again sends — the refusal was the pause.
+    it('refuses a held close that was paused mid-hold, and sends it after resume', async () => {
+        vi.stubEnv('FUTURES_MAX_ORDER_USDT', '100');
+        let resolvePositions;
+        const firstReading = new Promise((resolve) => { resolvePositions = resolve; });
+        const loadPositions = vi.fn().mockImplementation(() => firstReading);
+        moduleMocks.futuresAdapter.getAccountRefreshOperations.mockReturnValue([{
+            type: 'positions', weight: 5, errorLabel: 'positions', loadPayload: loadPositions,
+        }]);
+        await connectRenderer();
+
+        const close = moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({
+                action: 'trade.placeOrder', version: 1, marketType: 'futures',
+                symbol: 'BTCUSDT', side: 'SELL', orderType: 'MARKET', quantity: '1',
+                positionSide: 'LONG', reduceOnly: true,
+            }),
+        });
+        await vi.advanceTimersByTimeAsync(100);
+        await moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({
+                action: 'trade.setTradingPaused', version: 1, marketType: 'futures',
+                paused: true,
+            }),
+        });
+        resolvePositions({
+            futures_positions: [{
+                symbol: 'BTCUSDT', positionSide: 'LONG', quantity: '2',
+                entryPrice: '50000', markPrice: '50000', unrealizedPnl: '0',
+            }],
+        });
+        await vi.advanceTimersByTimeAsync(500);
+        await close;
+
+        expect(moduleMocks.futuresAdapter.placeOrder).not.toHaveBeenCalled();
+        expect(emitted().some(payload => (
+            payload.command_rejected?.code === 'FUTURES_TRADING_PAUSED'
+        ))).toBe(true);
+        expect(emitted().some(payload => (
+            payload.command_rejected?.code === 'FUTURES_REDUCTION_NOT_CONFIRMED'
+        ))).toBe(false);
+
+        await moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({
+                action: 'trade.setTradingPaused', version: 1, marketType: 'futures',
+                paused: false,
+            }),
+        });
+        const retry = moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({
+                action: 'trade.placeOrder', version: 1, marketType: 'futures',
+                symbol: 'BTCUSDT', side: 'SELL', orderType: 'MARKET', quantity: '1',
+                positionSide: 'LONG', reduceOnly: true,
+            }),
+        });
+        await vi.advanceTimersByTimeAsync(500);
+        await retry;
+        expect(moduleMocks.futuresAdapter.placeOrder).toHaveBeenCalledOnce();
+    });
+
     // No successful positions reading has ever existed and none arrives inside
     // the bounded hold: the refusal fires at the bound and names the condition.
     it('refuses a reduce-only order by name when the bounded hold ends without a reading', async () => {

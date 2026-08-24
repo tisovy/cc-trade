@@ -65,10 +65,12 @@
       same activation, `account.refresh` re-stamping the reading, click
       inside the window — run against the pre-change guard first (refused)
       and against the fix (sent); the reader-summary cause test bit the same
-      way. Noted, not fixed: the pause flag is not re-checked after the
-      hold — the same sub-second window already exists behind the limiter
-      queue for every accepted command, and closing one door of the two
-      would be a claim, not a property.
+      way. The pause flag is re-checked after the hold on the operator's
+      order — the hold is the one await the proof added between the pause
+      gate and the wire, and a close paused mid-hold now refuses
+      `FUTURES_TRADING_PAUSED` and sends on resume + reclick (test bit:
+      the unfixed gate sent it). The limiter-queue window after submission
+      is inherent and remains.
 - [x] 4.2 Full suite, lint, and the repository guards: `npx vitest run`
       2872/2872 green, `npx eslint` clean on every touched file,
       `check-circular-imports` / `check-runtime-mock-layer` /

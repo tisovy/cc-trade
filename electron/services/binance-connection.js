@@ -5681,6 +5681,19 @@ export function setupBinanceConnection({
                     && (verdict.cause === 'NO_READING' || verdict.cause === 'STALE_READING')
                     && futuresTradingAdapter) {
                     verdict = await holdFuturesReductionForProof(order);
+                    // The pause gate ran before the hold, and the hold is the
+                    // one await between that gate and the wire. An operator who
+                    // threw the switch while this close waited said something
+                    // newer than the click: nothing leaves a paused desk.
+                    if (futuresTradingPaused) {
+                        emit(createCommandRejection(
+                            TRADING_COMMAND_ACTIONS.PLACE_ORDER,
+                            'FUTURES_TRADING_PAUSED',
+                            'Futures trading is paused — resume to place orders.',
+                            { marketType: FUTURES_MARKET_TYPE },
+                        ));
+                        return;
+                    }
                 }
                 if (!verdict.confirmed) {
                     emit(createCommandRejection(
