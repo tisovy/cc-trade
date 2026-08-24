@@ -415,6 +415,13 @@ const RECORDED_FIELDS = Object.freeze({
         ['market', optional(text(MARKET))],
         ['symbol', optional(text(SYMBOL))],
         ['identity', optional(identity)],
+        // Which condition of a desk refusal failed, when the code alone cannot
+        // say. `FUTURES_REDUCTION_NOT_CONFIRMED` stood for five causes on
+        // 2026-08-24 and the refusal of a live close had to be diagnosed from
+        // the lines around it. Same shape as a code; `tolerated` for the same
+        // reason the exchange's own code is — a cause this record will not
+        // repeat costs the cause, never the refusal.
+        ['cause', tolerated(text(CODE))],
         // `FUTURES_API_ERROR` above is the desk's word for every refusal there
         // is. This is the exchange's own, and it is the difference between an
         // evening of refusals being one cause or five.
@@ -497,6 +504,9 @@ export const readDeskDiagnosticOutboundEvent = (payload) => {
             market: details?.marketType ?? null,
             symbol: details?.symbol ?? null,
             identity: details?.orderId ?? details?.origClientOrderId ?? details?.clientOrderId ?? null,
+            // Present when the desk's own refusal names which condition failed;
+            // absent on every other outcome.
+            cause: details?.cause ?? null,
             // Present on every envelope the exchange itself refused; absent on
             // the desk's own refusals, which never asked it anything.
             exchangeCode: details?.binanceCode ?? null,

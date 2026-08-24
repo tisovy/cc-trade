@@ -974,8 +974,38 @@ describe('the events the desk states to the renderer', () => {
             market: 'futures',
             symbol: 'BTCUSDT',
             identity: 'f-m9x2k1-4a7bd0e2',
+            cause: null,
             exchangeCode: null,
         });
+    });
+
+    // The desk's own refusal used to carry one code for five causes; the
+    // 2026-08-24 close refusal had to be diagnosed from the lines around it.
+    // The condition that failed now rides the outcome line, in the same
+    // uppercase shape as a code, and one this record will not repeat costs the
+    // cause and never the refusal.
+    it('carries the named condition of a desk refusal, and drops one it cannot vouch for', () => {
+        const refusal = cause => readDeskDiagnosticOutboundEvent({
+            command_rejected: {
+                request: 'trade.placeOrder',
+                code: 'FUTURES_REDUCTION_NOT_CONFIRMED',
+                message: 'The reduce-only order was not sent.',
+                details: { marketType: 'futures', symbol: 'VELVETUSDT', cause },
+                timestamp: AT,
+            },
+        });
+
+        expect(refusal('NO_READING')).toMatchObject({
+            kind: 'outcome',
+            result: 'rejected',
+            code: 'FUTURES_REDUCTION_NOT_CONFIRMED',
+            cause: 'NO_READING',
+        });
+        expect(refusal('SIDE_MISMATCH')).toMatchObject({ cause: 'SIDE_MISMATCH' });
+        // A refusal that states no condition still keeps its line.
+        expect(refusal(undefined)).toMatchObject({ kind: 'outcome', cause: null });
+        // A shape that could spell an amount is refused as the field, not the line.
+        expect(refusal('49.6 over the leg')).toMatchObject({ kind: 'outcome', cause: null });
     });
 
     // `FUTURES_API_ERROR` is the desk's word for every refusal there is. These

@@ -36,6 +36,10 @@ export const FUTURES_ACCOUNT_READ_REASONS = Object.freeze([
     'unresolved',
     // Leverage or margin mode moved, which moves what stands behind a position.
     'setting',
+    // A held reduce-only order is waiting on the positions it claims to close:
+    // the desk has no reading it can prove the reduction against and asked for
+    // one rather than refusing the operator's close on sight.
+    'proof',
 ]);
 
 /**
@@ -53,6 +57,10 @@ export const FUTURES_URGENT_ACCOUNT_READ_REASONS = Object.freeze(new Set([
     'command',
     'unresolved',
     'setting',
+    // A close is standing still until this read answers, and its hold is
+    // bounded in the hundreds of milliseconds — the one read that must not
+    // queue behind housekeeping.
+    'proof',
 ]));
 
 /**

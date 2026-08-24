@@ -1262,6 +1262,12 @@ const FuturesTradingTicket = ({
           <section className="futures-production-backend-card is-rejected" aria-label="Futures command rejection">
             <strong>
               {lastError.code}
+              {/* The failed condition of a desk-side refusal, where the
+                  exchange's code would sit — one code stood for five causes
+                  until 2026-08-24. */}
+              {lastError.details?.cause == null
+                ? ''
+                : ` · ${lastError.details.cause}`}
               {lastError.details?.binanceCode == null
                 ? ''
                 : ` · Binance ${lastError.details.binanceCode}`}

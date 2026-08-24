@@ -17,28 +17,48 @@
 
 ## 2. Spec
 
-- [ ] 2.1 Delta under `trading-command-integrity`: a displayed position closes
+- [x] 2.1 Delta under `trading-command-integrity`: a displayed position closes
       on the first command; a reduction refusal names its cause.
 
 ## 3. Code
 
-- [ ] 3.1 Confirm the reduction against the newest successful positions
+- [x] 3.1 Confirm the reduction against the newest successful positions
       reading even during a re-stamp (in-flight refresh, bumped activation
       generation). No successful reading at all → hold the command (bounded)
       for the in-flight pass; refuse only on disagreement or on the bound.
-- [ ] 3.2 The rejection detail and the journal `outcome` line carry the failed
+      `assessFuturesReduction` proves against the newest successful reading
+      (`lastSuccessfulAt`/`updatedAt`, status and activation generation no
+      longer consulted); `holdFuturesReductionForProof` holds up to 900 ms,
+      polling every 25 ms, and asks for the positions itself under the new
+      urgent read reason `proof`. Evidence older than 15 minutes takes the
+      same hold instead of confirming; the bound expiring unread refuses as
+      `STALE_READING`.
+- [x] 3.2 The rejection detail and the journal `outcome` line carry the failed
       condition: `NO_READING` / `STALE_READING` / `QUANTITY_EXCEEDS_LEG` /
-      `LEG_MISMATCH` / `SIDE_MISMATCH`.
+      `LEG_MISMATCH` / `SIDE_MISMATCH`. `details.cause` on the rejection, a
+      `cause` field (tolerated, code-shaped) on the record's `outcome` kind,
+      a per-cause message, and the ticket shows the cause beside the code.
 
 ## 4. Proof
 
-- [ ] 4.1 Tests that bite against the current guard: a reduce-only close
+- [x] 4.1 Tests that bite against the current guard: a reduce-only close
       arriving between an activation-generation bump and the positions
       re-stamp is sent, not refused (fails today); a refusal carries its named
       cause (fails today); a genuinely wrong reduction (leg/side/quantity) is
       still refused; the hedge-mode exposure-cap exemption still requires a
-      proved leg.
-- [ ] 4.2 Full suite, lint, and the repository guards.
+      proved leg. All seven new/updated assertions were run against the
+      pre-change tree first: the re-stamp send, the hold-then-send at first
+      proof, the named `NO_READING` bound, the named `STALE_READING` bound,
+      the five-cause batch, the journal `outcome` cause, and the ticket's
+      cause display each failed before the fix and pass after. The wrong-
+      reduction batch and the cap-exemption proof (MARKET order through an
+      active cap) stay green as sentinels — they refused before and refuse
+      still, now by name.
+- [x] 4.2 Full suite, lint, and the repository guards: `npx vitest run`
+      2872/2872 green, `npx eslint` clean on every touched file,
+      `check-circular-imports` / `check-runtime-mock-layer` /
+      `check-futures-workstation-boundaries` / `check-trading-command-path`
+      all pass.
 
 ## 5. Operator gate
 

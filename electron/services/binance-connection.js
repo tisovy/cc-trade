@@ -5522,35 +5522,115 @@ export function setupBinanceConnection({
         // the flag itself and relies on side + positionSide, so blindly trusting
         // it here would exempt a contradictory order from the exposure cap and
         // the adapter would then submit an ordinary exposure-increasing order.
-        // Prove the claim against a current successful positions reading.
-        const isConfirmedFuturesReduction = (order) => {
+        // Prove the claim against the newest successful positions reading.
+        //
+        // The newest reading, not a "current" one. On 2026-08-24 the desk
+        // refused to close the position it was itself displaying because a
+        // refresh pass had the reading mid-re-stamp when the click landed; the
+        // row on screen was drawn from the very reading the guard discarded. A
+        // re-stamp in flight — or a bumped activation generation waiting on its
+        // first snapshot — does not void evidence this process read from this
+        // account; only age beyond the proof bound does, and then the command
+        // is held for a fresh reading rather than bounced (`proof` read).
+        const FUTURES_REDUCTION_EVIDENCE_MAX_AGE_MS = 15 * 60_000;
+        // The hold is bounded and sub-second: past it, a refusal that names its
+        // condition beats a command sitting silently. A signed read through the
+        // operator's proxy answers in 340–800 ms; a positions read that cannot
+        // land inside this bound describes an exchange path the order itself
+        // could not have travelled either.
+        const FUTURES_REDUCTION_PROOF_WAIT_MS = 900;
+        const FUTURES_REDUCTION_PROOF_POLL_MS = 25;
+
+        // The newest successful positions reading, whatever the resource's
+        // status says about the pass re-confirming it. `updatedAt` counts too:
+        // a stream fold is the exchange stating the position, newer than the
+        // read it landed on.
+        const newestFuturesPositionsReading = () => {
             const resource = futuresAccountResources.positions;
-            const resourceCurrent = resource?.status === 'ready'
-                && resource?.lastSuccessfulAt !== null
-                && resource?.lastSuccessfulAt !== undefined
-                && futuresPositionsActivationGeneration === futuresActivationGeneration;
-            if (!resourceCurrent || !Array.isArray(resource?.data)) return false;
-            const requested = Number(order?.numericQuantity);
-            if (!Number.isFinite(requested) || requested <= 0) return false;
-            const orderSide = String(order?.side ?? '').toUpperCase();
-            const requestedLeg = String(order?.positionSide ?? '').toUpperCase();
-            if (!['LONG', 'SHORT', 'BOTH'].includes(requestedLeg)) return false;
-            return resource.data.some((position) => {
-                if (String(position?.symbol ?? '').toUpperCase()
-                    !== String(order?.symbol ?? '').toUpperCase()) return false;
-                const openQuantity = Number(position?.quantity);
-                if (!Number.isFinite(openQuantity) || openQuantity === 0
-                    || requested > Math.abs(openQuantity)) return false;
-                const heldLeg = String(position?.positionSide ?? 'BOTH').toUpperCase();
-                if (heldLeg !== requestedLeg) return false;
-                const closeSide = heldLeg === 'SHORT'
-                    ? 'BUY'
-                    : heldLeg === 'LONG'
-                        ? 'SELL'
-                        : openQuantity > 0 ? 'SELL' : 'BUY';
-                return orderSide === closeSide;
-            });
+            if (resource?.lastSuccessfulAt === null
+                || resource?.lastSuccessfulAt === undefined
+                || !Array.isArray(resource?.data)) return null;
+            return {
+                rows: resource.data,
+                statedAt: Math.max(resource.lastSuccessfulAt, resource.updatedAt ?? 0),
+            };
         };
+
+        // One verdict, five named conditions. Which one failed is the
+        // difference between a transient reading gap and a wrong order, and on
+        // 2026-08-24 that difference had to be assembled from journal lines
+        // around the refusal instead of read off it.
+        const assessFuturesReduction = (order) => {
+            const refusal = cause => ({ confirmed: false, cause });
+            const reading = newestFuturesPositionsReading();
+            if (reading === null) return refusal('NO_READING');
+            if (Date.now() - reading.statedAt > FUTURES_REDUCTION_EVIDENCE_MAX_AGE_MS) {
+                return refusal('STALE_READING');
+            }
+            const requested = Number(order?.numericQuantity);
+            if (!Number.isFinite(requested) || requested <= 0) {
+                return refusal('QUANTITY_EXCEEDS_LEG');
+            }
+            const requestedLeg = String(order?.positionSide ?? '').toUpperCase();
+            if (!['LONG', 'SHORT', 'BOTH'].includes(requestedLeg)) {
+                return refusal('LEG_MISMATCH');
+            }
+            const leg = reading.rows.find(position => (
+                String(position?.symbol ?? '').toUpperCase()
+                    === String(order?.symbol ?? '').toUpperCase()
+                && String(position?.positionSide ?? 'BOTH').toUpperCase() === requestedLeg
+            ));
+            const openQuantity = Number(leg?.quantity);
+            if (leg === undefined || !Number.isFinite(openQuantity) || openQuantity === 0) {
+                return refusal('LEG_MISMATCH');
+            }
+            const closeSide = requestedLeg === 'SHORT'
+                ? 'BUY'
+                : requestedLeg === 'LONG'
+                    ? 'SELL'
+                    : openQuantity > 0 ? 'SELL' : 'BUY';
+            if (String(order?.side ?? '').toUpperCase() !== closeSide) {
+                return refusal('SIDE_MISMATCH');
+            }
+            if (requested > Math.abs(openQuantity)) {
+                return refusal('QUANTITY_EXCEEDS_LEG');
+            }
+            return { confirmed: true, cause: null };
+        };
+
+        // Operator ruling, 2026-08-24: closing is never blocked by market-data
+        // state. A close that arrives without provable evidence is held for the
+        // reading and fires at the first proof; only a reading that disagrees —
+        // or a bound that expires still unread — refuses, and then by name.
+        const holdFuturesReductionForProof = async (order) => {
+            const deadline = Date.now() + FUTURES_REDUCTION_PROOF_WAIT_MS;
+            void refreshFuturesAccountState({ resources: ['positions'], reason: 'proof' })
+                .catch(error => reportDetachedFuturesAccountRefreshFailure('proof', error));
+            for (;;) {
+                const verdict = assessFuturesReduction(order);
+                if (verdict.confirmed
+                    || (verdict.cause !== 'NO_READING' && verdict.cause !== 'STALE_READING')
+                    || Date.now() >= deadline) return verdict;
+                await pause(FUTURES_REDUCTION_PROOF_POLL_MS);
+            }
+        };
+
+        const FUTURES_REDUCTION_REFUSALS = Object.freeze({
+            NO_READING: 'No successful positions reading exists to prove the'
+                + ' reduce-only order against, and none arrived within the'
+                + ' bounded wait — it was not sent.',
+            STALE_READING: 'The newest positions reading is older than the desk'
+                + ' trusts for proof and a fresh one did not arrive within the'
+                + ' bounded wait — the reduce-only order was not sent.',
+            QUANTITY_EXCEEDS_LEG: 'The requested quantity exceeds the open leg'
+                + ' in the newest positions reading — the reduce-only order was'
+                + ' not sent.',
+            LEG_MISMATCH: 'The newest positions reading holds no open leg'
+                + ' matching this reduce-only order — it was not sent.',
+            SIDE_MISMATCH: 'This side does not close the leg the newest'
+                + ' positions reading holds — the reduce-only order was not'
+                + ' sent.',
+        });
 
         // FUTURES_MAX_ORDER_USDT, applied here to every exposure-increasing
         // command the main process receives — placement and amendment alike.
@@ -5589,24 +5669,38 @@ export function setupBinanceConnection({
                 ));
                 return;
             }
-            const reductionConfirmed = order.reduceOnly === true
-                && isConfirmedFuturesReduction(order);
-            if (order.reduceOnly === true && !reductionConfirmed) {
-                emit(createCommandRejection(
-                    TRADING_COMMAND_ACTIONS.PLACE_ORDER,
-                    'FUTURES_REDUCTION_NOT_CONFIRMED',
-                    'The requested reduce-only order does not match a current position leg and was not sent.',
-                    {
-                        marketType: FUTURES_MARKET_TYPE,
-                        symbol: order.symbol,
-                        positionSide: order.positionSide ?? null,
-                    },
-                ));
-                return;
+            let reductionConfirmed = false;
+            if (order.reduceOnly === true) {
+                let verdict = assessFuturesReduction(order);
+                // A missing or stale reading is not the order's fault: hold the
+                // command for the in-flight pass instead of bouncing it back to
+                // the operator. Disagreement refuses on the spot — waiting
+                // cannot make a wrong order right. With no adapter no read can
+                // ever land, and the hold would only delay the refusal below.
+                if (!verdict.confirmed
+                    && (verdict.cause === 'NO_READING' || verdict.cause === 'STALE_READING')
+                    && futuresTradingAdapter) {
+                    verdict = await holdFuturesReductionForProof(order);
+                }
+                if (!verdict.confirmed) {
+                    emit(createCommandRejection(
+                        TRADING_COMMAND_ACTIONS.PLACE_ORDER,
+                        'FUTURES_REDUCTION_NOT_CONFIRMED',
+                        FUTURES_REDUCTION_REFUSALS[verdict.cause],
+                        {
+                            marketType: FUTURES_MARKET_TYPE,
+                            symbol: order.symbol,
+                            positionSide: order.positionSide ?? null,
+                            cause: verdict.cause,
+                        },
+                    ));
+                    return;
+                }
+                reductionConfirmed = true;
             }
             // The cap guards new exposure only; reduce-only orders always pass
             // so a proved position can be closed regardless of the cap. A
-            // renderer flag is not proof; the current account leg above is.
+            // renderer flag is not proof; the account leg proved above is.
             if (refuseOverCapFuturesCommand(TRADING_COMMAND_ACTIONS.PLACE_ORDER, {
                 quantity: order.numericQuantity,
                 price: order.numericPrice,

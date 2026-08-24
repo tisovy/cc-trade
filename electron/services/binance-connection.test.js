@@ -11105,9 +11105,25 @@ describe('setupBinanceConnection user-data orchestration', () => {
             .filter(payload => payload.command_rejected?.code === 'FUTURES_REDUCTION_NOT_CONFIRMED');
         expect(unproved).toHaveLength(5);
         expect(unproved[0].command_rejected.details.positionSide).toBeNull();
+        // Each refusal names which condition failed. One code for five causes
+        // is what made the 2026-08-24 episode a journal-archaeology exercise.
+        expect(unproved.map(payload => payload.command_rejected.details.cause)).toEqual([
+            'LEG_MISMATCH',
+            'SIDE_MISMATCH',
+            'LEG_MISMATCH',
+            'QUANTITY_EXCEEDS_LEG',
+            'SIDE_MISMATCH',
+        ]);
     });
 
-    it('rejects a retained position while the current activation snapshot is loading', async () => {
+    // The 2026-08-24 episode, distilled: the desk displayed the position from
+    // its own last successful reading while a fresh activation snapshot was
+    // still loading, and the first market-close click bounced in 1 ms. The
+    // retained reading is the same evidence the row on screen is drawn from,
+    // so the close is proved against it and sent — a re-stamp in flight is not
+    // a reason to refuse. The active cap plus a MARKET order (no price) proves
+    // the exemption came from that retained backend reading, not the flag.
+    it('sends a reduce-only close proved by the retained reading while the fresh snapshot loads', async () => {
         vi.stubEnv('FUTURES_MAX_ORDER_USDT', '100');
         let resolveReplacement;
         const replacement = new Promise((resolve) => { resolveReplacement = resolve; });
@@ -11135,7 +11151,7 @@ describe('setupBinanceConnection user-data orchestration', () => {
         await activateMarket('futures-live');
         await flushMicrotasks();
 
-        await moduleMocks.rendererHandlers.message({
+        const close = moduleMocks.rendererHandlers.message({
             type: 'utf8',
             utf8Data: JSON.stringify({
                 action: 'trade.placeOrder', version: 1, marketType: 'futures',
@@ -11143,16 +11159,120 @@ describe('setupBinanceConnection user-data orchestration', () => {
                 positionSide: 'LONG', reduceOnly: true,
             }),
         });
+        await vi.advanceTimersByTimeAsync(2_000);
+        await close;
 
-        expect(moduleMocks.futuresAdapter.placeOrder).not.toHaveBeenCalled();
+        expect(moduleMocks.futuresAdapter.placeOrder).toHaveBeenCalledOnce();
         expect(moduleMocks.rendererConnection.sendUTF.mock.calls
             .map(([message]) => JSON.parse(message))
             .some(payload => (
                 payload.command_rejected?.code === 'FUTURES_REDUCTION_NOT_CONFIRMED'
-            ))).toBe(true);
+            ))).toBe(false);
         resolveReplacement({ futures_positions: [] });
         await vi.advanceTimersByTimeAsync(2_000);
         await flushMicrotasks();
+    });
+
+    // The operator's ruling of 2026-08-24: a close ordered while the desk has
+    // no proof at all holds for the in-flight pass and fires at the first
+    // reading that proves it — it is not bounced back for a retry.
+    it('holds a reduce-only close with no reading yet and sends it at the first proof', async () => {
+        vi.stubEnv('FUTURES_MAX_ORDER_USDT', '100');
+        let resolvePositions;
+        const firstReading = new Promise((resolve) => { resolvePositions = resolve; });
+        const loadPositions = vi.fn().mockImplementation(() => firstReading);
+        moduleMocks.futuresAdapter.getAccountRefreshOperations.mockReturnValue([{
+            type: 'positions', weight: 5, errorLabel: 'positions', loadPayload: loadPositions,
+        }]);
+        await connectRenderer();
+
+        const close = moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({
+                action: 'trade.placeOrder', version: 1, marketType: 'futures',
+                symbol: 'BTCUSDT', side: 'SELL', orderType: 'MARKET', quantity: '1',
+                positionSide: 'LONG', reduceOnly: true,
+            }),
+        });
+        await vi.advanceTimersByTimeAsync(300);
+        resolvePositions({
+            futures_positions: [{
+                symbol: 'BTCUSDT', positionSide: 'LONG', quantity: '2',
+                entryPrice: '50000', markPrice: '50000', unrealizedPnl: '0',
+            }],
+        });
+        await vi.advanceTimersByTimeAsync(500);
+        await close;
+
+        expect(moduleMocks.futuresAdapter.placeOrder).toHaveBeenCalledOnce();
+        expect(emitted().some(payload => (
+            payload.command_rejected?.code === 'FUTURES_REDUCTION_NOT_CONFIRMED'
+        ))).toBe(false);
+    });
+
+    // No successful positions reading has ever existed and none arrives inside
+    // the bounded hold: the refusal fires at the bound and names the condition.
+    it('refuses a reduce-only order by name when the bounded hold ends without a reading', async () => {
+        await connectRenderer();
+
+        const close = moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({
+                action: 'trade.placeOrder', version: 1, marketType: 'futures',
+                symbol: 'BTCUSDT', side: 'SELL', orderType: 'MARKET', quantity: '1',
+                positionSide: 'LONG', reduceOnly: true,
+            }),
+        });
+        await vi.advanceTimersByTimeAsync(2_000);
+        await close;
+
+        expect(moduleMocks.futuresAdapter.placeOrder).not.toHaveBeenCalled();
+        const refusal = emitted().find(payload => (
+            payload.command_rejected?.code === 'FUTURES_REDUCTION_NOT_CONFIRMED'
+        ));
+        expect(refusal.command_rejected.details.cause).toBe('NO_READING');
+        expect(refusal.command_rejected.message).toContain('positions reading');
+    });
+
+    // The reading exists but is older than the desk trusts for proof, and the
+    // held command's fresh read never lands: the refusal names the staleness
+    // instead of pretending the order itself was wrong.
+    it('refuses by name when the only reading is stale beyond the bound and no fresh one lands', async () => {
+        const loadPositions = vi.fn()
+            .mockResolvedValueOnce({
+                futures_positions: [{
+                    symbol: 'BTCUSDT', positionSide: 'LONG', quantity: '2',
+                    entryPrice: '50000', markPrice: '50000', unrealizedPnl: '0',
+                }],
+            })
+            .mockImplementation(() => new Promise(() => {}));
+        moduleMocks.futuresAdapter.getAccountRefreshOperations.mockReturnValue([{
+            type: 'positions', weight: 5, errorLabel: 'positions', loadPayload: loadPositions,
+        }]);
+        await connectRenderer();
+        await vi.advanceTimersByTimeAsync(2_000);
+        await flushMicrotasks();
+
+        // Quiet holding, not a broken desk: the clock moves without a timer
+        // firing, and the held reading ages past the proof bound.
+        vi.setSystemTime(new Date(Date.now() + 16 * 60_000));
+
+        const close = moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({
+                action: 'trade.placeOrder', version: 1, marketType: 'futures',
+                symbol: 'BTCUSDT', side: 'SELL', orderType: 'MARKET', quantity: '1',
+                positionSide: 'LONG', reduceOnly: true,
+            }),
+        });
+        await vi.advanceTimersByTimeAsync(2_000);
+        await close;
+
+        expect(moduleMocks.futuresAdapter.placeOrder).not.toHaveBeenCalled();
+        const refusal = emitted().find(payload => (
+            payload.command_rejected?.code === 'FUTURES_REDUCTION_NOT_CONFIRMED'
+        ));
+        expect(refusal.command_rejected.details.cause).toBe('STALE_READING');
     });
 
     // A record wired to nothing is the same failure the fault reporter already
@@ -11226,6 +11346,44 @@ describe('setupBinanceConnection user-data orchestration', () => {
             // The price and the size the command carried are not in any of it,
             // and neither is the sentence the exchange wrote for a human.
             expect(JSON.stringify(kept)).not.toMatch(/50000|0\.01\b|Margin is insufficient/);
+        });
+
+        // One code stood for five causes on 2026-08-24 and the diagnosis had to
+        // be assembled from the surrounding lines. The outcome line itself now
+        // says which condition of the reduction proof failed.
+        it('carries the named cause of a reduction refusal in the outcome line', async () => {
+            moduleMocks.futuresAdapter.getAccountRefreshOperations.mockReturnValue([{
+                type: 'positions',
+                weight: 5,
+                errorLabel: 'positions',
+                loadPayload: vi.fn().mockResolvedValue({
+                    futures_positions: [{
+                        symbol: 'BTCUSDT', positionSide: 'LONG', quantity: '2',
+                        entryPrice: '50000', markPrice: '50000', unrealizedPnl: '0',
+                    }],
+                }),
+            }]);
+            await connectRecordedRenderer();
+            await vi.advanceTimersByTimeAsync(2_000);
+            await flushMicrotasks();
+
+            // BUY does not close the held LONG: a genuinely wrong order, and
+            // the reading that proves it is on hand — the refusal is immediate.
+            await moduleMocks.rendererHandlers.message({
+                type: 'utf8',
+                utf8Data: JSON.stringify({
+                    action: 'trade.placeOrder', version: 1, marketType: 'futures',
+                    symbol: 'BTCUSDT', side: 'BUY', orderType: 'MARKET', quantity: '1',
+                    positionSide: 'LONG', reduceOnly: true,
+                }),
+            });
+
+            expect(held('outcome')).toContainEqual(expect.objectContaining({
+                action: 'trade.placeOrder',
+                result: 'rejected',
+                code: 'FUTURES_REDUCTION_NOT_CONFIRMED',
+                cause: 'SIDE_MISMATCH',
+            }));
         });
 
         // The renderer closes the only leg it can see. Accepted before the

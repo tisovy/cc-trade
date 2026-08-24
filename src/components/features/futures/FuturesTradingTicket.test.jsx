@@ -2234,6 +2234,28 @@ describe('FuturesTradingTicket', () => {
     expect(state.refresh).toHaveBeenCalledExactlyOnceWith('BTCUSDT')
   })
 
+  // A desk refusal that names its condition shows the name where the exchange's
+  // own code would sit — the 2026-08-24 close refusal was undiagnosable from
+  // the popup because one code stood for five causes.
+  it('shows the named condition a desk refusal carries', () => {
+    render(
+      <FuturesTradingTicket
+        state={createState({
+          lastError: {
+            code: 'FUTURES_REDUCTION_NOT_CONFIRMED',
+            message: 'The newest positions reading is older than the desk trusts.',
+            details: { marketType: 'futures', symbol: 'VELVETUSDT', cause: 'STALE_READING' },
+          },
+        })}
+        selectedSymbol="VELVETUSDT"
+        selectedContract={contract}
+      />,
+    )
+
+    const rejection = screen.getByLabelText('Futures command rejection')
+    expect(rejection).toHaveTextContent('FUTURES_REDUCTION_NOT_CONFIRMED · STALE_READING')
+  })
+
   // The dock and the chart carry the word `exit` beside the leg. The rail cannot:
   // measured in Chromium, at a 281px rail the side cell has 69px and `SHORT` with
   // the badge needs 83, and since the badge trails the leg it is the badge that
