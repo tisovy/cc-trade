@@ -15,7 +15,13 @@ export const TRADING_COMMAND_ACTIONS = Object.freeze({
     ACCOUNT_SYMBOL_CONFIG: 'account.symbolConfig',
     SET_LEVERAGE: 'trade.setLeverage',
     SET_MARGIN_TYPE: 'trade.setMarginType',
+    ACCOUNT_FEE_VALUATION: 'account.feeValuation',
 });
+
+// The most minutes one fee-valuation ask may carry. The backend bounds itself
+// the same way; this is the renderer refusing to compose an oversized ask in
+// the first place.
+export const FUTURES_FEE_VALUATION_COMMAND_MAX_MINUTES = 360;
 
 // Binance allows 1–125 depending on the contract and the bracket; the contract's
 // own ceiling is read from its leverage bracket and is always the lower of the
@@ -359,6 +365,28 @@ export const createFuturesAccountHistoryCommand = ({
     full: full === true,
     symbol,
     ...(Array.isArray(views) && views.length > 0 ? { views: [...views] } : {}),
+});
+
+// A read for the settlement-asset price of a foreign fee asset, one minute at
+// a time: "value X BNB at time T in USDT" needs the BNBUSDT kline of T's own
+// minute, and this asks for exactly the minutes the held rounds could not
+// value. The answer arrives as a `futures_fee_valuation` price table; a
+// minute the backend cannot answer finally simply stays out of it.
+export const createFuturesFeeValuationCommand = ({
+    accountId,
+    clientOrderId,
+    pair,
+    minutes = [],
+} = {}) => ({
+    ...buildBaseCommand({
+        action: TRADING_COMMAND_ACTIONS.ACCOUNT_FEE_VALUATION,
+        marketType: FUTURES_MARKET_TYPE,
+        accountId,
+        clientOrderId,
+    }),
+    pair,
+    minutes: (Array.isArray(minutes) ? minutes : [])
+        .slice(0, FUTURES_FEE_VALUATION_COMMAND_MAX_MINUTES),
 });
 
 export const createFuturesSetTradingPausedCommand = ({

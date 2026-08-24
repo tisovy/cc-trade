@@ -1530,6 +1530,21 @@ export class FuturesTradingAdapter {
         return rows.sort((left, right) => right.time - left.time);
     }
 
+    // One page of minute klines for valuing a foreign-asset fee at the price
+    // of its charge's own minute — `/fapi/v1/klines`, the exchange's public
+    // candle read, unsigned. The caller owns the paging and the weight; this
+    // states the address once so the wire can be asserted against it.
+    async getFeeValuationKlines({ symbol, interval, startTime, endTime, limit } = {}) {
+        const data = await this.#request('GET', '/fapi/v1/klines', {
+            symbol,
+            interval,
+            startTime,
+            endTime,
+            limit,
+        });
+        return requireFuturesArrayResponse(data, 'fee-valuation klines');
+    }
+
     // Reads Binance's own record of what this contract is set to, rather than
     // inferring it: an inferred leverage would be a guess printed beside money.
     async getSymbolConfig(symbol) {

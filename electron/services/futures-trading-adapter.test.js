@@ -2208,3 +2208,47 @@ describe('what the record says about connections', () => {
         });
     });
 });
+
+// The price source for valuing BNB fees asserts its address on the wire, not
+// only the behavior behind it: `/fapi/v1/klines`, unsigned, with the window
+// and page bound it was asked for.
+describe('getFeeValuationKlines', () => {
+    it('asks /fapi/v1/klines for the exact minute window, unsigned', async () => {
+        const minute = 1_756_000_020_000;
+        globalThis.__futuresTestResponse = [
+            [minute, '611', '613', '610', '612.34', '1000', minute + 59_999, '0', 10, '0', '0', '0'],
+        ];
+        const adapter = createAdapter();
+
+        const rows = await adapter.getFeeValuationKlines({
+            symbol: 'BNBUSDT',
+            interval: '1m',
+            startTime: minute,
+            endTime: minute + 119_999,
+            limit: 2,
+        });
+
+        expect(requests).toHaveLength(1);
+        const wire = new URL(requests[0].url);
+        expect(wire.origin).toBe('https://fapi.binance.com');
+        expect(wire.pathname).toBe('/fapi/v1/klines');
+        expect(wire.searchParams.get('symbol')).toBe('BNBUSDT');
+        expect(wire.searchParams.get('interval')).toBe('1m');
+        expect(wire.searchParams.get('startTime')).toBe(String(minute));
+        expect(wire.searchParams.get('endTime')).toBe(String(minute + 119_999));
+        expect(wire.searchParams.get('limit')).toBe('2');
+        // A public read: no signature, no timestamp envelope.
+        expect(wire.searchParams.get('signature')).toBeNull();
+        expect(wire.searchParams.get('timestamp')).toBeNull();
+        expect(rows).toHaveLength(1);
+        expect(rows[0][4]).toBe('612.34');
+    });
+
+    it('refuses a non-array answer instead of iterating it', async () => {
+        globalThis.__futuresTestResponse = { code: -1121, msg: 'Invalid symbol' };
+        const adapter = createAdapter();
+        await expect(adapter.getFeeValuationKlines({
+            symbol: 'BNBUSDT', interval: '1m', startTime: 0, endTime: 1, limit: 1,
+        })).rejects.toMatchObject({ name: 'FuturesApiError' });
+    });
+});

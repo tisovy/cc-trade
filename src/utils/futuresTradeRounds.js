@@ -551,6 +551,11 @@ const openRound = (entry, buy, closing, fromFlat, settlementDigits) => ({
   // a rounding error — a quantity of the wrong thing.
   feeByAsset: new Map(),
   feeRatioByAsset: new Map(),
+  // Each commission charge on its own, with the time it was charged at. The
+  // totals above are what the round paid; this is when it paid it, which is
+  // what a foreign-asset fee is valued against — the BNBUSDT price of the
+  // charge's own minute, never one price stretched over a day of fills.
+  feeCharges: [],
   // Realized PnL is money only together with the asset Binance says it settled
   // in. Every fill in one round must agree; a missing/conflicting field keeps
   // the round unresolved until REST replaces the stream/legacy projection.
@@ -737,13 +742,24 @@ const applyFill = (round, {
   }
   const exactCommission = decimalRatio(fill.commission)
   const fillAtoms = toAtoms(fill.quantity)
+  let exactPortion = null
   if (exactCommission !== null && fillAtoms !== null && fillAtoms > 0n) {
     const exactShare = ratio(atoms, fillAtoms)
-    const portion = multiplyRatios(exactCommission, exactShare)
+    exactPortion = multiplyRatios(exactCommission, exactShare)
     round.feeRatioByAsset.set(
       commissionAsset,
-      addRatios(round.feeRatioByAsset.get(commissionAsset) ?? ratio(0n), portion),
+      addRatios(round.feeRatioByAsset.get(commissionAsset) ?? ratio(0n), exactPortion),
     )
+  }
+  // A charge with no asset is read as settlement-paid above and needs no
+  // valuation; a charge whose exact portion could not be kept exact is recorded
+  // with `ratio: null` so a valuation over it refuses instead of rounding.
+  if (commission !== 0 && commissionAsset !== null) {
+    round.feeCharges.push({
+      asset: commissionAsset,
+      time: toNumber(fill.time),
+      ratio: exactPortion,
+    })
   }
   round.closeTime = toNumber(fill.time)
   round.fills += 1
@@ -776,7 +792,69 @@ const NO_ROUND_INCOME = Object.freeze({
   complete: false,
 })
 
-const finishRound = (round, open) => {
+const FEE_VALUATION_MINUTE_MS = 60_000
+
+const feeValuationMinuteOf = time => Math.floor(time / FEE_VALUATION_MINUTE_MS)
+  * FEE_VALUATION_MINUTE_MS
+
+// What a foreign-asset commission cost in the settlement asset, charge by
+// charge: each charge is valued at the price of its own minute, read through
+// the lookup the caller supplies — `(pair, timeMs) => ({price, minute} | null)`
+// — and a single unreadable price refuses the whole asset's valuation rather
+// than presenting a partial sum as the fee. The exact charged quantities stay
+// in `feesByAsset` untouched; this is a valuation beside the record, never a
+// mutation of it.
+const foreignFeeValuations = (round, settlementAsset, exactFees, feeValuationPriceAt) => {
+  if (settlementAsset === null) return []
+  const valuations = []
+  for (const [asset, amount] of round.feeByAsset) {
+    if (asset === null || asset === settlementAsset || amount === 0) continue
+    const pair = `${asset}${settlementAsset}`
+    const charges = round.feeCharges.filter(charge => charge.asset === asset)
+    const pricesUsed = new Map()
+    const missingMinutes = new Set()
+    let sum = ratio(0n)
+    let complete = charges.length > 0
+    for (const charge of charges) {
+      if (charge.ratio === null) {
+        complete = false
+        continue
+      }
+      const reading = feeValuationPriceAt === null
+        ? null
+        : feeValuationPriceAt(pair, charge.time)
+      const priceRatio = reading === null ? null : decimalRatio(reading.price)
+      if (priceRatio === null || priceRatio.numerator <= 0n) {
+        complete = false
+        missingMinutes.add(feeValuationMinuteOf(charge.time))
+        continue
+      }
+      pricesUsed.set(reading.price, Number.isSafeInteger(reading.minute)
+        ? reading.minute
+        : feeValuationMinuteOf(charge.time))
+      sum = addRatios(sum, multiplyRatios(charge.ratio, priceRatio))
+    }
+    const valuedAmount = complete ? terminatingDecimalText(sum) : null
+    valuations.push(Object.freeze({
+      asset,
+      pair,
+      amount,
+      amountExact: exactFees.get(asset) ?? null,
+      // The valuation in the settlement asset, as an unsigned magnitude like
+      // the fee it values, or null when any charge's price was unreadable —
+      // the degraded round states the fee in its own asset instead.
+      valuedAmount: valuedAmount,
+      complete: complete && valuedAmount !== null,
+      prices: Object.freeze([...pricesUsed.entries()]
+        .map(([price, minute]) => Object.freeze({ price, minute }))
+        .sort((left, right) => left.minute - right.minute)),
+      missingMinutes: Object.freeze([...missingMinutes].sort((left, right) => left - right)),
+    }))
+  }
+  return valuations.sort((left, right) => (left.asset < right.asset ? -1 : 1))
+}
+
+const finishRound = (round, open, feeValuationPriceAt = null) => {
   const settlementAsset = round.settlementAsset
   // A fill that names no commission asset is taken to have paid in the asset the
   // contract settles in, which is what a USDⓈ-M contract does unless the account
@@ -798,6 +876,18 @@ const finishRound = (round, open) => {
       round.feeRatioByAsset.get(null) ?? ratio(0n),
     ))
   const income = NO_ROUND_INCOME
+  const feeValuations = foreignFeeValuations(
+    round,
+    settlementAsset,
+    exactFees,
+    feeValuationPriceAt,
+  )
+  // Only a complete valuation reaches the net. A partially priced fee folded
+  // in anyway would be a wrong number wearing the right label, which is the
+  // exact defect `close-a-round-at-what-reached-the-wallet` removed.
+  const valuedForeignFees = feeValuations
+    .filter(valuation => valuation.complete)
+    .reduce((total, valuation) => total + Number(valuation.valuedAmount), 0)
   const entryQuantity = Number(fromAtoms(round.entryAtoms))
   const exitQuantity = Number(fromAtoms(round.exitAtoms))
   // An open restarted edge round is the position it is holding: the size still
@@ -874,6 +964,11 @@ const finishRound = (round, open) => {
     // into this one.
     fee: settlementFee,
     feeExact: settlementFeeExact,
+    // What each foreign-asset fee cost in the settlement asset, valued at the
+    // price of each charge's own minute. `feesByAsset` below stays the exact
+    // record; a valuation whose price could not be read is `complete: false`
+    // and its minutes are named so the caller can go and read them.
+    feeValuations: Object.freeze(feeValuations),
     // Every asset the round was charged in, the settlement asset included, so a
     // surface can state a BNB fee as BNB instead of as a number with no unit.
     feesByAsset: Object.freeze([...round.feeByAsset.entries()]
@@ -904,9 +999,12 @@ const finishRound = (round, open) => {
     fundingComplete: income.complete,
     // The exchange reports realized PnL before its own commission and does not
     // report funding on a fill at all, so realized PnL alone is not what the
-    // round did to the wallet. This is.
+    // round did to the wallet. This is. A foreign-asset fee joins it only as a
+    // complete valuation; unvalued it stays out, exactly as it always has, and
+    // the row states it in its own asset instead.
     netPnl: round.realizedPnl
       - settlementFee
+      - valuedForeignFees
       + (income.funding ?? 0)
       + (income.insuranceClear ?? 0),
     fills: round.fills,
@@ -930,6 +1028,7 @@ const finishRound = (round, open) => {
 const foldContractFills = (fills, {
   leftBoundaryProven = false,
   settlementDigits = DEFAULT_SETTLEMENT_DIGITS,
+  feeValuationPriceAt = null,
 } = {}) => {
   const rounds = []
   let round = null
@@ -996,7 +1095,7 @@ const foldContractFills = (fills, {
       if (round.partial && increasing
         && (toNumber(entry.fill.realizedPnl) !== 0
           || (round.edgePhase !== 'adding-after-edge-close' && round.heldAtoms === 0n))) {
-        rounds.push(finishRound(round, false))
+        rounds.push(finishRound(round, false, feeValuationPriceAt))
         round = null
         continue
       }
@@ -1016,7 +1115,7 @@ const foldContractFills = (fills, {
       // that follow usually can.
       if (!increasing && round.edgePhase === 'reclosing' && round.heldAtoms === 0n
         && toNumber(entry.fill.realizedPnl) === 0) {
-        rounds.push(finishRound(round, false))
+        rounds.push(finishRound(round, false, feeValuationPriceAt))
         round = null
         continue
       }
@@ -1059,7 +1158,7 @@ const foldContractFills = (fills, {
       if (!round.partial) {
         running += buy ? take : -take
         if (running === 0n) {
-          rounds.push(finishRound(round, false))
+          rounds.push(finishRound(round, false, feeValuationPriceAt))
           round = null
           // The walk has now seen the position reach flat, so whatever opens
           // next is a position it can size — and a later fill that reduces past
@@ -1076,7 +1175,11 @@ const foldContractFills = (fills, {
     // nowhere. `heldAtoms` is exactly that size — only entries raise it and
     // only the restart path leaves `partial` set with entries behind it.
     const holdingRestartedAdds = round.edgePhase !== null && round.heldAtoms > 0n
-    rounds.push(finishRound(round, holdingRestartedAdds || (!round.partial && running !== 0n)))
+    rounds.push(finishRound(
+      round,
+      holdingRestartedAdds || (!round.partial && running !== 0n),
+      feeValuationPriceAt,
+    ))
   }
   const fillConservation = auditFuturesFillAllocation({
     canonicalFills: fills.map(entry => ({
@@ -1422,6 +1525,11 @@ export const buildFuturesTradeRoundIndex = (trades, {
   generation = null,
   pageLimit = DEFAULT_HISTORY_PAGE_LIMIT,
   settlementDigits = DEFAULT_SETTLEMENT_DIGITS,
+  // `(pair, timeMs) => ({price, minute} | null)` — the settlement-asset price
+  // of a foreign fee asset for the minute holding `timeMs`. A null answer is
+  // honest: the affected round's valuation degrades to "not included" and the
+  // unpriced minutes are named on `feeValuations` for the caller to go read.
+  feeValuationPriceAt = null,
 } = {}) => {
   const byPosition = new Map()
   const symbolFillCounts = new Map()
@@ -1539,6 +1647,7 @@ export const buildFuturesTradeRoundIndex = (trades, {
     let foldResult = foldContractFills(entries, {
       leftBoundaryProven: positionCoverage.flatBoundary,
       settlementDigits: digits,
+      feeValuationPriceAt,
     })
     // The left boundary can also be proven backward, from the right. If a fold
     // that assumes the chain began flat conserves every fill, never has to read
@@ -1554,6 +1663,7 @@ export const buildFuturesTradeRoundIndex = (trades, {
       const trial = foldContractFills(entries, {
         leftBoundaryProven: true,
         settlementDigits: digits,
+        feeValuationPriceAt,
       })
       const anchored = trial.fillConservation.conserved === true
         && trial.rounds.every(round => (

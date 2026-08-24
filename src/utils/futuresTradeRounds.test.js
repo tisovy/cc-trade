@@ -1833,3 +1833,112 @@ describe('buildFuturesTradeRounds fill money', () => {
     expect(round.netPnl).toBeCloseTo(116, 6)
   })
 })
+
+// Since 2026-08-24 the operator's account pays every Futures fee in BNB. The
+// fold values each charge at the price of its own minute through the supplied
+// lookup; the exact BNB record stays untouched beside the valuation.
+describe('buildFuturesTradeRounds foreign fee valuation', () => {
+  const minuteA = 1_756_000_020_000
+  const minuteB = minuteA + 240_000
+  const fill = (overrides = {}) => ({
+    symbol: 'BEATUSDT', side: 'BUY', positionSide: 'BOTH',
+    price: '100', quantity: '1', realizedPnl: '0',
+    commission: '0', commissionAsset: 'USDT', marginAsset: 'USDT',
+    time: minuteA + 1_000, id: 1, ...overrides,
+  })
+  const priceTable = { [minuteA]: '600', [minuteB]: '620' }
+  const priceAt = (pair, time) => {
+    if (pair !== 'BNBUSDT') return null
+    const minute = Math.floor(time / 60_000) * 60_000
+    const price = priceTable[minute]
+    return price === undefined ? null : { price, minute }
+  }
+
+  it('includes the valued BNB commission in the round net at each charge minute', () => {
+    const [round] = buildFuturesTradeRounds([
+      fill({ id: 1, side: 'BUY', quantity: '10', commission: '0.004', commissionAsset: 'BNB', time: minuteA + 12_345 }),
+      fill({
+        id: 2, side: 'SELL', quantity: '10', price: '112', realizedPnl: '120',
+        commission: '0.0045', commissionAsset: 'BNB', time: minuteB + 1_000,
+      }),
+    ], { feeValuationPriceAt: priceAt })
+    // 0.004 × 600 + 0.0045 × 620 = 2.4 + 2.79 = 5.19, exactly.
+    expect(round.feeValuations).toEqual([expect.objectContaining({
+      asset: 'BNB',
+      pair: 'BNBUSDT',
+      amountExact: '0.0085',
+      valuedAmount: '5.19',
+      complete: true,
+      missingMinutes: [],
+    })])
+    expect(round.feeValuations[0].prices).toEqual([
+      { price: '600', minute: minuteA },
+      { price: '620', minute: minuteB },
+    ])
+    expect(round.netPnl).toBeCloseTo(120 - 5.19, 8)
+    // The exact per-asset record is presentation-independent: the valuation
+    // never mutates it.
+    expect(round.fee).toBe(0)
+    expect(round.feesByAsset).toEqual([expect.objectContaining({
+      asset: 'BNB', amountExact: '0.0085',
+    })])
+  })
+
+  it('sums a mixed USDT+BNB window exactly and values only the BNB part', () => {
+    const [round] = buildFuturesTradeRounds([
+      fill({ id: 1, side: 'BUY', quantity: '10', commission: '2', commissionAsset: 'USDT', time: minuteA + 1_000 }),
+      fill({
+        id: 2, side: 'SELL', quantity: '10', price: '112', realizedPnl: '120',
+        commission: '0.0045', commissionAsset: 'BNB', time: minuteB + 1_000,
+      }),
+    ], { feeValuationPriceAt: priceAt })
+    expect(round.fee).toBeCloseTo(2, 8)
+    expect(round.feeValuations).toEqual([expect.objectContaining({
+      asset: 'BNB', amountExact: '0.0045', valuedAmount: '2.79', complete: true,
+    })])
+    expect(round.netPnl).toBeCloseTo(120 - 2 - 2.79, 8)
+    expect(round.feesByAsset).toEqual([
+      expect.objectContaining({ asset: 'BNB', amountExact: '0.0045' }),
+      expect.objectContaining({ asset: 'USDT', amountExact: '2' }),
+    ])
+  })
+
+  it('degrades to the excluded fee when any charge minute has no readable price', () => {
+    const missingMinute = minuteB + 600_000
+    const [round] = buildFuturesTradeRounds([
+      fill({ id: 1, side: 'BUY', quantity: '10', commission: '0.004', commissionAsset: 'BNB', time: minuteA + 1_000 }),
+      fill({
+        id: 2, side: 'SELL', quantity: '10', price: '112', realizedPnl: '120',
+        commission: '0.0045', commissionAsset: 'BNB', time: missingMinute + 30_000,
+      }),
+    ], { feeValuationPriceAt: priceAt })
+    // One unpriced charge refuses the whole valuation: a partial sum under a
+    // valued label would be a wrong number, and today's exclusion is not.
+    expect(round.feeValuations).toEqual([expect.objectContaining({
+      asset: 'BNB',
+      valuedAmount: null,
+      complete: false,
+      missingMinutes: [missingMinute],
+    })])
+    expect(round.netPnl).toBeCloseTo(120, 8)
+    expect(round.feesByAsset).toEqual([expect.objectContaining({
+      asset: 'BNB', amountExact: '0.0085',
+    })])
+  })
+
+  it('names every charge minute as missing when no price source is supplied', () => {
+    const [round] = buildFuturesTradeRounds([
+      fill({ id: 1, side: 'BUY', quantity: '10', commission: '0.004', commissionAsset: 'BNB', time: minuteA + 1_000 }),
+      fill({
+        id: 2, side: 'SELL', quantity: '10', price: '112', realizedPnl: '120',
+        commission: '0.0045', commissionAsset: 'BNB', time: minuteB + 1_000,
+      }),
+    ])
+    expect(round.feeValuations).toEqual([expect.objectContaining({
+      asset: 'BNB',
+      complete: false,
+      missingMinutes: [minuteA, minuteB],
+    })])
+    expect(round.netPnl).toBeCloseTo(120, 8)
+  })
+})

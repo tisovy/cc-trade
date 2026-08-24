@@ -81,6 +81,7 @@ import {
     readFuturesTradeHistoryWindow,
 } from './futures-trade-history-window.js';
 import { proveFuturesTradeHistoryReverseFlat } from './futures-trade-history-reverse-flat.js';
+import { createFuturesFeeValuationPriceSource } from './futures-fee-valuation.js';
 import {
     SPOT_REST_CONNECTION_POOL,
     createPooledSpotRestAgent,
@@ -1499,6 +1500,23 @@ export function setupBinanceConnection({
             recordEvent: (kind, value) => diagnosticRecord.record(kind, value),
         });
     }
+
+    // The BNBUSDT minute prices a foreign-asset fee is valued at. One source
+    // for the whole service so the per-minute cache outlives any single
+    // renderer connection; it reads the public kline route through the same
+    // limiter the account reads answer to, at the klines page weight.
+    const futuresFeeValuationPriceSource = createFuturesFeeValuationPriceSource({
+        readKlines: (params, weight) => futuresRestLimiter.execute(
+            () => {
+                if (futuresTradingAdapter === null) {
+                    throw new Error('Futures execution is not configured');
+                }
+                return futuresTradingAdapter.getFeeValuationKlines(params);
+            },
+            weight,
+            2,
+        ),
+    });
 
     if (spotCredentialsReady) {
         const restConfig = {
@@ -7466,6 +7484,34 @@ export function setupBinanceConnection({
             noteCommandAnswer(manualFuturesRefresh ? 'accepted' : 'ok');
         };
 
+        // The renderer names the minutes its rounds could not value; the
+        // source answers what it can answer finally and the table goes back as
+        // one frame. A failed page leaves its minutes out rather than wrong,
+        // and the journal's `read` line says what the ask cost.
+        const handleFuturesFeeValuation = async (command) => {
+            const outcome = await futuresFeeValuationPriceSource.read({
+                pair: command.pair,
+                minutes: command.minutes,
+            });
+            if (outcome.readRequests > 0) {
+                diagnosticRecord.record('read', {
+                    reason: 'fee-valuation',
+                    resources: outcome.readRequests,
+                    weight: outcome.chargedWeight,
+                });
+            }
+            emit({
+                type: 'futures_fee_valuation',
+                version: 1,
+                pair: outcome.pair,
+                prices: outcome.prices,
+                requested: outcome.requested,
+                served: outcome.served,
+                failed: outcome.failed === true,
+                readAt: Date.now(),
+            });
+        };
+
         const dispatchTypedTradingCommand = async (command) => {
             if (command.marketType === FUTURES_MARKET_TYPE) {
                 switch (command.action) {
@@ -7512,6 +7558,9 @@ export function setupBinanceConnection({
                         break;
                     case TRADING_COMMAND_ACTIONS.ACCOUNT_HISTORY:
                         await queueFuturesHistoryCommand(command);
+                        break;
+                    case TRADING_COMMAND_ACTIONS.ACCOUNT_FEE_VALUATION:
+                        await handleFuturesFeeValuation(command);
                         break;
                     case TRADING_COMMAND_ACTIONS.ACCOUNT_SYMBOL_CONFIG:
                         await handleFuturesSymbolConfig(command);
@@ -8509,6 +8558,7 @@ export function setupBinanceConnection({
                     case TRADING_COMMAND_ACTIONS.CANCEL_ALL:
                     case TRADING_COMMAND_ACTIONS.ACCOUNT_REFRESH:
                     case TRADING_COMMAND_ACTIONS.ACCOUNT_HISTORY:
+                    case TRADING_COMMAND_ACTIONS.ACCOUNT_FEE_VALUATION:
                     case TRADING_COMMAND_ACTIONS.SET_TRADING_PAUSED:
                     case TRADING_COMMAND_ACTIONS.ADJUST_POSITION_MARGIN:
                     case TRADING_COMMAND_ACTIONS.ACCOUNT_SYMBOL_CONFIG:

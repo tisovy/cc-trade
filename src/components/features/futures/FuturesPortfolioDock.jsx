@@ -29,6 +29,10 @@ import {
 import { exactFuturesDeskTime, formatFuturesDeskTime } from '../../../utils/futuresDeskTime.js'
 import { futuresTradePositionKey } from '../../../utils/futuresTradeRounds.js'
 import { futuresSharedAdjustmentKey } from '../../../utils/futuresWalletPresentation.js'
+import {
+  futuresFeeNotIncludedTitle,
+  futuresFeeValuationTitle,
+} from '../../../utils/futuresFeeValuation.js'
 import FuturesHistoryPanel from './FuturesHistoryPanel.jsx'
 
 const EMPTY_ROWS = Object.freeze([])
@@ -109,21 +113,22 @@ const formatSettledAmountForCell = (value) => {
   return `${prefix}${digits.slice(0, -2)}.${digits.slice(-2)}`
 }
 
-// The settled figure's own tone. Absent is not flat: a reading that has not
-// arrived and a position that has settled exactly nothing are different states,
-// and the tone is the only thing distinguishing them at a glance.
+// The settled figure's own tone — the tone of the one number the face shows.
+// Absent is not flat: a reading that has not arrived and a position that has
+// settled exactly nothing are different states, and the tone is the only thing
+// distinguishing them at a glance. The face never shows a foreign-asset line
+// (operator ruling, 2026-08-24), so foreign amounts move the tone only through
+// their valuation.
+const settledFaceAmount = (settled) => {
+  if (settled === null) return null
+  if (typeof settled.valuation?.amount === 'string') return settled.valuation.amount
+  return settled.total
+}
+
 const settledToneOf = (settled) => {
-  if (settled === null) return 'absent'
-  if (settled.total === null) {
-    const totals = (Array.isArray(settled.otherAssets) ? settled.otherAssets : [])
-      .map(reading => exactSettledAmountParts(reading?.total)?.sign ?? null)
-      .filter(sign => sign !== null)
-    if (totals.length === 0) return 'absent'
-    if (totals.every(total => total >= 0) && totals.some(total => total > 0)) return 'positive'
-    if (totals.every(total => total <= 0) && totals.some(total => total < 0)) return 'negative'
-    return 'flat'
-  }
-  const sign = exactSettledAmountParts(settled.total)?.sign ?? 0
+  const face = settledFaceAmount(settled)
+  if (face === null) return 'absent'
+  const sign = exactSettledAmountParts(face)?.sign ?? 0
   if (sign > 0) return 'positive'
   return sign < 0 ? 'negative' : 'flat'
 }
@@ -189,24 +194,20 @@ const openSharedQualifications = adjustment => (
     : EMPTY_ROWS
 )
 
+// One settlement-asset number and nothing else. The interim rendering stacked
+// the BNB fee under the USDT figure as a second line and the operator ruled it
+// off the face the same evening ("не надо это показывать") — the foreign
+// quantity lives in the title, valued into the number when its price is
+// readable and stated as not included when it is not.
 const settledVisibleAmounts = (settled) => {
   if (settled === null || typeof settled !== 'object') return EMPTY_ROWS
-  const amounts = []
   const settlementAsset = String(settled.settlementAsset ?? '').trim().toUpperCase()
-  const total = formatSettledAmountForCell(settled.total)
-  if (total !== null) {
-    amounts.push({
-      key: `settlement:${settlementAsset || 'unknown'}`,
-      text: `${total}${settlementAsset === '' ? '' : ` ${settlementAsset}`}`,
-    })
-  }
-  for (const reading of Array.isArray(settled.otherAssets) ? settled.otherAssets : []) {
-    const text = signedAssetAmount(reading, { compact: true })
-    if (text === null) continue
-    const asset = String(reading?.asset ?? '').trim().toUpperCase()
-    amounts.push({ key: `other:${asset}`, text })
-  }
-  return amounts
+  const total = formatSettledAmountForCell(settledFaceAmount(settled))
+  if (total === null) return EMPTY_ROWS
+  return [{
+    key: `settlement:${settlementAsset || 'unknown'}`,
+    text: `${total}${settlementAsset === '' ? '' : ` ${settlementAsset}`}`,
+  }]
 }
 
 // Three different absences wear the same `—`, and until 2026-08-20 they wore the
@@ -246,17 +247,38 @@ const settledTitle = (settled, window, read, position) => {
     return 'Nothing settled on this position yet — no realized PnL, funding or commission against it'
   }
   const parts = []
-  if (settled.total !== null) {
-    const total = formatExactSettledAmount(settled.total)
+  const valuation = settled.valuation ?? null
+  if (valuation !== null) {
+    // The face's one number: the settlement components plus the foreign fee
+    // valued at the price of each charge's own minute. Both quantities and the
+    // price used are named, so the decomposition stays exact.
+    const total = formatExactSettledAmount(valuation.amount)
     if (total !== null) parts.push(`${total} ${settled.settlementAsset} settled`)
     const breakdown = settledBreakdown(settled)
     if (breakdown.length > 0) parts.push(breakdown.join(' · '))
-  }
-  // Charged in something the desk holds no rate for. Stated in its own asset
-  // rather than converted into the total by a guess.
-  for (const other of settled.otherAssets) {
-    parts.push(`${signedAssetAmount(other) ?? `${other.total} ${other.asset}`} settled; ${
-      settledBreakdown(other).join(' · ')} not converted`)
+    for (const valued of valuation.valuations) {
+      parts.push(futuresFeeValuationTitle(valued))
+    }
+  } else {
+    if (settled.total !== null) {
+      const total = formatExactSettledAmount(settled.total)
+      if (total !== null) parts.push(`${total} ${settled.settlementAsset} settled`)
+      const breakdown = settledBreakdown(settled)
+      if (breakdown.length > 0) parts.push(breakdown.join(' · '))
+    }
+    // Charged in something the desk could not value: a fee whose minute price
+    // was unreadable is stated as not included, anything else in a foreign
+    // asset keeps its own-asset statement. Neither reaches the face.
+    for (const other of settled.otherAssets) {
+      const unvalued = (Array.isArray(settled.feeValuations) ? settled.feeValuations : [])
+        .find(candidate => candidate.asset === other.asset && candidate.complete !== true)
+      if (unvalued !== undefined) {
+        parts.push(futuresFeeNotIncludedTitle(unvalued))
+        continue
+      }
+      parts.push(`${signedAssetAmount(other) ?? `${other.total} ${other.asset}`} settled; ${
+        settledBreakdown(other).join(' · ')} not converted`)
+    }
   }
   // What the figure covers. A total silently missing eight hours of funding is
   // worse than one that names its own edge.
@@ -288,6 +310,70 @@ const openOrderEditorFromKeyboard = (event, order, onOrderEdit) => {
     x: rowRect.left + (rowRect.width / 2),
     y: rowRect.top + (rowRect.height / 2),
   })
+}
+
+// The wallet's remaining BNB fee reserve, once and globally — the operator
+// ruled it off the rows. Every Futures fee drains it at a 10% discount, and
+// when it empties Binance reverts to undiscounted USDT fees without a word,
+// so the low mark under 50 USDT equivalent is the desk's only warning ahead
+// of that. Absence and unreadability are stated as themselves rather than as
+// a zero that looks like a reading.
+const feeReserveReading = (reserve) => {
+  if (reserve.state === 'unread') {
+    return {
+      text: '—',
+      tone: 'flat',
+      low: false,
+      title: 'BNB fee reserve — the Futures wallet balances have not been read yet',
+    }
+  }
+  if (reserve.state === 'absent') {
+    return {
+      text: 'none',
+      tone: 'negative',
+      low: true,
+      title: `No ${reserve.asset} in the Futures wallet — every fee is charged in `
+        + 'USDT without the discount',
+    }
+  }
+  if (reserve.state === 'unpriced') {
+    return {
+      text: `${reserve.amount} ${reserve.asset}`,
+      tone: 'flat',
+      low: false,
+      title: `${reserve.amount} ${reserve.asset} held — no readable ${reserve.pair} `
+        + 'price, so its worth is unknown rather than zero',
+    }
+  }
+  const worth = `≈${reserve.worth.toFixed(2)} USDT`
+  const pricedAt = exactFuturesDeskTime(reserve.priceMinute)
+  return {
+    text: `${worth}`,
+    tone: reserve.low ? 'negative' : 'flat',
+    low: reserve.low,
+    title: `${reserve.amount} ${reserve.asset} remaining, worth ${worth} at `
+      + `${reserve.pair} ${reserve.price}${pricedAt === undefined ? '' : ` (${pricedAt})`}. `
+      + 'Fees are paid from it at a discount; when it runs out Binance silently '
+      + 'reverts to undiscounted USDT fees. Marked low under '
+      + `${reserve.lowBoundUsdt} USDT equivalent.`,
+  }
+}
+
+const FuturesFeeReserveReadout = ({ reserve }) => {
+  if (reserve === null || reserve === undefined) return null
+  const reading = feeReserveReading(reserve)
+  return (
+    <div
+      className={`futures-workstation-dock-total is-${reading.tone}${reading.low ? ' is-incomplete' : ''}`}
+      title={reading.title}
+      data-testid="futures-fee-reserve"
+      data-state={reserve.state}
+    >
+      <span>BNB fee reserve</span>
+      <strong>{reading.text}</strong>
+      {reading.low ? <em>low</em> : null}
+    </div>
+  )
 }
 
 // Positions and working orders live under the chart because they are what a
@@ -562,6 +648,8 @@ export const FuturesPortfolioDock = ({
   // The settled-income resource state explains the canonical closed-round
   // wallet index below, including a stale/failed refresh and its last proof.
   settledIncome = null,
+  // The wallet's remaining BNB fee reserve — one global reading, never per row.
+  feeReserve = null,
   onClosePosition,
   onCancelOrder,
   onOrderEdit,
@@ -814,6 +902,7 @@ export const FuturesPortfolioDock = ({
             snapshot={snapshot}
             store={positionMarkStore}
           />
+          <FuturesFeeReserveReadout reserve={feeReserve} />
           <button
             type="button"
             className="futures-workstation-dock-toggle"

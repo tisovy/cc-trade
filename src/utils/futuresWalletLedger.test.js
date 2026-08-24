@@ -1136,6 +1136,42 @@ describe('reconcileFuturesWalletLedger income ownership', () => {
     expect(result.audit.assignedTotals).toEqual(round.visibleNet)
   })
 
+  // The BNB valuation is presentation on top of this record. Whatever the
+  // round fold valued, the ledger's per-asset conservation must not move.
+  it('conserves per-asset totals unchanged when the round carries a fee valuation', () => {
+    const valued = reconcileFuturesWalletLedger({
+      rounds: [completeRound({
+        feesByAsset: [{ asset: 'BNB', amount: '0.003' }],
+        feeValuations: [{
+          asset: 'BNB',
+          pair: 'BNBUSDT',
+          amount: 0.003,
+          amountExact: '0.003',
+          valuedAmount: '1.83702',
+          complete: true,
+          prices: [{ price: '612.34', minute: 1_756_000_020_000 }],
+          missingMinutes: [],
+        }],
+      })],
+      income: [],
+      incomeCoverage: true,
+    })
+    const bare = reconcileFuturesWalletLedger({
+      rounds: [completeRound({
+        feesByAsset: [{ asset: 'BNB', amount: '0.003' }],
+      })],
+      income: [],
+      incomeCoverage: true,
+    })
+
+    const valuedRound = roundReading(valued, 'round-1')
+    const bareRound = roundReading(bare, 'round-1')
+    expect(valuedRound.visibleNet).toEqual(bareRound.visibleNet)
+    expect(valuedRound.walletNet).toBeNull()
+    expect(valued.audit.canonicalTotals).toEqual(bare.audit.canonicalTotals)
+    expect(valued.audit.assignedTotals).toEqual(bare.audit.assignedTotals)
+  })
+
   it('retains zero-sum auxiliary entries without a false multi-asset qualification', () => {
     const result = reconcileFuturesWalletLedger({
       rounds: [completeRound({

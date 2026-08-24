@@ -20,25 +20,25 @@
 
 ## 2. Spec
 
-- [ ] 2.1 Delta under `futures-workstation-presentation`: a foreign-asset
+- [x] 2.1 Delta under `futures-workstation-presentation`: a foreign-asset
       commission is valued in the settlement asset at the charge's own time,
       named with its price on the element, and degrades to "not included"
       when no price is readable.
 
 ## 3. Code
 
-- [ ] 3.1 A BNBUSDT price-at-time source at minute resolution (existing kline
+- [x] 3.1 A BNBUSDT price-at-time source at minute resolution (existing kline
       reads, cached per minute; no new standing stream), answering "value X
       BNB at time T in USDT" and answering `null` honestly.
-- [ ] 3.2 The round fold and `foldFuturesSettledMoney` value BNB commissions
+- [x] 3.2 The round fold and `foldFuturesSettledMoney` value BNB commissions
       through it: nets include the valuation, `feesByAsset` keeps the exact
       BNB quantities, per-asset wallet conservation stays intact, mixed
       USDT+BNB windows sum exactly + value only the BNB part.
-- [ ] 3.3 Titles name both quantities and the price used; the row face renders
+- [x] 3.3 Titles name both quantities and the price used; the row face renders
       one settlement-asset number and never a visible BNB line; a failed
       price read renders today's "not included" statement, never a wrong
       number.
-- [ ] 3.4 The BNB fee-reserve readout: one global element stating the Futures
+- [x] 3.4 The BNB fee-reserve readout: one global element stating the Futures
       wallet's BNB amount and its worth at the current BNBUSDT price (the
       account snapshot already carries the balance; the same price source as
       3.1 values it), marked low under 50 USDT equivalent
@@ -48,7 +48,7 @@
 
 ## 4. Proof
 
-- [ ] 4.1 Tests that bite against the current fold: a BNB-fee round's net
+- [x] 4.1 Tests that bite against the current fold: a BNB-fee round's net
       includes the valued commission (fails today — today's net excludes it);
       a mixed-fee round; a price-read failure degrading to "not included";
       per-asset conservation unchanged; the row face carries no visible BNB
@@ -56,7 +56,7 @@
       the reserve readout marks low under the bound and states absence
       honestly. Assert the kline address on the wire for the price source,
       not only the behavior behind it.
-- [ ] 4.2 Full suite, lint, and the repository guards.
+- [x] 4.2 Full suite, lint, and the repository guards.
 
 ## 5. Operator gate
 

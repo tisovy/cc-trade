@@ -1061,3 +1061,39 @@ describe('backend trading command validation', () => {
         }
     });
 });
+
+describe('account.feeValuation command validation', () => {
+    const base = {
+        action: TRADING_COMMAND_ACTIONS.ACCOUNT_FEE_VALUATION,
+        version: TRADE_COMMAND_VERSION,
+        marketType: 'futures',
+        accountId: 'default',
+        clientOrderId: 'fee-valuation-1',
+    };
+    const minute = 1_756_000_020_000;
+
+    it('canonicalizes the pair and floors the minutes', () => {
+        const result = validateTypedTradingCommand({
+            ...base,
+            pair: ' bnbusdt ',
+            minutes: [minute + 30_000, minute + 10_000, minute + 60_000],
+        });
+        expect(result.ok).toBe(true);
+        expect(result.command).toMatchObject({
+            pair: 'BNBUSDT',
+            minutes: [minute + 60_000, minute],
+        });
+    });
+
+    it('refuses a malformed pair, empty minutes and a non-futures market', () => {
+        expect(validateTypedTradingCommand({
+            ...base, pair: 'BNB/USDT', minutes: [minute],
+        }).rejection.command_rejected.code).toBe('INVALID_TYPED_FEE_VALUATION_PAIR');
+        expect(validateTypedTradingCommand({
+            ...base, pair: 'BNBUSDT', minutes: ['junk'],
+        }).rejection.command_rejected.code).toBe('INVALID_TYPED_FEE_VALUATION_MINUTES');
+        expect(validateTypedTradingCommand({
+            ...base, marketType: 'spot', pair: 'BNBUSDT', minutes: [minute],
+        }).rejection.command_rejected.code).toBe('TYPED_COMMAND_NOT_ENABLED');
+    });
+});

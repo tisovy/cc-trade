@@ -11,11 +11,13 @@ import {
   readFuturesSymbolConfigs,
 } from '../utils/futuresSymbolConfig.js'
 import {
+  FUTURES_FEE_VALUATION_COMMAND_MAX_MINUTES,
   createFuturesAccountHistoryCommand,
   createFuturesAccountRefreshCommand,
   createFuturesAdjustPositionMarginCommand,
   createFuturesCancelAllCommand,
   createFuturesCancelOrderCommand,
+  createFuturesFeeValuationCommand,
   createFuturesModifyOrderCommand,
   createFuturesPlaceOrderCommand,
   createFuturesSetLeverageCommand,
@@ -23,6 +25,14 @@ import {
   createFuturesSetTradingPausedCommand,
   createFuturesSymbolConfigCommand,
 } from '../utils/tradingCommands.js'
+import {
+  collectFuturesFeeValuationMissingMinutes,
+  createFuturesFeeValuationPriceLookup,
+  mergeFuturesFeeValuationPrices,
+  readFuturesFeeReserve,
+  readFuturesFeeValuationFrame,
+  valueFuturesForeignFees,
+} from '../utils/futuresFeeValuation.js'
 import { describeFuturesAlgoTrigger } from '../utils/futuresOrderPresentation.js'
 import {
   newerFuturesSettledIncomeFrame,
@@ -303,7 +313,20 @@ const enrichRoundWithWallet = (round, wallet) => {
   // ledger's denomination instead of lowering that truthful single-asset result
   // to partial or relabelling it as settlement money.
   const exactWallet = wallet?.walletNet ?? null
+  // A bucket blocked only by a foreign-asset fee is presented valued: the same
+  // gate the history panel applies, so the two surfaces cannot disagree about
+  // when the BNB fee joins the number.
+  const valuation = exactWallet === null
+    && wallet !== null
+    && (wallet.qualifications ?? []).every(code => code === 'MULTI_ASSET')
+    ? valueFuturesForeignFees({
+      amounts: wallet.visibleNet ?? [],
+      settlementAsset: round.settlementAsset,
+      feeValuations: round.feeValuations,
+    })
+    : null
   const display = exactWallet?.amount
+    ?? valuation?.amount
     ?? visibleAmount(wallet, round.settlementAsset)
   const numeric = display === null ? Number.NaN : Number(display)
   return Object.freeze({
@@ -354,24 +377,43 @@ const settledReadingFromWallet = (round, wallet, settlementAsset = round?.settle
   const settlementTotal = sumFuturesWalletDecimalAmounts(
     Object.values(settlementComponents).filter(amount => amount !== null),
   )
+  const otherAssetReadings = Object.freeze([...otherAssets.entries()].map(([asset, totals]) => {
+    const exactTotals = exactComponents(totals)
+    const total = sumFuturesWalletDecimalAmounts(
+      Object.values(exactTotals).filter(amount => amount !== null),
+    )
+    return Object.freeze({
+      asset,
+      ...exactTotals,
+      amount: total,
+      total,
+    })
+  }))
+  // A BNB commission valued in the settlement asset, folded onto the exact
+  // settlement total for presentation. Only when every foreign amount is
+  // exactly the round's charged fee with a complete valuation behind it;
+  // anything else keeps the per-asset statement, degraded to "not included".
+  const valuation = valueFuturesForeignFees({
+    amounts: [
+      { asset: settlementAsset, amount: settlementTotal ?? '0' },
+      ...otherAssetReadings
+        .filter(reading => reading.total !== null)
+        .map(reading => ({ asset: reading.asset, amount: reading.total })),
+    ],
+    settlementAsset,
+    feeValuations: round?.feeValuations,
+  })
   return Object.freeze({
     symbol: round.symbol,
     positionKey: round.positionKey,
     ...settlementComponents,
     total: settlementTotal,
     settlementAsset,
-    otherAssets: Object.freeze([...otherAssets.entries()].map(([asset, totals]) => {
-      const exactTotals = exactComponents(totals)
-      const total = sumFuturesWalletDecimalAmounts(
-        Object.values(exactTotals).filter(amount => amount !== null),
-      )
-      return Object.freeze({
-        asset,
-        ...exactTotals,
-        amount: total,
-        total,
-      })
-    })),
+    otherAssets: otherAssetReadings,
+    valuation,
+    // What the fold could and could not value, so the surface can state a BNB
+    // fee as "not included" with its reason instead of a bare second number.
+    feeValuations: Array.isArray(round?.feeValuations) ? round.feeValuations : Object.freeze([]),
     from: round.openTime,
     complete: wallet.walletNet !== null,
     qualifications: wallet.qualifications,
@@ -472,6 +514,11 @@ const createInitialState = ({ enabled, connection, historyStoreReady = false }) 
   // caused move it, so the commit effect below runs on those and on nothing
   // else — a state set for any other reason leaves it where it was.
   frameRevision: 0,
+  // The settlement-asset prices foreign-asset fees are valued at, per pair and
+  // per minute (`{ BNBUSDT: { [minuteMs]: closeText | null } }`). Market data
+  // rather than account data: it survives an account reset, because the price
+  // of a minute does not depend on whose fee it values.
+  feeValuationPrices: {},
 })
 
 const resetFuturesAccountState = (
@@ -1095,6 +1142,20 @@ const useFuturesTrading = ({
             return next === previous.settledIncome
               ? previous
               : { ...previous, settledIncome: next }
+          })
+        }
+      }
+      if (payload.type === 'futures_fee_valuation') {
+        const frame = readFuturesFeeValuationFrame(payload)
+        if (frame !== null) {
+          setState((previous) => {
+            const feeValuationPrices = mergeFuturesFeeValuationPrices(
+              previous.feeValuationPrices,
+              frame,
+            )
+            return feeValuationPrices === previous.feeValuationPrices
+              ? previous
+              : { ...previous, feeValuationPrices }
           })
         }
       }
@@ -1952,6 +2013,13 @@ const useFuturesTrading = ({
   // lost transport to move the account away from it.
   const positionSnapshotComplete = state.accountResources.positions?.status === 'ready'
     || state.accountResources.positions?.status === 'stale'
+  // The minute prices the fold values foreign-asset fees at. Absent minutes
+  // answer null, the affected round degrades to "not included", and the ask
+  // effect below goes and buys exactly those minutes.
+  const feeValuationPriceAt = useMemo(
+    () => createFuturesFeeValuationPriceLookup(state.feeValuationPrices),
+    [state.feeValuationPrices],
+  )
   const baseTradeRoundIndex = useMemo(() => (
     buildFuturesTradeRoundIndex(roundTradeHistory.trades, {
       coverage: roundCoverageByPosition(
@@ -1963,8 +2031,10 @@ const useFuturesTrading = ({
       positions: roundPositionBasis,
       snapshotComplete: positionSnapshotComplete,
       generation: roundTradeHistory.generation,
+      feeValuationPriceAt,
     })
   ), [
+    feeValuationPriceAt,
     positionSnapshotComplete,
     roundPositionBasis,
     roundTradeHistory,
@@ -2027,6 +2097,50 @@ const useFuturesTrading = ({
     }).filter(Boolean)
     return Object.freeze(Object.fromEntries(entries))
   }, [openRounds, settledIncomeContentRevision])
+  // The wallet's remaining BNB fee reserve, valued at the newest priced minute
+  // — one global reading, marked low under its declared bound, honest about
+  // absence and unreadability. The operator's only warning before Binance
+  // silently reverts an empty reserve to undiscounted USDT fees.
+  const feeReserve = useMemo(() => readFuturesFeeReserve({
+    balances: state.balances,
+    prices: state.feeValuationPrices?.BNBUSDT ?? null,
+    now: Date.now(),
+  }), [state.balances, state.feeValuationPrices])
+  // Buys exactly the minutes the held rounds could not value, plus the newest
+  // complete minute for the reserve readout. Bounded per command, answered
+  // minutes never re-asked (a null answer is final), unanswered ones no more
+  // than once a minute — one weight-1 page ask, not a standing stream.
+  const feeValuationAsksRef = useRef(new Map())
+  useEffect(() => {
+    const send = sendCommandRef.current
+    if (typeof send !== 'function') return
+    const askedAtFloor = Date.now() - 60_000
+    const needed = collectFuturesFeeValuationMissingMinutes(tradeRoundIndex.all)
+    if (feeReserve.requestMinute !== null
+      && (feeReserve.state === 'unpriced'
+        || (feeReserve.priceMinute !== null
+          && feeReserve.priceMinute < feeReserve.requestMinute))) {
+      if (!needed.has(feeReserve.pair)) needed.set(feeReserve.pair, [])
+      needed.get(feeReserve.pair).unshift(feeReserve.requestMinute)
+    }
+    for (const [pair, minutes] of needed) {
+      const held = state.feeValuationPrices?.[pair] ?? {}
+      const ask = []
+      for (const minute of minutes) {
+        if (Object.hasOwn(held, minute)) continue
+        const askedAt = feeValuationAsksRef.current.get(`${pair}:${minute}`)
+        if (askedAt !== undefined && askedAt > askedAtFloor) continue
+        ask.push(minute)
+        if (ask.length >= FUTURES_FEE_VALUATION_COMMAND_MAX_MINUTES) break
+      }
+      if (ask.length === 0) continue
+      if (send(createFuturesFeeValuationCommand({ pair, minutes: ask })) === false) continue
+      const askedAt = Date.now()
+      for (const minute of ask) {
+        feeValuationAsksRef.current.set(`${pair}:${minute}`, askedAt)
+      }
+    }
+  }, [tradeRoundIndex, feeReserve, state.feeValuationPrices])
   const manualRefresh = useMemo(() => {
     const receipt = manualRefreshReceipt
     if (receipt === null || receipt.accountFingerprint !== state.accountFingerprint) return null
@@ -2073,6 +2187,8 @@ const useFuturesTrading = ({
     // The window the settled figures were read over, so a surface can say what
     // its reading covers rather than implying it covers everything.
     settledIncomeWindow,
+    // The global BNB fee-reserve reading for the dock's readout.
+    feeReserve,
     placeOrder,
     placeOrderAndConfirm,
     modifyOrder,
@@ -2094,6 +2210,7 @@ const useFuturesTrading = ({
     cancelOrder,
     cancelOrderAndConfirm,
     closePosition,
+    feeReserve,
     loadHistory,
     loadSymbolConfig,
     modifyOrder,

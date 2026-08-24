@@ -4079,3 +4079,167 @@ describe('useFuturesTrading held account review', () => {
     expect(result.current.history.readAt).toBeNull()
   })
 })
+
+// Since 2026-08-24 every fee on this account is charged in BNB. The hook asks
+// for exactly the minutes its rounds could not value, folds the answered
+// prices into the round net, and reads the wallet's remaining BNB reserve.
+describe('useFuturesTrading BNB fee valuation', () => {
+  const MINUTE = 60_000
+  const minuteA = 1_756_000_020_000
+  const minuteB = minuteA + (4 * MINUTE)
+
+  const bnbTrade = overrides => ({
+    symbol: 'BTCUSDT',
+    positionSide: 'BOTH',
+    side: 'BUY',
+    id: '1',
+    orderId: '101',
+    quantity: '1',
+    price: '100',
+    realizedPnl: '0',
+    commission: '0.003',
+    commissionAsset: 'BNB',
+    marginAsset: 'USDT',
+    time: minuteA + 1_000,
+    ...overrides,
+  })
+
+  const bnbHistory = () => historyEnvelope({
+    symbol: 'BTCUSDT',
+    symbols: ['BTCUSDT'],
+    views: ['trades'],
+    trades: [
+      bnbTrade(),
+      bnbTrade({
+        id: '2', orderId: '102', side: 'SELL', price: '110',
+        realizedPnl: '10', commission: '0.0033', time: minuteB + 1_000,
+      }),
+    ],
+    orders: [],
+    discovered: 1,
+    discoveryComplete: true,
+    readFrom: { BTCUSDT: { tradeCursor: null } },
+    tradeCoverage: {
+      BTCUSDT: {
+        version: 2,
+        targetFrom: 0,
+        targetTo: minuteB + MINUTE,
+        coveredFrom: minuteA,
+        coveredTo: minuteB + MINUTE,
+        complete: true,
+        flatBoundary: minuteA,
+        pageLimited: false,
+        retentionLimited: false,
+        continuityComplete: true,
+      },
+    },
+    error: null,
+  })
+
+  it('asks for the unpriced minutes and folds the answered prices into the net', () => {
+    const socket = createSocket()
+    const { result } = renderHook(() => useFuturesTrading({
+      enabled: true,
+      symbol: 'BTCUSDT',
+      wsConnection: socket,
+    }))
+    authorizeAccount(socket)
+    act(() => socket.receive(bnbHistory()))
+
+    // Unpriced: the round states the fee as not included and names its minutes.
+    const degraded = result.current.tradeRoundIndex.closed[0]
+    expect(degraded.feeValuations).toEqual([expect.objectContaining({
+      asset: 'BNB',
+      pair: 'BNBUSDT',
+      complete: false,
+      valuedAmount: null,
+      missingMinutes: [minuteA, minuteB],
+    })])
+    expect(degraded.netPnl).toBeCloseTo(10, 8)
+
+    // The hook asked the backend for exactly those minutes.
+    const asks = socket.sent.filter(command => command.action === 'account.feeValuation')
+    expect(asks).toHaveLength(1)
+    expect(asks[0].pair).toBe('BNBUSDT')
+    expect([...asks[0].minutes].sort((a, b) => a - b)).toEqual([minuteA, minuteB])
+
+    act(() => socket.receive({
+      type: 'futures_fee_valuation',
+      version: 1,
+      pair: 'BNBUSDT',
+      prices: { [minuteA]: '600', [minuteB]: '620' },
+      readAt: minuteB + MINUTE,
+    }))
+
+    // 0.003 × 600 + 0.0033 × 620 = 1.8 + 2.046 = 3.846, exactly.
+    const valued = result.current.tradeRoundIndex.closed[0]
+    expect(valued.feeValuations).toEqual([expect.objectContaining({
+      asset: 'BNB',
+      complete: true,
+      valuedAmount: '3.846',
+    })])
+    // The fill fold's own net carries the valuation; the enriched display net
+    // follows the wallet ledger, whose income coverage this test never supplies.
+    expect(valued.fillNetPnl).toBeCloseTo(10 - 3.846, 8)
+    // The exact per-asset record is untouched by the valuation.
+    expect(valued.feesByAsset).toEqual([expect.objectContaining({
+      asset: 'BNB', amountExact: '0.0063',
+    })])
+    // An answered minute is never asked again.
+    const askedAgain = socket.sent.filter(command => command.action === 'account.feeValuation')
+    expect(askedAgain).toHaveLength(1)
+  })
+
+  it('reads the BNB fee reserve from the balances and values it at the answered minute', () => {
+    const socket = createSocket()
+    const { result } = renderHook(() => useFuturesTrading({
+      enabled: true,
+      symbol: 'BTCUSDT',
+      wsConnection: socket,
+    }))
+    authorizeAccount(socket, {
+      balances: {
+        status: 'ready',
+        data: { BNB: { available: '0.9', total: '1.0' } },
+        updatedAt: HISTORY_READ_AT,
+        lastSuccessfulAt: HISTORY_READ_AT,
+        error: null,
+      },
+    })
+
+    // BNB held, no price yet: the worth is unknown, never zero.
+    expect(result.current.feeReserve).toMatchObject({ state: 'unpriced', amount: '1.0' })
+    const requestMinute = result.current.feeReserve.requestMinute
+    const asks = socket.sent.filter(command => command.action === 'account.feeValuation')
+    expect(asks.length).toBeGreaterThan(0)
+    expect(asks[0].minutes).toContain(requestMinute)
+
+    act(() => socket.receive({
+      type: 'futures_fee_valuation',
+      version: 1,
+      pair: 'BNBUSDT',
+      prices: { [requestMinute]: '612.34' },
+      readAt: requestMinute + MINUTE,
+    }))
+
+    expect(result.current.feeReserve).toMatchObject({
+      state: 'ok',
+      price: '612.34',
+      low: false,
+    })
+    expect(result.current.feeReserve.worth).toBeCloseTo(612.34, 6)
+
+    // The reserve drains below the bound: the reading marks itself low.
+    authorizeAccount(socket, {
+      balances: {
+        status: 'ready',
+        data: { BNB: { available: '0.07', total: '0.07' } },
+        updatedAt: HISTORY_READ_AT + 1,
+        lastSuccessfulAt: HISTORY_READ_AT + 1,
+        error: null,
+      },
+    })
+    expect(result.current.feeReserve).toMatchObject({ state: 'low', low: true })
+    expect(result.current.feeReserve.worth).toBeLessThan(50)
+  })
+})

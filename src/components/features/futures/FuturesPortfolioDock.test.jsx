@@ -469,13 +469,15 @@ describe('FuturesPortfolioDock', () => {
     )
     const settled = screen.getByRole('table', { name: 'Open positions' })
       .querySelector('.futures-workstation-dock-settled')
+    // The face is one settlement-asset number — the operator ruled the BNB
+    // second line off the row (2026-08-24); the quantity lives in the title.
     expect(settled).toHaveTextContent('+10.00 USDT')
-    expect(settled).toHaveTextContent('−0.003 BNB')
+    expect(settled).not.toHaveTextContent('BNB')
     expect(settled.getAttribute('title')).toContain('−0.003 BNB settled')
     expect(settled.getAttribute('title')).toContain('not converted')
   })
 
-  it('renders a BNB-only open-position reading with its asset instead of a bare dash', () => {
+  it('keeps a BNB-only open-position reading off the face and states it in the title', () => {
     render(
       <FuturesPortfolioDock
         selectedSymbol="BTCUSDT"
@@ -508,7 +510,10 @@ describe('FuturesPortfolioDock', () => {
 
     const settled = screen.getByRole('table', { name: 'Open positions' })
       .querySelector('.futures-workstation-dock-settled')
-    expect(settled).toHaveTextContent('−0.003 BNB')
+    // No settlement-asset figure and no visible BNB line: the face stays a
+    // dash and the element carries the whole statement.
+    expect(settled).toHaveTextContent('—')
+    expect(settled).not.toHaveTextContent('BNB')
     expect(settled.getAttribute('title')).toContain('−0.003 BNB settled')
     expect(settled.getAttribute('title')).toContain('not converted')
   })
@@ -546,11 +551,214 @@ describe('FuturesPortfolioDock', () => {
 
     const settled = screen.getByRole('table', { name: 'Open positions' })
       .querySelector('.futures-workstation-dock-settled')
-    expect(settled).toHaveTextContent('0.00 BNB')
-    expect(settled).toHaveClass('is-flat')
+    // Off the face like every foreign-asset line; the title still states the
+    // flat zero rather than null.
+    expect(settled).not.toHaveTextContent('BNB')
     expect(settled).not.toHaveTextContent('null')
     expect(settled.getAttribute('title')).toContain('0.00 BNB settled')
     expect(settled.getAttribute('title')).not.toContain('null')
+  })
+
+  // Since 2026-08-24 every fee on this account is charged in BNB. When the
+  // fold valued it at its charge's own minute, the face's one number includes
+  // it and the title decomposes both quantities with the price used.
+  it('folds a valued BNB fee into the settled face number and titles both quantities', () => {
+    const valuation = {
+      asset: 'BNB',
+      pair: 'BNBUSDT',
+      amount: 0.003,
+      amountExact: '0.003',
+      valuedAmount: '1.83702',
+      complete: true,
+      prices: [{ price: '612.34', minute: 1_756_000_020_000 }],
+      missingMinutes: [],
+    }
+    render(
+      <FuturesPortfolioDock
+        selectedSymbol="BTCUSDT"
+        positions={[position]}
+        settledMoney={{
+          'BTCUSDT:BOTH': {
+            symbol: 'BTCUSDT',
+            positionKey: 'BTCUSDT:BOTH',
+            realizedPnl: '10',
+            funding: null,
+            commission: null,
+            insuranceClear: null,
+            total: '10',
+            settlementAsset: 'USDT',
+            otherAssets: [{
+              asset: 'BNB',
+              amount: '-0.003',
+              realizedPnl: null,
+              funding: null,
+              commission: '-0.003',
+              insuranceClear: null,
+              total: '-0.003',
+            }],
+            valuation: {
+              amount: '8.16298',
+              settlementAsset: 'USDT',
+              settlementAmount: '10',
+              valuations: [valuation],
+            },
+            feeValuations: [valuation],
+            from: 1_000,
+            complete: true,
+          },
+        }}
+      />,
+    )
+
+    const settled = screen.getByRole('table', { name: 'Open positions' })
+      .querySelector('.futures-workstation-dock-settled')
+    expect(settled).toHaveTextContent('+8.16 USDT')
+    expect(settled).not.toHaveTextContent('BNB')
+    expect(settled).toHaveClass('is-positive')
+    const title = settled.getAttribute('title')
+    expect(title).toContain('+8.16298 USDT settled')
+    expect(title).toContain('fee 0.003 BNB valued −1.83702 USDT')
+    expect(title).toContain('BNBUSDT 612.34')
+    expect(title).not.toContain('not converted')
+  })
+
+  it('states an unpriced BNB fee as not included instead of a wrong number', () => {
+    render(
+      <FuturesPortfolioDock
+        selectedSymbol="BTCUSDT"
+        positions={[position]}
+        settledMoney={{
+          'BTCUSDT:BOTH': {
+            symbol: 'BTCUSDT',
+            positionKey: 'BTCUSDT:BOTH',
+            realizedPnl: '10',
+            funding: null,
+            commission: null,
+            insuranceClear: null,
+            total: '10',
+            settlementAsset: 'USDT',
+            otherAssets: [{
+              asset: 'BNB',
+              amount: '-0.003',
+              realizedPnl: null,
+              funding: null,
+              commission: '-0.003',
+              insuranceClear: null,
+              total: '-0.003',
+            }],
+            valuation: null,
+            feeValuations: [{
+              asset: 'BNB',
+              pair: 'BNBUSDT',
+              amount: 0.003,
+              amountExact: '0.003',
+              valuedAmount: null,
+              complete: false,
+              prices: [],
+              missingMinutes: [1_756_000_020_000],
+            }],
+            from: 1_000,
+            complete: true,
+          },
+        }}
+      />,
+    )
+
+    const settled = screen.getByRole('table', { name: 'Open positions' })
+      .querySelector('.futures-workstation-dock-settled')
+    expect(settled).toHaveTextContent('+10.00 USDT')
+    expect(settled).not.toHaveTextContent('BNB')
+    const title = settled.getAttribute('title')
+    expect(title).toContain('fee 0.003 BNB not included')
+    expect(title).toContain('no readable BNBUSDT price')
+    expect(title).not.toContain('valued')
+  })
+
+  // One global readout for the remaining fee reserve — the operator ruled it
+  // off the rows — warning ahead of Binance's silent revert to USDT fees.
+  it('shows the BNB fee reserve globally and marks it low under its bound', () => {
+    const minute = 1_756_000_020_000
+    const { rerender } = render(
+      <FuturesPortfolioDock
+        selectedSymbol="BTCUSDT"
+        positions={[position]}
+        feeReserve={{
+          state: 'ok', asset: 'BNB', pair: 'BNBUSDT', lowBoundUsdt: 50,
+          amount: '1.0', worth: 612.34, price: '612.34', priceMinute: minute,
+          low: false, requestMinute: minute,
+        }}
+      />,
+    )
+    const readout = screen.getByTestId('futures-fee-reserve')
+    expect(readout).toHaveTextContent('BNB fee reserve')
+    expect(readout).toHaveTextContent('≈612.34 USDT')
+    expect(readout).not.toHaveTextContent('low')
+    expect(readout.getAttribute('title')).toContain('1.0 BNB')
+    expect(readout.getAttribute('title')).toContain('BNBUSDT 612.34')
+    expect(readout.getAttribute('title')).toContain('silently')
+
+    rerender(
+      <FuturesPortfolioDock
+        selectedSymbol="BTCUSDT"
+        positions={[position]}
+        feeReserve={{
+          state: 'low', asset: 'BNB', pair: 'BNBUSDT', lowBoundUsdt: 50,
+          amount: '0.07', worth: 42.86, price: '612.34', priceMinute: minute,
+          low: true, requestMinute: minute,
+        }}
+      />,
+    )
+    const low = screen.getByTestId('futures-fee-reserve')
+    expect(low).toHaveTextContent('≈42.86 USDT')
+    expect(low).toHaveTextContent('low')
+    expect(low).toHaveClass('is-negative')
+  })
+
+  it('states an absent or unpriced fee reserve instead of a zero that looks read', () => {
+    const { rerender } = render(
+      <FuturesPortfolioDock
+        selectedSymbol="BTCUSDT"
+        positions={[position]}
+        feeReserve={{
+          state: 'absent', asset: 'BNB', pair: 'BNBUSDT', lowBoundUsdt: 50,
+          amount: null, worth: null, price: null, priceMinute: null,
+          low: false, requestMinute: 1_756_000_020_000,
+        }}
+      />,
+    )
+    const absent = screen.getByTestId('futures-fee-reserve')
+    expect(absent).toHaveTextContent('none')
+    expect(absent).toHaveTextContent('low')
+    expect(absent.getAttribute('title')).toContain('No BNB in the Futures wallet')
+
+    rerender(
+      <FuturesPortfolioDock
+        selectedSymbol="BTCUSDT"
+        positions={[position]}
+        feeReserve={{
+          state: 'unpriced', asset: 'BNB', pair: 'BNBUSDT', lowBoundUsdt: 50,
+          amount: '1.0', worth: null, price: null, priceMinute: null,
+          low: false, requestMinute: 1_756_000_020_000,
+        }}
+      />,
+    )
+    const unpriced = screen.getByTestId('futures-fee-reserve')
+    expect(unpriced).toHaveTextContent('1.0 BNB')
+    expect(unpriced.getAttribute('title')).toContain('worth is unknown')
+
+    rerender(
+      <FuturesPortfolioDock
+        selectedSymbol="BTCUSDT"
+        positions={[position]}
+        feeReserve={{
+          state: 'unread', asset: 'BNB', pair: 'BNBUSDT', lowBoundUsdt: 50,
+          amount: null, worth: null, price: null, priceMinute: null,
+          low: false, requestMinute: null,
+        }}
+      />,
+    )
+    expect(screen.getByTestId('futures-fee-reserve'))
+      .toHaveTextContent('—')
   })
 
   it('renders open contract and account adjustments once outside leg rows', () => {

@@ -9,6 +9,11 @@ import {
 } from '../../../utils/futuresPriceFormat.js'
 import { exactFuturesDeskTime, formatFuturesDeskTime } from '../../../utils/futuresDeskTime.js'
 import { futuresSharedAdjustmentKey } from '../../../utils/futuresWalletPresentation.js'
+import {
+  futuresFeeNotIncludedTitle,
+  futuresFeeValuationTitle,
+  valueFuturesForeignFees,
+} from '../../../utils/futuresFeeValuation.js'
 
 const EMPTY_ROWS = Object.freeze([])
 const EMPTY_TICKS = Object.freeze({})
@@ -312,11 +317,41 @@ const roundMoneyReading = (round, settledStatus = null) => {
       && qualificationCodes.length === 0
       ? walletNet
       : null
+    // A bucket blocked only by a foreign-asset fee is valued into one
+    // settlement-asset net when every foreign amount is exactly the round's
+    // charged fee with a complete minute-price valuation behind it. The
+    // per-asset record stays untouched underneath; this is the presented sum.
+    const valuation = exact === null
+      && qualificationCodes.every(code => code === 'MULTI_ASSET')
+      ? valueFuturesForeignFees({
+        amounts: walletAmounts(wallet),
+        settlementAsset: round?.settlementAsset,
+        feeValuations: round?.feeValuations,
+      })
+      : null
+    if (valuation !== null) {
+      return {
+        exact: true,
+        legacy: false,
+        label: 'Wallet Net',
+        amounts: [{ asset: valuation.settlementAsset, amount: valuation.amount }],
+        valuation,
+        unvaluedFees: EMPTY_ROWS,
+        qualificationCodes: [],
+        qualifications: [],
+      }
+    }
+    // A fee whose minute price was unreadable is stated as not included, with
+    // its reason, beside today's per-asset statement.
+    const unvaluedFees = (Array.isArray(round?.feeValuations) ? round.feeValuations : [])
+      .filter(candidate => candidate.complete !== true)
     return {
       exact: exact !== null,
       legacy: false,
       label: exact === null ? 'Visible net' : 'Wallet Net',
       amounts: exact === null ? walletAmounts(wallet) : [exact],
+      valuation: null,
+      unvaluedFees,
       qualificationCodes,
       qualifications: qualificationCodes.length > 0
         ? qualificationCodes.map(qualificationLabel)
@@ -370,6 +405,10 @@ const roundResultTitle = (round, reading = roundMoneyReading(round)) => {
     const amounts = reading.amounts.map(signedLedgerAmount).filter(Boolean)
     return [
       `${reading.label}: ${amounts.length > 0 ? amounts.join(' · ') : 'unknown'}`,
+      // A valued foreign fee names both quantities and the price it used; an
+      // unvalued one is stated in its own asset as not included, with why.
+      ...(reading.valuation?.valuations ?? []).map(futuresFeeValuationTitle),
+      ...(reading.unvaluedFees ?? []).map(futuresFeeNotIncludedTitle),
       ...reading.qualifications,
     ].join(' · ')
   }

@@ -239,6 +239,109 @@ describe('FuturesHistoryPanel', () => {
     expect(result.getAttribute('title')).toContain(`Wallet Net: +${exactAmount} USDT`)
   })
 
+  // Since 2026-08-24 the account pays every fee in BNB. A round whose only
+  // obstacle to one number is that fee gets the fee valued at its charge's
+  // own minute — both quantities and the price on the element, one USDT
+  // figure in the net, and never a visible BNB line on the row face.
+  it('values a BNB fee into the wallet net and names both quantities with the price', () => {
+    const bnbFeeRound = indexedClosedRound({
+      netExact: false,
+      wallet: {
+        walletNet: null,
+        visibleNet: [
+          { asset: 'USDT', amount: '10' },
+          { asset: 'BNB', amount: '-0.003' },
+        ],
+        qualifications: ['MULTI_ASSET'],
+      },
+      feesByAsset: [{ asset: 'BNB', amount: 0.003, amountExact: '0.003' }],
+      feeValuations: [{
+        asset: 'BNB',
+        pair: 'BNBUSDT',
+        amount: 0.003,
+        amountExact: '0.003',
+        valuedAmount: '1.83702',
+        complete: true,
+        prices: [{ price: '612.34', minute: 1_756_000_020_000 }],
+        missingMinutes: [],
+      }],
+    })
+    render(
+      <FuturesHistoryPanel
+        view="tradeHistory"
+        symbol="BTCUSDT"
+        tickSizes={ticks}
+        history={{ ...history, trades: [] }}
+        tradeRoundIndex={{
+          closed: [bnbFeeRound],
+          unresolved: [],
+          sharedAdjustments: [],
+        }}
+      />,
+    )
+
+    const cells = within(screen.getByRole('row', { name: /BTCUSDT/ }))
+      .getAllByRole('cell')
+    const result = cells[6]
+    // The face stays the exchange's realized PnL — one number, no BNB line.
+    expect(result).toHaveTextContent('+10.00 USDT')
+    expect(result).not.toHaveTextContent('BNB')
+    const title = result.getAttribute('title')
+    expect(title).toContain('Wallet Net: +8.16298 USDT')
+    expect(title).toContain('fee 0.003 BNB valued −1.83702 USDT')
+    expect(title).toContain('BNBUSDT 612.34')
+    expect(title).not.toContain('Amounts settle in multiple assets')
+  })
+
+  it('degrades an unpriced BNB fee to the not-included statement, never a number', () => {
+    const degradedRound = indexedClosedRound({
+      netExact: false,
+      wallet: {
+        walletNet: null,
+        visibleNet: [
+          { asset: 'USDT', amount: '10' },
+          { asset: 'BNB', amount: '-0.003' },
+        ],
+        qualifications: ['MULTI_ASSET'],
+      },
+      feesByAsset: [{ asset: 'BNB', amount: 0.003, amountExact: '0.003' }],
+      feeValuations: [{
+        asset: 'BNB',
+        pair: 'BNBUSDT',
+        amount: 0.003,
+        amountExact: '0.003',
+        valuedAmount: null,
+        complete: false,
+        prices: [],
+        missingMinutes: [1_756_000_020_000],
+      }],
+    })
+    render(
+      <FuturesHistoryPanel
+        view="tradeHistory"
+        symbol="BTCUSDT"
+        tickSizes={ticks}
+        history={{ ...history, trades: [] }}
+        tradeRoundIndex={{
+          closed: [degradedRound],
+          unresolved: [],
+          sharedAdjustments: [],
+        }}
+      />,
+    )
+
+    const cells = within(screen.getByRole('row', { name: /BTCUSDT/ }))
+      .getAllByRole('cell')
+    const result = cells[6]
+    expect(result).not.toHaveTextContent('BNB')
+    const title = result.getAttribute('title')
+    // Today's honest statement survives; nothing invents a price.
+    expect(title).toContain('Visible net: +10 USDT')
+    expect(title).toContain('fee 0.003 BNB not included')
+    expect(title).toContain('no readable BNBUSDT price')
+    expect(title).not.toContain('valued')
+  })
+
   it('rounds the PnL cell to cents and keeps the exact figure lossless on the element', () => {
     const exactGross = [
       {

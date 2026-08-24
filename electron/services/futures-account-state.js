@@ -40,6 +40,10 @@ export const FUTURES_ACCOUNT_READ_REASONS = Object.freeze([
     // the desk has no reading it can prove the reduction against and asked for
     // one rather than refusing the operator's close on sight.
     'proof',
+    // Minute klines bought to value a foreign-asset fee in the settlement
+    // asset. Not an account resource at all — the journal line borrows this
+    // vocabulary so the ask's cost is on the record like every other read.
+    'fee-valuation',
 ]);
 
 /**

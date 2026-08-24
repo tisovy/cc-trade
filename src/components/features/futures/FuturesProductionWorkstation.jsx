@@ -549,6 +549,7 @@ export const FuturesProductionWorkstation = ({
       settledMoney={executionState?.settledMoney}
       settledWindow={executionState?.settledIncomeWindow}
       settledIncome={executionState?.settledIncome}
+      feeReserve={executionState?.feeReserve}
       tradeRoundIndex={executionState?.tradeRoundIndex}
       onClosePosition={handlePositionClose}
       onCancelOrder={executionState?.cancelOrder}

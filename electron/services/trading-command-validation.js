@@ -14,6 +14,10 @@ import {
     TRADING_COMMAND_ACTIONS,
     isTypedTradingAction,
 } from '../../src/utils/tradingCommands.js';
+import {
+    normalizeFuturesFeeValuationMinutes,
+    normalizeFuturesFeeValuationPair,
+} from './futures-fee-valuation.js';
 
 const SUPPORTED_MARKET_TYPES = new Set([SPOT_MARKET_TYPE, FUTURES_MARKET_TYPE]);
 const FUTURES_ORDER_TYPES = new Set(['LIMIT', 'MARKET']);
@@ -828,6 +832,39 @@ export const validateTypedTradingCommand = (payload, { selectedSymbol } = {}) =>
                     ...(views === null ? {} : { views }),
                 },
             };
+        }
+        case TRADING_COMMAND_ACTIONS.ACCOUNT_FEE_VALUATION: {
+            if (baseCommand.marketType !== FUTURES_MARKET_TYPE) {
+                return rejectDefinedButDisabledCommand(payload, baseCommand);
+            }
+            // The pair and the minutes are re-bounded by the price source; this
+            // boundary refuses shapes, not budgets, so a malformed ask never
+            // reaches the code that spends weight.
+            const pair = normalizeFuturesFeeValuationPair(payload.pair);
+            if (pair === null) {
+                return {
+                    ok: false,
+                    rejection: createTypedCommandRejection(
+                        payload,
+                        'INVALID_TYPED_FEE_VALUATION_PAIR',
+                        'account.feeValuation requires a canonical pair symbol',
+                        { field: 'pair', value: payload.pair },
+                    ),
+                };
+            }
+            const minutes = normalizeFuturesFeeValuationMinutes(payload.minutes);
+            if (minutes.length === 0) {
+                return {
+                    ok: false,
+                    rejection: createTypedCommandRejection(
+                        payload,
+                        'INVALID_TYPED_FEE_VALUATION_MINUTES',
+                        'account.feeValuation requires at least one valid minute',
+                        { field: 'minutes' },
+                    ),
+                };
+            }
+            return { ok: true, command: { ...baseCommand, pair, minutes } };
         }
         case TRADING_COMMAND_ACTIONS.SET_TRADING_PAUSED: {
             if (baseCommand.marketType !== FUTURES_MARKET_TYPE) {
