@@ -4190,6 +4190,101 @@ describe('useFuturesTrading BNB fee valuation', () => {
     expect(askedAgain).toHaveLength(1)
   })
 
+  it('values an open reading only when the bucket is blocked by nothing but the assets', () => {
+    const feeValuation = Object.freeze({
+      asset: 'BNB',
+      pair: 'BNBUSDT',
+      amount: 0.003,
+      amountExact: '0.003',
+      valuedAmount: '1.83702',
+      complete: true,
+      prices: Object.freeze([{ price: '612.34', minute: 1_756_000_020_000 }]),
+      missingMinutes: Object.freeze([]),
+    })
+    const openBnbRound = (key, symbol, openTime, closeTime) => Object.freeze({
+      key,
+      symbol,
+      positionKey: `${symbol}:LONG`,
+      leg: 'LONG',
+      positionSide: 'LONG',
+      fillIds: [`${key}-fill`],
+      openTime,
+      closeTime,
+      open: true,
+      partial: false,
+      resolved: true,
+      settlementAsset: 'USDT',
+      exitPrice: null,
+      realizedPnl: '10',
+      realizedPnlExact: '10',
+      feesByAsset: [{ asset: 'BNB', amount: '0.003' }],
+      feeValuations: Object.freeze([feeValuation]),
+      tradeCoverage: true,
+      commissionCoverage: true,
+    })
+    // The income read reaches back to 1_000: it covers the round opened at
+    // 2_000 and does not cover the one opened at 500.
+    const coveredRound = openBnbRound('covered-bnb-round', 'BTCUSDT', 2_000, 3_000)
+    const gatedRound = openBnbRound('gated-bnb-round', 'ETHUSDT', 500, 900)
+    vi.spyOn(futuresTradeRounds, 'buildFuturesTradeRoundIndex')
+      .mockReturnValue(Object.freeze({
+        version: 2,
+        rounds: Object.freeze([coveredRound, gatedRound]),
+        all: Object.freeze([coveredRound, gatedRound]),
+        open: Object.freeze([coveredRound, gatedRound]),
+        closed: Object.freeze([]),
+        unresolved: Object.freeze([]),
+        byPosition: Object.freeze({}),
+        legacyRounds: Object.freeze([coveredRound, gatedRound]),
+      }))
+    const socket = createSocket()
+    const { result } = renderHook(() => useFuturesTrading({
+      enabled: true,
+      symbol: 'BTCUSDT',
+      wsConnection: socket,
+    }))
+    authorizeAccount(socket)
+
+    act(() => socket.receive({
+      type: 'futures_settled_income',
+      version: 2,
+      accountFingerprint: ACCOUNT_FINGERPRINT,
+      generation: 1,
+      digest: 'valued-open-money',
+      lanes: settledIncomeLanes({
+        coveredFrom: 1_000,
+        coveredTo: 5_000,
+        targetTo: 5_000,
+        status: 'ready',
+        attemptedAt: 5_000,
+        successfulAt: 5_000,
+        complete: true,
+        error: null,
+      }),
+      coveredFrom: 1_000,
+      coveredTo: 5_000,
+      targetTo: 5_000,
+      readAt: 5_000,
+      attemptedAt: 5_000,
+      successfulAt: 5_000,
+      status: 'ready',
+      complete: true,
+    }))
+
+    // Blocked by nothing but the BNB fee: the reading presents one valued
+    // number, as covered as an exact wallet net.
+    const covered = result.current.settledMoney['BTCUSDT:LONG']
+    expect(covered.valuation).toMatchObject({ amount: '8.16298', settlementAsset: 'USDT' })
+    expect(covered.complete).toBe(true)
+
+    // The income read does not reach this round's open: the same coverage
+    // qualification that degrades a closed round degrades this valuation.
+    const gated = result.current.settledMoney['ETHUSDT:LONG']
+    expect(gated.qualifications).not.toEqual([])
+    expect(gated.valuation).toBeNull()
+    expect(gated.complete).toBe(false)
+  })
+
   it('reads the BNB fee reserve from the balances and values it at the answered minute', () => {
     const socket = createSocket()
     const { result } = renderHook(() => useFuturesTrading({

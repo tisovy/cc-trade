@@ -390,19 +390,26 @@ const settledReadingFromWallet = (round, wallet, settlementAsset = round?.settle
     })
   }))
   // A BNB commission valued in the settlement asset, folded onto the exact
-  // settlement total for presentation. Only when every foreign amount is
-  // exactly the round's charged fee with a complete valuation behind it;
-  // anything else keeps the per-asset statement, degraded to "not included".
-  const valuation = valueFuturesForeignFees({
-    amounts: [
-      { asset: settlementAsset, amount: settlementTotal ?? '0' },
-      ...otherAssetReadings
-        .filter(reading => reading.total !== null)
-        .map(reading => ({ asset: reading.asset, amount: reading.total })),
-    ],
-    settlementAsset,
-    feeValuations: round?.feeValuations,
-  })
+  // settlement total for presentation. The same gate the closed-round surfaces
+  // apply — the bucket may be blocked by nothing but the multiple assets — so
+  // a coverage-qualified reading degrades everywhere identically. Within the
+  // gate, every foreign amount must be exactly the round's charged fee with a
+  // complete valuation behind it; anything else keeps the per-asset statement,
+  // degraded to "not included".
+  const bucketBlockedOnlyByAssets = (wallet.qualifications ?? [])
+    .every(code => code === 'MULTI_ASSET')
+  const valuation = bucketBlockedOnlyByAssets
+    ? valueFuturesForeignFees({
+      amounts: [
+        { asset: settlementAsset, amount: settlementTotal ?? '0' },
+        ...otherAssetReadings
+          .filter(reading => reading.total !== null)
+          .map(reading => ({ asset: reading.asset, amount: reading.total })),
+      ],
+      settlementAsset,
+      feeValuations: round?.feeValuations,
+    })
+    : null
   return Object.freeze({
     symbol: round.symbol,
     positionKey: round.positionKey,
@@ -415,7 +422,10 @@ const settledReadingFromWallet = (round, wallet, settlementAsset = round?.settle
     // fee as "not included" with its reason instead of a bare second number.
     feeValuations: Array.isArray(round?.feeValuations) ? round.feeValuations : Object.freeze([]),
     from: round.openTime,
-    complete: wallet.walletNet !== null,
+    // A valued reading is as covered as an exact wallet net: the gate above
+    // proves the multiple assets were the bucket's only obstacle, so the
+    // "covers the read, not the whole life" note must not fire on it.
+    complete: wallet.walletNet !== null || valuation !== null,
     qualifications: wallet.qualifications,
   })
 }

@@ -33,6 +33,7 @@ import {
   futuresFeeNotIncludedTitle,
   futuresFeeValuationTitle,
 } from '../../../utils/futuresFeeValuation.js'
+import { sumFuturesWalletDecimalAmounts } from '../../../utils/futuresWalletLedger.js'
 import FuturesHistoryPanel from './FuturesHistoryPanel.jsx'
 
 const EMPTY_ROWS = Object.freeze([])
@@ -266,18 +267,25 @@ const settledTitle = (settled, window, read, position) => {
       const breakdown = settledBreakdown(settled)
       if (breakdown.length > 0) parts.push(breakdown.join(' · '))
     }
-    // Charged in something the desk could not value: a fee whose minute price
-    // was unreadable is stated as not included, anything else in a foreign
-    // asset keeps its own-asset statement. Neither reaches the face.
+    // Charged in something the desk could not value. The own-asset movement is
+    // always stated; where the fold refused a fee's valuation, why it is not
+    // in the number is stated beside it — replacing the movement with the
+    // reason would hide a foreign amount that is more than the fee (a partial
+    // refund, a mismatched record). When the amount IS exactly the unvalued
+    // fee, the reason alone says everything the movement line would.
     for (const other of settled.otherAssets) {
       const unvalued = (Array.isArray(settled.feeValuations) ? settled.feeValuations : [])
         .find(candidate => candidate.asset === other.asset && candidate.complete !== true)
-      if (unvalued !== undefined) {
-        parts.push(futuresFeeNotIncludedTitle(unvalued))
-        continue
+      const feeQuantity = unvalued === undefined
+        ? null
+        : String(unvalued.amountExact ?? unvalued.amount ?? '')
+      const amountIsExactlyTheFee = feeQuantity !== null
+        && sumFuturesWalletDecimalAmounts([String(other.total ?? ''), feeQuantity]) === '0'
+      if (!amountIsExactlyTheFee) {
+        parts.push(`${signedAssetAmount(other) ?? `${other.total} ${other.asset}`} settled; ${
+          settledBreakdown(other).join(' · ')} not converted`)
       }
-      parts.push(`${signedAssetAmount(other) ?? `${other.total} ${other.asset}`} settled; ${
-        settledBreakdown(other).join(' · ')} not converted`)
+      if (unvalued !== undefined) parts.push(futuresFeeNotIncludedTitle(unvalued))
     }
   }
   // What the figure covers. A total silently missing eight hours of funding is
@@ -347,8 +355,12 @@ const feeReserveReading = (reserve) => {
   }
   const worth = `≈${reserve.worth.toFixed(2)} USDT`
   const pricedAt = exactFuturesDeskTime(reserve.priceMinute)
+  // Both quantities on the face — the amount is what the operator asked to
+  // watch, the worth is what the low bound is measured in. The exact amount
+  // text stays on the element; the face keeps a readable shortening.
+  const shownAmount = Number(reserve.amount)
   return {
-    text: `${worth}`,
+    text: `${Number.isFinite(shownAmount) ? shownAmount : reserve.amount} ${reserve.asset} ${worth}`,
     tone: reserve.low ? 'negative' : 'flat',
     low: reserve.low,
     title: `${reserve.amount} ${reserve.asset} remaining, worth ${worth} at `

@@ -691,7 +691,9 @@ describe('FuturesPortfolioDock', () => {
     )
     const readout = screen.getByTestId('futures-fee-reserve')
     expect(readout).toHaveTextContent('BNB fee reserve')
-    expect(readout).toHaveTextContent('≈612.34 USDT')
+    // Both quantities on the face: the amount the operator watches and the
+    // worth the low bound is measured in.
+    expect(readout).toHaveTextContent('1 BNB ≈612.34 USDT')
     expect(readout).not.toHaveTextContent('low')
     expect(readout.getAttribute('title')).toContain('1.0 BNB')
     expect(readout.getAttribute('title')).toContain('BNBUSDT 612.34')
@@ -709,7 +711,7 @@ describe('FuturesPortfolioDock', () => {
       />,
     )
     const low = screen.getByTestId('futures-fee-reserve')
-    expect(low).toHaveTextContent('≈42.86 USDT')
+    expect(low).toHaveTextContent('0.07 BNB ≈42.86 USDT')
     expect(low).toHaveTextContent('low')
     expect(low).toHaveClass('is-negative')
   })

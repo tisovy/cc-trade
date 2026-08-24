@@ -342,9 +342,14 @@ const roundMoneyReading = (round, settledStatus = null) => {
       }
     }
     // A fee whose minute price was unreadable is stated as not included, with
-    // its reason, beside today's per-asset statement.
-    const unvaluedFees = (Array.isArray(round?.feeValuations) ? round.feeValuations : [])
-      .filter(candidate => candidate.complete !== true)
+    // its reason, beside today's per-asset statement. Only where the wallet
+    // result actually excludes something: an exact single-asset Wallet Net
+    // means every foreign movement cancelled per-asset (a refunded fee), and
+    // claiming a fee "not included" against it would invent missing money.
+    const unvaluedFees = exact === null
+      ? (Array.isArray(round?.feeValuations) ? round.feeValuations : [])
+        .filter(candidate => candidate.complete !== true)
+      : EMPTY_ROWS
     return {
       exact: exact !== null,
       legacy: false,
