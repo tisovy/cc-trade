@@ -120,9 +120,16 @@
 
 ## 8. Operator gate
 
-- [ ] 8.1 The settled column and the closed rounds show the same figures after
+- [x] 8.1 The settled column and the closed rounds show the same figures after
   the change as before it. This change is about what the desk spends, not about
   what it says, and any difference in a number is a defect in it.
+  **Closed by the probe, 2026-08-24** (operator ran it against Production):
+  canonical NET equals visible NET on all nine closed rounds, and the wallet
+  audit holds `conserved=true disjoint=true presentationDisjoint=true
+  additive=true` with canonical and assigned totals identical to the last
+  decimal (4654.31822757 USDT), `identity conflicts: 0, invalid inputs: 0`.
+  The income-vs-fills difference the probe exists to print is zero. Recorded
+  in `openspec/live-verification-ledger.md`.
 
 ## 9. Audit of this change
 

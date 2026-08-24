@@ -545,7 +545,7 @@ runbook assembled the same day. Desk restarts in the journal: 17:40:15 UTC
 | `state-what-an-open-position-has-already-paid` | 5.7 | `CONFIRMED` | Test VELVETUSDT position: desk 0.37 commission vs app 0.38 — one-cent rounding class, already settled as not-a-defect; uPnL exact. 5.8 (funding boundary) did not fall inside the sitting and stays open. |
 | `let-the-operator-own-the-margin-mode` | 5.4 | `CONFIRMED` | Row updated above: `CROSS 1×` from the first frame after an app-side change with the desk down. |
 | `read-only-the-income-the-desk-cannot-derive` | 1.3–1.4 | `ANSWERED` | `rebateRows: 0` across every settled line of the day (no rebate rows on this account; counters keep watching). Operator: positions are isolated by policy, default ×1 isolated everywhere. |
-| `verify-final-futures-pnl-live-data` | 1.5, USDC half | `N/A BY OPERATOR, PERMANENT` | "USDC НИКОГДА не использовал и скорей всего НИКОГДА не буду" — USDC is officially unsupported; if that ever changes it gets its own announced change. Deterministic fixture coverage retained. BNB half is now **suspended, decision pending**: the operator is considering enabling BNB fee payment for the 10% discount — if enabled, BNB commission becomes applicable and needs its own change before the columns can value it. |
+| `verify-final-futures-pnl-live-data` | 1.5, USDC half | `N/A BY OPERATOR, PERMANENT` | "USDC НИКОГДА не использовал и скорей всего НИКОГДА не буду" — USDC is officially unsupported; if that ever changes it gets its own announced change. Deterministic fixture coverage retained. BNB half: **the operator enabled BNB fee payment the same day** (1 BNB transferred, discount toggle on) — every future fee is BNB and the case is now applicable, owned by `value-the-bnb-commission-in-the-result`. Until that change lands, rows will state BNB fees as "not included" and the USDT columns will exclude commission — expected, not a defect. |
 | `show-one-pnl-and-let-the-operator-size-the-dock` | 3.4 | `MISMATCH RECORDED` | Desk listed 11 closed positions, 12 after ↻; the app lists 20 and lazy-loads older ones on scroll. The desk's window is exactly seven days (`coveredMs: 604800000`); the app's history reaches months back. Whether the missing eight are all older than the window start — which would make the count correct but the bound unstated on screen — is the one question the operator must answer before this is a defect or a display gap. |
 | `verify-final-futures-pnl-live-data` / `close-a-round-at-what-reached-the-wallet` / `read-the-settled-money-from-the-newest-end` | 1.1 / 4.5, 6c.3 / 5.2, 9.1 | `MISMATCH RECORDED` | Closed-row sums differ from the app by ~2–3 USDT, and the operator observed the desk's average entry prices are rounded where the app's are not. The tooltip decomposition (realized / commission / funding) was not captured for a disagreeing row; the probe's side-by-side record comparison is the designed instrument and has not run yet (needs `BFK`/`BFS` in the launching shell). Open, next action named below. |
 
@@ -563,5 +563,41 @@ runbook assembled the same day. Desk restarts in the journal: 17:40:15 UTC
 
 **Not run this sitting** and still open: the funding-boundary block (no
 boundary fell in the window), the proxy-stop block (stream states its
-silence; settled failure → recovery), the probe run, and the four-row /
-±2–3 USDT number comparison against the probe's side-by-side output.
+silence; settled failure → recovery), and the four-row comparison retold
+with tooltip decompositions.
+
+### The probe run — 2026-08-24, after the sitting
+
+The operator ran `scripts/probe-futures-settled.mjs` against Production
+(`reason=operator-probe`, 6 lanes, 6 pages, 180 weight, every lane
+`complete`). What it settles:
+
+- **`read-only-the-income-the-desk-cannot-derive` 8.1 — closed.** Canonical
+  NET equals visible NET on all nine closed rounds; the wallet audit is
+  `conserved / disjoint / presentationDisjoint / additive`, canonical and
+  assigned totals identical (4654.31822757 USDT); zero skipped rows, zero
+  identity conflicts, zero invalid inputs. The change is archived on this
+  evidence with its §5 persistence note left open by design.
+- **`read-the-settled-money-from-the-newest-end` 9.4 — measured.**
+  `identity conflicts: 0` over the window: no key collision on this
+  account's rows.
+- **The ±2–3 USDT disagreement has a named suspect.** The desk's own two
+  records agree exactly, so the gap to the app is not acquisition. The probe
+  holds three account-level shared adjustments the rounds do not own:
+  funding of **+2.37543496 USDT against CYSUSDT** — the scale the operator
+  reported — +16.55220971 against BTWUSDT and −413.36327791 against
+  BEATUSDT. They sit outside leg-owned totals because fill coverage cannot
+  prove which round they belong to (BEATUSDT: 2000 fills behind an unread
+  gap, BTWUSDT: 1024, both `coverage=PARTIAL`), while the Binance app folds
+  funding into its position rows. The desk is being deliberately honest
+  where the app is being generous; whether that honesty can be narrowed
+  (deeper fill reads on the two gapped contracts) is a question for the
+  round-fold owner once a disagreeing row's tooltip is read against the
+  app's row. Average entry prices are exact in the record (display rounding
+  only) — the operator's rounding suspicion is retired.
+- Two small probe-report defects noticed in passing: shared adjustments
+  print their leg as `undefined:` (`undefined:BEATUSDT`), and the report
+  does not print the per-page key-collapse counts §12 promised — `identity
+  conflicts` answered the question anyway.
+- The acquisition-shape section confirms `rebate rows in the window: 0` and
+  an all-flat snapshot at run time.

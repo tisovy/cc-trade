@@ -37,6 +37,14 @@ Two defects, one episode:
    so a transient re-stamp is indistinguishable from a genuinely wrong order
    — this diagnosis had to be assembled from surrounding journal lines.
 
+**Operator ruling, 2026-08-24**: "даже если у нас идет пропуск книги — то нам
+обязательно надо закрыть позицию — значит при первом появлении книги она
+должна закрывать." Closing is never blocked by market-data state. A close
+ordered while the desk's evidence is mid-re-stamp is held and fires at the
+first proof, not bounced back to the operator for a retry; only a reading
+that *disagrees* with the requested reduction — or a bounded wait that ends
+with no reading at all — refuses, and then by name.
+
 ## What Changes
 
 - A reduce-only order is confirmed against the newest *successful* positions

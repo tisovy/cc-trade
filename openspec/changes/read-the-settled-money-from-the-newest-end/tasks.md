@@ -235,7 +235,10 @@ all three were real defects. None of them was the one the operator kept seeing.
   weight 30 a pass, and it would buy coverage only on contracts this account does
   not currently trade that hard. Worth doing when a position's column actually
   goes blank; not worth the weight before then.
-- [ ] 9.4 The row key's second collision is fixed but not yet measured on the
+- [x] 9.4 The row key's second collision is fixed but not yet measured on the
   wire. The probe counts, inside single pages, how many rows each candidate key
   collapses; one run says whether commission rows on this account were colliding
-  at all. See §12.
+  at all. See §12. **Measured 2026-08-24**: the operator's probe run reports
+  `identity conflicts: 0, invalid inputs: 0` over 77 canonical income rows and
+  a 3539-row discovery read — no key on this account's window collapses two
+  distinct charges. Recorded in `openspec/live-verification-ledger.md`.
