@@ -91,9 +91,12 @@
   and a BNB fee is stated in BNB with "not included".
 - [x] 4.4 `npx vitest run` — 2227/2227 across 116 files. `npx eslint` clean on the
   six touched files.
-- [ ] 4.5 Operator re-checks one closed position against the Binance app and
+- [x] 4.5 Operator re-checks one closed position against the Binance app and
   confirms the figures now agree — **naming the screen**, which also settles 1.4.
-  Record in `openspec/live-verification-ledger.md`.
+  Record in `openspec/live-verification-ledger.md`. Confirmed 2026-08-25 with a
+  finding: the app's headline is the NET (matches the desk's net on the
+  element), so the desk's gross PnL column is a different quantity by design —
+  ledger, The 2026-08-25 Operator Runbook Pass. Screen name still owed to 1.4.
 - [ ] 4.6 Operator confirms a round held across a funding boundary now shows the
   funding component. The `FUNDING_FEE` read path cannot be exercised from this
   tree.
@@ -181,7 +184,7 @@ Reported figures, desk against the Binance app:
   and the rate, and a short in a positive-funding market receives it. The two
   −0.01 rows may equally be rounding rather than a real charge; what matters is
   that the two large gaps are funding, and the tooltip now names the figure.
-- [ ] 6c.3 Operator re-checks the same four rows. **If the two large gaps close
+- [x] 6c.3 (confirmed 2026-08-25 — rows agree against the net; see 4.5) Operator re-checks the same four rows. **If the two large gaps close
   and the tooltip's funding matches the prediction, this is done.** If a gap
   remains, the tooltip decomposes the row into realized / commission / funding —
   report those three numbers for the disagreeing row and the remaining cause is

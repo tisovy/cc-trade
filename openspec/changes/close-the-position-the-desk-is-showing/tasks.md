@@ -79,7 +79,9 @@
 
 ## 5. Operator gate
 
-- [ ] 5.1 Operator closes a position by market on the first click during
+- [x] 5.1 Operator closes a position by market on the first click during
       ordinary trading. If a refusal ever appears again, its popup and journal
       line now name the failed condition — record the episode in
-      `openspec/live-verification-ledger.md`.
+      `openspec/live-verification-ledger.md`. Confirmed 2026-08-25 ("уходит с
+      первого клика"); no refusal episode occurred — ledger, The 2026-08-25
+      Operator Runbook Pass.

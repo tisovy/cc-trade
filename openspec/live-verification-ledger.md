@@ -625,3 +625,36 @@ implementation completion and is not live evidence.
 | `value-the-bnb-commission-in-the-result` | 1.2 | `OUTSTANDING` | `NOT RECORDED` | Production | `9307a8f` | The account's first BNB-fee fill has not happened. To record: the fill's `commissionAsset`/amount on the wire, the matching income row's asset, and whether the Binance app's Position History "Реализ. PnL" folds the converted fee into its own figure — that third fact decides what "agrees with the app" means for 5.1, not the desk's arithmetic. |
 | `value-the-bnb-commission-in-the-result` | 5.1 | `OUTSTANDING` | `NOT RECORDED` | Production | `9307a8f` | First BNB-fee closed round against the Binance app: PnL column agrees to the settled one-cent rounding class; the row title names the BNB quantity, the USDT valuation and the price used; the reserve readout shows the drained amount. Until the first fill, rows state BNB fees as expected and only the reserve readout is observable live. |
 | `value-the-bnb-commission-in-the-result` | 5.1 archive | `ARCHIVE AUTHORIZED WITH LIVE CHECK OUTSTANDING` | 2026-08-24 | Production | `9307a8f` | The operator explicitly requested archive after the audit pass. Tasks 1.2 and 5.1 above remain outstanding here and archive is not their proof. |
+
+## The 2026-08-25 Operator Runbook Pass
+
+The operator ran the assembled runbook
+(`changes/verify-final-futures-pnl-live-data/runbook.md`) against desk
+revision `d015e22`, Production account. Journal: `desk-2026-08-25-000.jsonl`
+(and `desk-2026-08-24-001.jsonl` for the quiet night session). No `429` and
+no rate-limit responses anywhere in either file.
+
+| Change | Task | Status | Evidence |
+|---|---:|---|---|
+| `close-the-position-the-desk-is-showing` | 5.1 | `CONFIRMED` | Operator: a market close "uходит с первого клика" during ordinary trading. No refusal episode to record — the named-condition path stays covered by tests. |
+| `verify-final-futures-pnl-live-data` | 1.4 | `CONFIRMED` | Both halves now observed. Restart half: 2026-08-24 sitting. Failure→recovery half today: proxy stopped 07:26:03Z (`futures-user-data` fault `SOCKET_CLOSED`, then `ECONNREFUSED` retries to 07:26:17), operator saw "куча сообщений", the chart froze, and ↻ answered an honest failure message; proxy restored and the first `ok, 200` request landed 07:26:21Z — the desk's own `networkRetries: 2` bridged the gap, recovery "практически мгновенно" with no restart. The same-shape-correction case did not occur and stays a natural-occurrence watch. |
+| `prove-the-private-stream-is-carrying` | 1.5 / 5.3 | `CONFIRMED (runbook step, left unchecked in tasks by convention)` | Quiet half: an ordinary session writes no `futures-user-data` chatter at all — `desk-2026-08-24-001.jsonl` holds exactly one line, `STREAM_ABANDONED` at 20:00:48Z on the planned deploy restart; today's file holds only the outage episode. Break half: the break names itself, `SOCKET_CLOSED` → `ECONNREFUSED`. `RECONNECT_EXHAUSTED` was not reached — the proxy returned in ~18 s, before retries exhausted — and the optional `kill -STOP` silence probe was skipped, as the step permits. |
+| `close-a-round-at-what-reached-the-wallet` | 4.5, 6c.3 | `CONFIRMED, WITH A FINDING` | Operator compared closed rows against the app and the figures agree — **against the desk's net**: "в бинанс-апп в строке PnL бинанс показывает то, что у нас отображается как Visible Net". The app's headline is a net, not the gross realized; the desk's PnL column (gross, chosen 2026-08-23 as "the figure the app shows") therefore differs from the app's headline by exactly commission+funding on every row, while the net on the element matches. Open follow-ups: the screen name (1.4) and one row's exact label (Wallet Net vs Visible net on a BNB-fee row) are asked of the operator; whether the column itself should become the net is the operator's call and would be its own change. |
+| `read-the-settled-money-from-the-newest-end` | 5.2, 9.1 | `CONFIRMED` | Same observation: the rows agree with the app once the net is the figure compared. |
+| `value-the-bnb-commission-in-the-result` | 1.2 (partial) | `OUTSTANDING, NARROWED` | Fee payment in BNB is live: "уже было несколько трейдов и BNB тратится" — the reserve drains with each fill, so `commissionAsset: BNB` is charging. Fee-valuation plumbing works on the wire: the journal carries `account.feeValuation` commands answered `ok` with weight-1 `read reason=fee-valuation` lines (first burst 06:31:09–06:31:14Z). Remaining for 1.2: the income `COMMISSION` row's asset (one signed read; the desk does not read that lane) and the app-fold fact, which the B3 answer below settles. |
+| `value-the-bnb-commission-in-the-result` | 5.1 | `OUTSTANDING` | Waits on the operator's B3 reading: the row's label word, the fee line in the title, and the app's number for the same row. |
+
+**Operator ruling recorded, 2026-08-25:** the reserve face shows the BNB
+amount at two decimals ("стоит округлить до 0.00 для BNB") — implemented in
+`c8da790` with the non-zero-never-0.00 guard, exact text kept on the element.
+
+**Instrumentation finding, fixed the same pass:** the reserve chased every
+new minute — one weight-1 klines ask per minute, minute-aligned in the
+journal (07:28:10, 07:29:10, 07:30:10…). A standing poll nobody needed:
+`c8da790` bounds the refresh to a five-minute-old price
+(`FUTURES_FEE_RESERVE_REFRESH_MS`), the readout still names its price's
+minute.
+
+**Still open from the runbook:** A2 (closed-count window question), B3 (one
+BNB row's label + numbers), C1 (funding boundary), and `verify-final` 1.1's
+per-row transcript (symbol, cents, exact, app value for four rows).

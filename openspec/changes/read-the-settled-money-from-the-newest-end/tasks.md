@@ -54,7 +54,8 @@
 ## 5. Proof
 
 - [x] 5.1 Tests that bite against the previous commit.
-- [ ] 5.2 Operator sees the four rows agree with the Binance app.
+- [x] 5.2 Operator sees the four rows agree with the Binance app. Confirmed
+  2026-08-25, against the net — ledger, The 2026-08-25 Operator Runbook Pass.
 
 ## 6. What the work found on the way
 
@@ -218,7 +219,9 @@ all three were real defects. None of them was the one the operator kept seeing.
 
 ## 9. Still open
 
-- [ ] 9.1 Operator sees the four closed rows agree with the Binance app.
+- [x] 9.1 Operator sees the four closed rows agree with the Binance app.
+  Confirmed 2026-08-25, against the net — ledger, The 2026-08-25 Operator
+  Runbook Pass.
 - [x] 9.2 Settled, and not by a third crossing. The ledger's own table closes it:
   both one-cent rows are rounds that crossed **no** funding settlement, so there
   was no funding to be missing from either, and the two figures are two
