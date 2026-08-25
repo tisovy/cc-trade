@@ -9,6 +9,7 @@ import {
 } from '../../../utils/futuresPriceFormat.js'
 import { exactFuturesDeskTime, formatFuturesDeskTime } from '../../../utils/futuresDeskTime.js'
 import { futuresSharedAdjustmentKey } from '../../../utils/futuresWalletPresentation.js'
+import { classifyFuturesSettledIncompleteness } from '../../../utils/futuresSettledIncomeResource.js'
 import {
   futuresFeeNotIncludedTitle,
   futuresFeeValuationTitle,
@@ -301,7 +302,7 @@ const walletQualificationCodes = wallet => [...new Set(
     .filter(Boolean),
 )]
 
-const roundMoneyReading = (round, settledStatus = null) => {
+const roundMoneyReading = (round, settledStatus = null, settledNote = null) => {
   const wallet = walletBucket(round)
   if (wallet !== null) {
     const walletNet = ledgerReading(wallet.walletNet)
@@ -363,7 +364,10 @@ const roundMoneyReading = (round, settledStatus = null) => {
       unvaluedFees,
       qualificationCodes,
       qualifications: qualificationCodes.length > 0
-        ? qualificationCodes.map(qualificationLabel)
+        ? qualificationCodes.map(code => (
+          code === 'SETTLED_RESOURCE_NOT_READY' && settledNote !== null
+            ? settledNote
+            : qualificationLabel(code)))
         : exact === null ? ['Exact wallet coverage is unavailable'] : [],
     }
   }
@@ -650,6 +654,23 @@ export const FuturesHistoryPanel = ({
   const settledSuccessfulAt = Number.isSafeInteger(settledIncome?.successfulAt)
     ? settledIncome.successfulAt
     : null
+  // A stale reading whose every request answered, held open only because the
+  // exchange announced a charge whose income row is not written yet, is a
+  // wait and not trouble: the confirming pass collects the row on its own in
+  // under two minutes, and retrying cannot shorten that. Calling it "failed"
+  // after every close and every funding settlement would train the operator
+  // to ignore the popup channel that also carries real failures — so it gets
+  // one quiet line instead, and "failed" with the retry ask stays reserved
+  // for actual errors.
+  const settledIncompleteness = settledStatus === null
+    || settledIncome?.lanes === null
+    || typeof settledIncome?.lanes !== 'object'
+    ? null
+    : classifyFuturesSettledIncompleteness(Object.values(settledIncome.lanes))
+  const settledConfirming = settledStatus === 'stale'
+    && settledIncompleteness !== null
+    && settledIncompleteness.failed === false
+    && settledIncompleteness.awaitingConfirmation.length > 0
   // Wallet-adjustment trouble goes to the popup channel, not into the panel:
   // the operator ruled inline status banners here noise (2026-08-23). The rows
   // keep the confirmed reading either way — the popup only says the refresh
@@ -658,8 +679,19 @@ export const FuturesHistoryPanel = ({
   // and the reading fails anew, not on every render while it stays failed.
   const notifications = useContext(NotificationContext)
   const notifyError = notifications?.notifyError
-  const settledFailureKey = settledStatus === 'stale' || settledStatus === 'error'
+  const settledFailureKey = (settledStatus === 'stale' || settledStatus === 'error')
+    && !settledConfirming
     ? `${settledStatus}:${settledSuccessfulAt ?? 'never'}`
+    : null
+  // Where it is said instead: on the money it qualifies. The operator ruled
+  // inline settled-state narration noise (2026-08-23), and this state follows
+  // every close and every funding settlement — a banner or a popup for it
+  // would be that ruling's exact case. The row already carries a
+  // not-ready qualification while the debt stands; that generic sentence
+  // becomes the specific one, naming the wait and when it ends.
+  const settledConfirmingNote = settledConfirming
+    ? `A charge the exchange announced is still posting; confirming at ${
+      formatFuturesDeskTime(settledIncompleteness.nextConfirmationAt)}`
     : null
   const settledFailureMessage = settledFailureKey === null
     ? null
@@ -866,7 +898,7 @@ export const FuturesHistoryPanel = ({
             <span role="columnheader" title="What this round did to the wallet — realized PnL less commission (a BNB fee valued at its charge’s minute) plus funding — the figure the Binance app’s Position History headlines. The exact figure and Binance’s own gross realized PnL are on each cell.">PnL</span>
           </div>
           {groupedRounds.map(group => dayGroup(group, (round) => {
-            const money = roundMoneyReading(round, settledStatus)
+            const money = roundMoneyReading(round, settledStatus, settledConfirmingNote)
             // The face figure is the net — Wallet Net where the ledger proves
             // it (the BNB fee valued), the qualified visible net where it
             // cannot — because that is the number the app's headline shows.

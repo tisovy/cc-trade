@@ -16,6 +16,7 @@ import { createFuturesSettledIncomeRowSnapshotCache } from './futures-settled-in
 import {
     MAX_FUTURES_SETTLED_INCOME_ROWS_PER_LANE,
     canonicalFuturesIncomeRow,
+    classifyFuturesSettledIncompleteness,
     createFuturesSettledIncomeLane,
     createFuturesSettledIncomeResource,
     exactFuturesIncomeIdentifier,
@@ -801,6 +802,139 @@ describe('the canonical settled-income v2 resource', () => {
         expect(identities).toEqual(['11', '13']);
         expect(identityCorrected.rows.size).toBe(amountCorrected.rows.size);
         expect(identityCorrected.generation).toBe(amountCorrected.generation + 1);
+    });
+});
+
+// The desk announced "Wallet-adjustment refresh failed … press \u21bb to retry"
+// after every close, because every state short of complete was one state. It
+// is two: a pass whose only shortfall is a charge the exchange announced and
+// has not yet written is a wait that resolves itself, and a pass that failed
+// or missed its target is what the retry ask exists for.
+describe('telling an announced charge apart from a short read', () => {
+    const completeLane = (incomeType, overrides = {}) => createFuturesSettledIncomeLane(
+        incomeType,
+        {
+            rows: [],
+            coveredFrom: WINDOW_FROM,
+            coveredTo: NOW,
+            targetTo: NOW,
+            status: 'ready',
+            attemptedAt: NOW,
+            successfulAt: NOW,
+            complete: true,
+            ...overrides,
+        },
+    );
+
+    it('names an outstanding confirmation debt, and does not call it short', () => {
+        const debtDeadline = NOW + 2 * MINUTE;
+        const lanes = [
+            completeLane('FUNDING_FEE'),
+            completeLane('FEE_RETURN', {
+                complete: false,
+                status: 'stale',
+                confirmationNotBefore: debtDeadline,
+            }),
+        ];
+
+        expect(classifyFuturesSettledIncompleteness(lanes)).toEqual({
+            failed: false,
+            short: false,
+            awaitingConfirmation: ['FEE_RETURN'],
+            nextConfirmationAt: debtDeadline,
+        });
+    });
+
+    it('reports the nearest deadline when several lanes owe a confirmation', () => {
+        const lanes = [
+            completeLane('FUNDING_FEE', {
+                complete: false,
+                status: 'stale',
+                confirmationNotBefore: NOW + 4 * MINUTE,
+            }),
+            completeLane('FEE_RETURN', {
+                complete: false,
+                status: 'stale',
+                confirmationNotBefore: NOW + MINUTE,
+            }),
+        ];
+
+        const classified = classifyFuturesSettledIncompleteness(lanes);
+        expect(classified.short).toBe(false);
+        expect(classified.awaitingConfirmation.sort()).toEqual(['FEE_RETURN', 'FUNDING_FEE']);
+        expect(classified.nextConfirmationAt).toBe(NOW + MINUTE);
+    });
+
+    it('calls a lane short when it is incomplete for any reason other than the debt', () => {
+        const uncovered = classifyFuturesSettledIncompleteness([
+            completeLane('FUNDING_FEE'),
+            completeLane('FEE_RETURN', {
+                complete: false,
+                status: 'stale',
+                coveredTo: NOW - MINUTE,
+            }),
+        ]);
+        expect(uncovered).toMatchObject({
+            failed: false,
+            short: true,
+            awaitingConfirmation: [],
+        });
+
+        const errored = classifyFuturesSettledIncompleteness([
+            completeLane('FUNDING_FEE', {
+                complete: false,
+                status: 'error',
+                error: { code: 'ECONNRESET', message: 'pooled socket reset' },
+            }),
+        ]);
+        expect(errored).toMatchObject({ failed: true, short: true });
+    });
+
+    // An error on one lane and a debt on another is not a wait. The debt is
+    // still named — the operator's next pass owes that row either way — but a
+    // failure anywhere keeps the failure announcement.
+    it('keeps failure the verdict when a debt and an error stand together', () => {
+        const classified = classifyFuturesSettledIncompleteness([
+            completeLane('FUNDING_FEE', {
+                complete: false,
+                status: 'stale',
+                confirmationNotBefore: NOW + 2 * MINUTE,
+            }),
+            completeLane('FEE_RETURN', {
+                complete: false,
+                status: 'error',
+                error: { code: '-1002', message: 'rebate permission refused' },
+            }),
+        ]);
+        expect(classified.failed).toBe(true);
+        expect(classified.short).toBe(true);
+        expect(classified.awaitingConfirmation).toEqual(['FUNDING_FEE']);
+    });
+
+    // A page checkpoint is unfinished work of this pass, not the exchange's
+    // write lag. A lane carrying both must not read as a self-resolving wait.
+    it('calls a debt lane short while its own page walk is unfinished', () => {
+        const lane = createFuturesSettledIncomeLane('FUNDING_FEE', {
+            rows: [],
+            coveredFrom: WINDOW_FROM,
+            coveredTo: NOW - MINUTE,
+            targetTo: NOW,
+            status: 'stale',
+            attemptedAt: NOW,
+            successfulAt: NOW - MINUTE,
+            confirmationNotBefore: NOW + 2 * MINUTE,
+            pending: {
+                targetFrom: WINDOW_FROM,
+                targetTo: NOW,
+                nextPage: 2,
+                rows: [],
+            },
+        });
+        expect(lane.pending).not.toBeNull();
+
+        const classified = classifyFuturesSettledIncompleteness([lane]);
+        expect(classified.short).toBe(true);
+        expect(classified.awaitingConfirmation).toEqual(['FUNDING_FEE']);
     });
 });
 

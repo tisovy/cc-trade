@@ -19,26 +19,40 @@
 
 ## 2. Spec
 
-- [ ] 2.1 Delta under `futures-workstation-presentation`: an announced charge
-      awaiting its income row is announced as posting, not as failure.
+- [x] 2.1 Delta under `futures-workstation-presentation`: an announced charge
+      awaiting its income row is announced as posting, not as failure. The
+      statement lives on the round's money element, in place of the generic
+      not-ready qualification — the canonical requirement at
+      `futures-workstation-presentation` keeps coverage qualifications on that
+      element's title without an inline badge, and the operator ruled inline
+      settled narration noise on 2026-08-23.
 
 ## 3. Code
 
-- [ ] 3.1 Separate the two `partial` states where the pass is recorded: the
-      `settled` line carries whether the shortfall is outstanding-debt-only
-      or a genuinely uncovered target.
-- [ ] 3.2 The surface announces outstanding-debt-only as "confirming an
-      announced charge, next pass at …" without "failed" and without ↻;
-      "failed" and the kept-reading stamp remain for `failed` outcomes and
-      unanswered requests.
+- [x] 3.1 Separate the two `partial` states where the pass is recorded: the
+      `settled` line carries `partialKind` (`debt-only` / `short`) and
+      `awaitingConfirmation` (the lanes holding the debt).
+      `classifyFuturesSettledIncompleteness` in
+      `src/utils/futuresSettledIncomeResource.js` is the one classifier, shared
+      by the journal line and the renderer so neither invents its own rule.
+- [x] 3.2 The surface announces outstanding-debt-only as "A charge the
+      exchange announced is still posting; confirming at …" on the round's
+      money element, without "failed" and without ↻; "failed" and the
+      kept-reading stamp remain for errored lanes, and a failure standing
+      beside a debt still announces.
 
 ## 4. Proof
 
-- [ ] 4.1 Tests that bite: a pass that answers fully but holds a confirmation
-      debt does not raise the failure popup (fails today); a pass with
-      `outcome: "failed"` still does; the journal line states the partial's
-      kind (fails today).
-- [ ] 4.2 Full suite, lint, and the repository guards.
+- [x] 4.1 Tests that bite, all three verified against `main`'s files swapped
+      back in: the panel test reproduced the operator's exact popup text
+      ("Wallet-adjustment refresh failed … Press ↻ to retry.") before the
+      change and is silent after; the journal test failed on the missing
+      `partialKind`; the classifier's five cases cover debt-only, nearest
+      deadline, uncovered target, error-with-debt, and a debt lane whose own
+      page walk is unfinished.
+- [x] 4.2 Full suite 2921/2921 across 128 files, eslint clean on the six
+      touched files, and all four guards (circular, runtime-mock,
+      futures-production, command-path) pass.
 
 ## 5. Operator gate
 

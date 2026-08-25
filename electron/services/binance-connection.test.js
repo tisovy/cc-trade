@@ -4873,6 +4873,66 @@ describe('setupBinanceConnection user-data orchestration', () => {
         });
     });
 
+    // The 2026-08-24 popup and the 2026-08-23 chronic-partial ledger entry both
+    // read one `outcome: "partial"` and could not tell which of two states it
+    // was: an announced charge whose income row the exchange has not written
+    // yet, or a read that genuinely missed its target. One line now says which,
+    // and names the lanes whose debt is holding the resource open.
+    it('says which of the two states a partial settled pass was in', async () => {
+        const diagnostics = [];
+        const diagnosticRecord = {
+            ...DESK_DIAGNOSTICS_UNRECORDED,
+            record: (kind, payload) => {
+                diagnostics.push({ kind, ...payload });
+                return true;
+            },
+        };
+        await startFuturesDeskForSettled({ diagnosticRecord });
+        const socket = await openFuturesHistoryStream();
+        await vi.advanceTimersByTimeAsync(30_000);
+        await flushMicrotasks();
+        const settledLines = () => diagnostics.filter(entry => entry.kind === 'settled');
+        expect(settledLines().at(-1)).toMatchObject({
+            outcome: 'complete',
+            partialKind: null,
+            awaitingConfirmation: [],
+        });
+
+        // Every request answers; the pass is partial only because the funding
+        // charge announced on the socket is not written to income yet.
+        diagnostics.length = 0;
+        sendFundingEvent(socket, Date.now());
+        await vi.advanceTimersByTimeAsync(30_000);
+        await flushMicrotasks();
+        expect(settledLines().at(-1)).toMatchObject({
+            reason: 'funding',
+            outcome: 'partial',
+            partialKind: 'debt-only',
+            awaitingConfirmation: ['FUNDING_FEE'],
+        });
+
+        // A refused lane is a short read, whatever else is outstanding.
+        diagnostics.length = 0;
+        moduleMocks.futuresAdapter.getIncomePage.mockImplementation(({ incomeType }) => (
+            incomeType === 'API_REBATE'
+                ? Promise.reject(Object.assign(new Error('rebate permission refused'), {
+                    code: '-1002',
+                    response: { status: 403 },
+                }))
+                : Promise.resolve({ rows: [], full: false })
+        ));
+        await runFuturesCommand({
+            action: 'account.refresh',
+            clientOrderId: 'settled-partial-kind-refresh',
+            symbol: 'BTCUSDT',
+        });
+        await vi.advanceTimersByTimeAsync(30_000);
+        await flushMicrotasks();
+        const refreshLine = settledLines().filter(entry => entry.reason === 'refresh').at(-1);
+        expect(refreshLine.outcome).not.toBe('debt-only');
+        expect(refreshLine.partialKind).not.toBe('debt-only');
+    });
+
     it('charges a pooled fallback inside one credit-confirmation budget', async () => {
         const diagnostics = [];
         const diagnosticRecord = {

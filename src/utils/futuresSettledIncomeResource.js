@@ -439,6 +439,49 @@ const aggregateStatus = (lanes) => {
     return 'idle';
 };
 
+// Which of two states an incomplete settled resource is in. A lane holding a
+// confirmation debt — the exchange announced a charge on the socket and has
+// not yet written the income row that proves it — is not a failed read: every
+// request answered, and the confirming pass at the debt's deadline collects
+// the row without anyone retrying. A lane incomplete for any other reason (an
+// error, an unfinished page checkpoint, plain uncovered time) is a genuinely
+// short read. The two must not share one announcement: the first resolves
+// itself, the second is what a retry exists for.
+//
+// Accepts resource lanes and renderer frame lanes alike; only fields both
+// shapes carry are consulted. A debt lane may also trail an older coverage
+// target — the walk owns that continuation and it is not an unanswered
+// request, so the debt stays the named cause as long as nothing failed.
+export const classifyFuturesSettledIncompleteness = (lanes) => {
+    let failed = false;
+    let short = false;
+    const awaitingConfirmation = [];
+    let nextConfirmationAt = null;
+    for (const lane of lanes ?? []) {
+        if (lane === null || typeof lane !== 'object') continue;
+        const error = lane.error ?? null;
+        const pending = lane.pending ?? null;
+        const confirmationNotBefore = Number.isSafeInteger(lane.confirmationNotBefore)
+            ? lane.confirmationNotBefore
+            : null;
+        if (error !== null) failed = true;
+        if (confirmationNotBefore !== null) {
+            if (typeof lane.incomeType === 'string' && lane.incomeType.length > 0) {
+                awaitingConfirmation.push(lane.incomeType);
+            }
+            nextConfirmationAt = nextConfirmationAt === null
+                ? confirmationNotBefore
+                : Math.min(nextConfirmationAt, confirmationNotBefore);
+        }
+        if (lane.complete === true) continue;
+        const awaitingOnly = confirmationNotBefore !== null
+            && error === null
+            && pending === null;
+        if (!awaitingOnly) short = true;
+    }
+    return { failed, short, awaitingConfirmation, nextConfirmationAt };
+};
+
 const aggregateCoverage = (lanes) => {
     if (lanes.length === 0 || lanes.some(
         lane => lane.coveredFrom === null || lane.coveredTo === null,

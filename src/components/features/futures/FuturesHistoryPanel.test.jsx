@@ -1014,6 +1014,115 @@ describe('FuturesHistoryPanel', () => {
     expect(notifyError).toHaveBeenCalledTimes(2)
   })
 
+  // On 2026-08-24 at 18:11:03 the desk raised "Wallet-adjustment refresh
+  // failed \u2026 press \u21bb to retry" 72 seconds after a close. Nothing had
+  // failed: the pass read six lanes, every request answered 200, and the
+  // resource was incomplete only because the close announced its charges on
+  // the private socket and the exchange had not yet written their income
+  // rows. That wait ends by itself at the confirming pass and retrying cannot
+  // shorten it \u2014 so it is not announced as a failure, and the row states what
+  // it is waiting for instead.
+  it('states an announced charge as posting instead of announcing a failure', () => {
+    const notifyError = vi.fn()
+    const lane = (incomeType, overrides = {}) => ({
+      incomeType,
+      rows: [],
+      coveredFrom: 1_784_000_000_000,
+      coveredTo: 1_784_000_100_000,
+      targetTo: 1_784_000_100_000,
+      status: 'ready',
+      attemptedAt: 1_784_000_100_000,
+      successfulAt: 1_784_000_100_000,
+      confirmationNotBefore: null,
+      complete: true,
+      error: null,
+      ...overrides,
+    })
+    const confirmingAt = 1_784_000_220_000
+    const resource = lanes => ({
+      version: 2,
+      status: 'stale',
+      successfulAt: 1_784_000_100_000,
+      error: lanes.map(one => one.error).find(Boolean) ?? null,
+      lanes: Object.fromEntries(lanes.map(one => [one.incomeType, one])),
+    })
+    const panel = settledIncome => (
+      <NotificationContext.Provider value={{ notifyError }}>
+        <FuturesHistoryPanel
+          view="tradeHistory"
+          symbol="BTCUSDT"
+          tickSizes={ticks}
+          history={history}
+          settledIncome={settledIncome}
+          tradeRoundIndex={{
+            closed: [indexedClosedRound()],
+            unresolved: [],
+            sharedAdjustments: [],
+          }}
+        />
+      </NotificationContext.Provider>
+    )
+    const walletResult = () => within(screen.getByRole('row', { name: /BTCUSDT/ }))
+      .getAllByRole('cell')[6]
+
+    const debtOnly = resource([
+      lane('FUNDING_FEE'),
+      lane('FEE_RETURN', {
+        complete: false,
+        status: 'stale',
+        confirmationNotBefore: confirmingAt,
+      }),
+    ])
+    const { rerender } = render(panel(debtOnly))
+
+    // Not a failure: no popup, no retry ask, and no banner either \u2014 the
+    // operator ruled inline settled narration noise on 2026-08-23 and this
+    // state follows every single close.
+    expect(notifyError).not.toHaveBeenCalled()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(screen.queryByText(/refresh failed/i)).not.toBeInTheDocument()
+
+    // Said on the money it qualifies: what is being waited for, and when the
+    // wait ends. The generic not-ready sentence is replaced, not joined.
+    const title = walletResult().getAttribute('title')
+    expect(title).toContain('A charge the exchange announced is still posting')
+    expect(title).toContain('confirming at')
+    expect(title).not.toContain('Settled-income verification is not ready')
+    // The reading is still qualified: a debt means the wallet net is not
+    // proven yet, and the row must not promote itself while it stands.
+    expect(title).toContain('Visible net')
+    expect(title).not.toContain('Wallet Net')
+
+    // A real failure alongside the debt is still a failure, announced once
+    // with the kept-reading stamp and the retry ask.
+    rerender(panel(resource([
+      lane('FUNDING_FEE', {
+        complete: false,
+        status: 'stale',
+        confirmationNotBefore: confirmingAt,
+      }),
+      lane('FEE_RETURN', {
+        complete: false,
+        status: 'error',
+        error: { code: '-1002', message: 'Wallet history is unavailable.' },
+      }),
+    ])))
+    expect(notifyError).toHaveBeenCalledTimes(1)
+    expect(notifyError.mock.calls[0][0]).toContain('Wallet history is unavailable.')
+    expect(notifyError.mock.calls[0][0]).toContain('confirmed reading from')
+    expect(notifyError.mock.calls[0][0]).toContain('Press \u21bb to retry.')
+
+    // A lane short of its target with no debt behind it is a short read, and
+    // keeps the generic qualification rather than claiming a charge is posting.
+    rerender(panel(resource([
+      lane('FUNDING_FEE'),
+      lane('FEE_RETURN', { complete: false, status: 'stale', coveredTo: 1_784_000_050_000 }),
+    ])))
+    const shortTitle = walletResult().getAttribute('title')
+    expect(shortTitle).toContain('Settled-income verification is not ready')
+    expect(shortTitle).not.toContain('still posting')
+  })
+
   it('keeps closed shared-adjustment DOM identity when reconciliation reorders and extends it', () => {
     const laneSizedEntryIds = Array.from({ length: 24_000 }, (unused, index) => (
       `income:btc-funding-${index}`

@@ -66,6 +66,7 @@ import {
     FUTURES_UNDERIVABLE_INCOME_TYPES,
 } from '../../src/utils/futuresSettledMoney.js';
 import {
+    classifyFuturesSettledIncompleteness,
     createFuturesSettledIncomeLane,
     createFuturesSettledIncomeResource,
     finalizeFuturesSettledIncomeResource,
@@ -3311,6 +3312,15 @@ export function setupBinanceConnection({
 
         const recordSettled = (outcome, code = null) => {
             const held = [..._futuresSettled.rows.values()];
+            // Which of two states a `partial` was. An outstanding-debt-only
+            // pass answered every request and waits for the exchange to write
+            // an announced charge's income row; a short pass genuinely missed
+            // its target. The ledger's chronic-partial question is answerable
+            // from this line alone: `awaitingConfirmation` names the lanes
+            // whose debt is holding the resource open.
+            const incompleteness = classifyFuturesSettledIncompleteness(
+                Object.values(_futuresSettled.lanes),
+            );
             const rebates = held.filter(row => (
                 FUTURES_SETTLED_CREDIT_INCOME_TYPES.includes(row.incomeType)
             ));
@@ -3349,6 +3359,13 @@ export function setupBinanceConnection({
                 generation: _futuresSettled.generation,
                 status: _futuresSettled.status,
                 outcome,
+                partialKind: outcome !== 'partial'
+                    ? null
+                    : incompleteness.short
+                        || incompleteness.awaitingConfirmation.length === 0
+                        ? 'short'
+                        : 'debt-only',
+                awaitingConfirmation: incompleteness.awaitingConfirmation,
                 code,
             });
         };
