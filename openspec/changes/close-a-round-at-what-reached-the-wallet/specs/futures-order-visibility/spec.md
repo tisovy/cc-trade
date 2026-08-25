@@ -148,3 +148,19 @@ element that the entry was recovered rather than read.
 #### Scenario: The result is qualified and the exchange's figure is not
 - **WHEN** a round's result is missing funding the income read did not reach
 - **THEN** the result is marked as qualified and the exchange's own realized PnL is not, because no funding was ever part of it
+
+#### Scenario: Realized PnL requires exact display precision
+- **WHEN** the exchange-reported realized PnL is a bounded decimal that would round to signed zero or lose precision as a JavaScript `Number`
+- **THEN** Closed Positions shows its cents-rounded value in the single `PnL` cell unless that would hide a non-zero sub-cent amount as zero, and exposes the unchanged exact signed decimal plus proven asset on that element
+
+#### Scenario: A recovered entry is displayed
+- **WHEN** unambiguous exchange evidence establishes an entry price for a position opened before the visible fill window
+- **THEN** the entry cell visibly and accessibly identifies that price as recovered without relying on hover
+
+#### Scenario: Both hedge legs are open
+- **WHEN** a contract has simultaneous `LONG` and `SHORT` fills
+- **THEN** neither leg closes, reduces, or changes the round state of the other
+
+#### Scenario: Both hedge legs expose row actions
+- **WHEN** simultaneous LONG and SHORT position rows expose size, margin, or close actions for one contract
+- **THEN** each action's accessible name identifies its leg so assistive-technology users cannot select the opposite position by mistake

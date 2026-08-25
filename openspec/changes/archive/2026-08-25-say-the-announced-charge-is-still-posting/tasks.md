@@ -63,8 +63,12 @@
 
 ## 5. Operator gate
 
-- [ ] 5.1 Operator closes a position or crosses a funding boundary: within the
-      two minutes after it the surface says a charge is being confirmed — no
-      failure popup — and the settled figures land on their own. A real route
-      failure (proxy stopped) still announces once as failed. Record in
+- [x] 5.1 Confirmed live 2026-08-25 on `14fb863`: the operator opened a
+      position and reported "ошибки не было". The case demonstrably arose —
+      the journal has the VELVETUSDT fill at 18:27:20.426Z arming the
+      credit-confirm debt (an opening fill arms it exactly as a close does),
+      and the confirming pass at 18:29:23.336Z clearing it
+      (`awaitingLanes: 0`) two minutes later without the operator touching
+      ↻. The real-failure half stands on D1's proxy stop and the biting test
+      rather than a second live outage. Recorded in
       `openspec/live-verification-ledger.md`.

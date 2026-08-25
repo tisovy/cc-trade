@@ -115,6 +115,14 @@ SHALL NOT require a new one.
 - **WHEN** a successful balance response reports zero available USDT
 - **THEN** the system reports a ready balance resource with zero funds and does not misclassify it as a synchronization failure
 
+#### Scenario: Initial settled-income synchronization fails
+- **WHEN** the first settled-income request fails before any confirmed reading exists
+- **THEN** settled income enters error state and is not represented as a ready empty ledger
+
+#### Scenario: Settled-income verification fails
+- **WHEN** settled income was previously ready and a verification attempt fails
+- **THEN** its last confirmed rows and successful time remain visible, the resource becomes stale, and the failure is independently retryable
+
 #### Scenario: A session passes without the private stream
 - **WHEN** the operator asks afterwards why a session reconciled on its beat all day
 - **THEN** the record names which attempts were made and what ended each of them
