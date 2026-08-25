@@ -678,3 +678,22 @@ Binance app to the cent**.
 | Change | Task | Status | Evidence |
 |---|---:|---|---|
 | `show-one-pnl-and-let-the-operator-size-the-dock` | 6.3 | `CONFIRMED` | Operator on `d855ca2`: "теперь вижу net" — the Closed Positions column reads as the app's headline does. |
+
+### The false refresh failure, reported live — 2026-08-25
+
+The operator hit the popup on opening *and* closing a position and sent the
+screenshot: "Wallet-adjustment refresh failed. Closed-position PnL keeps the
+confirmed reading from 18:28:56. Press ↻ to retry." — the exact case
+`say-the-announced-charge-is-still-posting` was written for, now reproduced
+from the desk rather than from the journal, and on the open side too (an
+opening fill announces its commission the same way a close does).
+
+Fixed in `efa9d4a`: the two states an incomplete settled resource can be in
+are told apart by one shared classifier, the debt-only state is stated on the
+round's money element instead of the popup channel, and the `settled` journal
+line carries `partialKind` with the lanes owing a confirmation.
+
+| Change | Task | Status | Evidence |
+|---|---:|---|---|
+| `say-the-announced-charge-is-still-posting` | 1.1–1.3, 2.1, 3.1–3.2, 4.1–4.2 | `IMPLEMENTED` | `efa9d4a`. Three biting tests verified against `main`'s pre-change files: the panel test reproduced the operator's exact popup text before the change, the journal test failed on the missing `partialKind`, the classifier is new. Full suite 2921/2921, lint clean, four guards pass. |
+| `say-the-announced-charge-is-still-posting` | 5.1 | `OUTSTANDING` | Operator's next close (or funding boundary) on `efa9d4a`: no failure popup in the two minutes after it, the round's money element says the charge is still posting and when it is confirmed, and the figures land unaided. A real route failure — the proxy stopped, as in D1 — must still announce once as failed. |
