@@ -321,7 +321,11 @@ const roundMoneyReading = (round, settledStatus = null) => {
     // settlement-asset net when every foreign amount is exactly the round's
     // charged fee with a complete minute-price valuation behind it. The
     // per-asset record stays untouched underneath; this is the presented sum.
-    const valuation = exact === null
+    // An exact wallet net proven in a foreign asset (a zero-USDT round whose
+    // only movement is its BNB fee) is the same case: the app's headline for
+    // it is the valued settlement figure, so it is valued the same way and
+    // keeps its own-asset statement only when no price is readable.
+    const valuation = (exact === null || exact.asset !== round?.settlementAsset)
       && qualificationCodes.every(code => code === 'MULTI_ASSET')
       ? valueFuturesForeignFees({
         amounts: walletAmounts(wallet),
@@ -844,12 +848,14 @@ export const FuturesHistoryPanel = ({
           aria-label="Position history"
           aria-rowcount={rounds.length + 1}
         >
-          {/* One money column. It shows the figure the Binance app shows — the
-              exchange's own realized PnL on the round's fills — rounded to
-              cents for the glance, with the exact string and what actually
-              reached the wallet (commission, funding, insurance netted) named
-              on the element. The second NET column that used to stand here was
-              ruled noise by the operator on 2026-08-23. */}
+          {/* One money column. It shows the figure the Binance app headlines —
+              which the operator's 2026-08-25 comparison proved is the NET
+              (realized less commission, the BNB fee valued, plus funding),
+              not the gross realized PnL the column carried until then —
+              rounded to cents for the glance, with the exact string and the
+              exchange's own realized PnL named on the element. The second NET
+              column that used to stand here was ruled noise on 2026-08-23;
+              now the net is the one column and the gross rides the title. */}
           <div className="futures-workstation-dock-row is-head is-rounds" role="row">
             <span role="columnheader">Symbol</span>
             <span role="columnheader">Closed</span>
@@ -857,22 +863,33 @@ export const FuturesHistoryPanel = ({
             <span role="columnheader">Closed volume</span>
             <span role="columnheader">Entry</span>
             <span role="columnheader">Exit</span>
-            <span role="columnheader" title="Binance’s own realized PnL on this round’s fills, before its own commission and with no funding in it. The exact figure and what reached the wallet are on each cell.">PnL</span>
+            <span role="columnheader" title="What this round did to the wallet — realized PnL less commission (a BNB fee valued at its charge’s minute) plus funding — the figure the Binance app’s Position History headlines. The exact figure and Binance’s own gross realized PnL are on each cell.">PnL</span>
           </div>
           {groupedRounds.map(group => dayGroup(group, (round) => {
             const money = roundMoneyReading(round, settledStatus)
+            // The face figure is the net — Wallet Net where the ledger proves
+            // it (the BNB fee valued), the qualified visible net where it
+            // cannot — because that is the number the app's headline shows.
+            // Rounded for the glance; the exact string stays on the element.
+            const netReading = money.amounts
+              .find(reading => reading.asset === round.settlementAsset)
+              ?? money.amounts[0]
+              ?? null
+            const displayedNetReading = centsLedgerReading(netReading)
+            const displayedNet = displayedNetReading === null
+              ? null
+              : signedLedgerAmount(displayedNetReading)
+            const exactNet = signedLedgerAmount(netReading)
+            const netTone = ledgerTone(netReading, round.netPnl)
             const realizedReading = ledgerReading({
               amount: round.realizedPnlExact ?? round.realizedPnl,
               asset: round.settlementAsset,
             })
-            // Rounded for the glance; the exact string stays on the element
-            // whenever rounding dropped anything.
-            const displayedReading = centsLedgerReading(realizedReading)
-            const exactAmount = signedLedgerAmount(realizedReading)
-            const displayedAmount = displayedReading === null
+            const displayedRealizedReading = centsLedgerReading(realizedReading)
+            const displayedRealized = displayedRealizedReading === null
               ? null
-              : signedLedgerAmount(displayedReading)
-            const grossTone = ledgerTone(realizedReading, round.realizedPnl)
+              : signedLedgerAmount(displayedRealizedReading)
+            const exactRealized = signedLedgerAmount(realizedReading)
             const leg = round.positionSide === 'LONG' ? 'buy' : 'sell'
             return (
               <div
@@ -924,28 +941,29 @@ export const FuturesHistoryPanel = ({
                   ) : null}
                 </span>
                 <span role="cell">{formatPriceOrAbsent(round.exitPrice, tickOf(round.symbol))}</span>
-                {/* The exchange's own figure, stated at cents. It is the one
-                    number on this row that can be checked against Binance
-                    without knowing anything about how the desk folds fills, so
-                    it is not adjusted, netted or qualified — the exact string
-                    and the wallet result ride the element instead. */}
+                {/* The net, stated at cents — the figure the app's headline
+                    shows, so the column agrees with what the operator compares
+                    it against. The exchange's own gross realized PnL is a
+                    different quantity and rides the element under its own
+                    name, exact where rounding dropped anything. */}
                 <span
                   role="cell"
-                  className={`futures-workstation-dock-pnl is-${grossTone}`}
+                  className={`futures-workstation-dock-pnl is-${netTone}`}
                   title={[
-                    round.partial === true
-                      ? 'Binance’s own realized PnL on the fills of this round that '
-                        + 'are inside the read — the position was opened before it, so '
+                    roundResultTitle(round, money),
+                    `${round.partial === true
+                      ? 'Binance’s own realized PnL on the fills of this round '
+                        + 'inside the read — the position was opened before it, so '
                         + 'what it realized earlier is not in this figure'
                       : 'Binance’s own realized PnL on this round’s fills, before '
-                        + 'its commission and with no funding in it',
-                    displayedAmount !== null && displayedAmount !== exactAmount
-                      ? `Exact ${exactAmount}`
-                      : null,
-                    roundResultTitle(round, money),
+                        + 'its commission and with no funding in it'}: ${
+                      displayedRealized ?? exactRealized ?? 'unknown'}${
+                      displayedRealized !== null && displayedRealized !== exactRealized
+                        ? ` (Exact ${exactRealized})`
+                        : ''}`,
                   ].filter(Boolean).join(' · ')}
                 >
-                  {displayedAmount ?? exactAmount ?? 'Unknown'}
+                  {displayedNet ?? exactNet ?? '—'}
                 </span>
               </div>
             )

@@ -1786,12 +1786,14 @@ describe('FuturesPortfolioDock', () => {
     // The tab lists positions now, not executions: fills are folded into the
     // round trips they belong to before anything is drawn.
     fireEvent.click(screen.getByRole('tab', { name: 'Closed positions' }))
-    // The exchange's own figure leads the row; the +12.48 that reached the
+    // The net that reached the wallet leads the row (the app's headline,
     // wallet is named on the cell's element.
     const rounds = screen.getByRole('table', { name: 'Position history' })
-    expect(rounds).toHaveTextContent('+12.50')
+    expect(rounds).toHaveTextContent('+12.48')
     expect(within(rounds).getAllByRole('cell')[6].getAttribute('title'))
       .toContain('Wallet Net: +12.48 USDT')
+    expect(within(rounds).getAllByRole('cell')[6].getAttribute('title'))
+      .toContain('+12.50 USDT')
     expect(screen.queryByRole('table', { name: 'Working orders' })).not.toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('tab', { name: /Working/ }))
@@ -2210,7 +2212,7 @@ describe('FuturesPortfolioDock', () => {
     )
 
     // The exchange's figure leads the row; the wallet result stays on the element.
-    expect(screen.getByRole('table', { name: 'Position history' })).toHaveTextContent('+12.50')
+    expect(screen.getByRole('table', { name: 'Position history' })).toHaveTextContent('+12.48')
     expect(onLoadHistory).not.toHaveBeenCalled()
   })
 

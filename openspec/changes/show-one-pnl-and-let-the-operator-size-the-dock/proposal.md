@@ -55,3 +55,19 @@ survive to the last digit, on the element instead of in a second column.
 - `src/utils/futuresHeldHistory.js`, `src/hooks/useFuturesTrading.js` — the
   read restoration. All renderer-side; no electron restart on a live desk.
 - Landed in `04b1c9c`.
+
+## Amended 2026-08-25: the column shows the net the app headlines
+
+The one money column was specified as the exchange's own realized PnL on the
+2026-08-23 premise that this is "the figure the Binance app shows". The
+operator's 2026-08-25 live comparison disproved the premise: the app's
+Position History headline equals the desk's **net** — the figure this change
+had riding the element — so the gross column differed from the app by exactly
+commission+funding on every row. On the operator's instruction ("надо чтобы в
+closed positions вместо текущего PnL показывался wallet net значение, чтобы
+соответствовать binance app") the column now shows the net: exact Wallet Net
+where the ledger proves one (BNB fee valued at its charge's minute), the
+qualified visible settlement net where it cannot, and the exchange's own
+gross realized PnL rides the element under its own name. Everything else the
+2026-08-23 ruling settled stands: one column, cents from exact text, sub-cent
+guard, no badges, no banner.

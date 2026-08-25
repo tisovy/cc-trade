@@ -316,8 +316,11 @@ const enrichRoundWithWallet = (round, wallet) => {
   const exactWallet = wallet?.walletNet ?? null
   // A bucket blocked only by a foreign-asset fee is presented valued: the same
   // gate the history panel applies, so the two surfaces cannot disagree about
-  // when the BNB fee joins the number.
-  const valuation = exactWallet === null
+  // when the BNB fee joins the number. An exact wallet net proven in a
+  // foreign asset (a zero-USDT round moving only its BNB fee) is valued the
+  // same way, since the app's headline for it is the settlement figure.
+  const valuation = (exactWallet === null
+    || exactWallet.asset !== round.settlementAsset)
     && wallet !== null
     && (wallet.qualifications ?? []).every(code => code === 'MULTI_ASSET')
     ? valueFuturesForeignFees({
@@ -326,8 +329,8 @@ const enrichRoundWithWallet = (round, wallet) => {
       feeValuations: round.feeValuations,
     })
     : null
-  const display = exactWallet?.amount
-    ?? valuation?.amount
+  const display = valuation?.amount
+    ?? exactWallet?.amount
     ?? visibleAmount(wallet, round.settlementAsset)
   const numeric = display === null ? Number.NaN : Number(display)
   return Object.freeze({

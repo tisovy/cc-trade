@@ -81,3 +81,19 @@
 - [ ] 3.4 Operator: Closed Positions now lists every closed position the
   Binance app lists over the desk's read window (the anchored chains
   resolve as soon as the account snapshot is on screen — no press needed).
+
+## 6. The net takes the column (operator ruling 2026-08-25)
+
+- [x] 6.1 The Closed Positions PnL column shows the net the app headlines:
+      exact Wallet Net (a BNB fee valued; a foreign-asset-only net valued the
+      same way when its price is readable), qualified visible settlement net
+      otherwise, dash where no net is known; the exchange's gross realized
+      PnL moves to the element under its own name. Tone follows the net.
+      Rounding stays on the exact decimal text with the sub-cent guard.
+- [x] 6.2 Tests bite: ten Closed-row tests fail against the gross-faced
+      column (net on the face, gross on the element, valued BNB-only net,
+      qualified net never replaced by gross); full suite 128 files / 2914
+      tests, lint and guards pass.
+- [ ] 6.3 Operator glances at Closed Positions against the app: the column
+      now reads as the app's headline does, including a BNB-fee row. Record
+      in `openspec/live-verification-ledger.md`.

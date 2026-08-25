@@ -144,7 +144,10 @@ describe('FuturesHistoryPanel', () => {
     // 3 000 contracts entered at 2.554 is 7 662 USDT — the size the desk sizes in.
     expect(table).toHaveTextContent('7662')
     // The whole round's exchange PnL, not a fill's slice of it.
-    expect(table).toHaveTextContent('+234.00')
+    // The face is the net the app headlines; the gross realized rides the
+    // element (operator comparison, 2026-08-25).
+    expect(table).toHaveTextContent('+233.94')
+    expect(table).not.toHaveTextContent('+234.00')
     // The fee is a component of the result, not a column of its own: it was
     // crowding the only reading this panel exists for off the right edge.
     expect(table).not.toHaveTextContent('0.0621')
@@ -197,14 +200,16 @@ describe('FuturesHistoryPanel', () => {
     // The fill subtotal the wallet ledger has not yet proven exact is a
     // different quantity, so it rides the element under its own name.
     expect(cells).toHaveLength(7)
-    expect(cells[6]).toHaveTextContent('+190.00 USDT')
+    expect(cells[6]).toHaveTextContent('+184.00 USDT')
     expect(cells[6].getAttribute('title')).toContain(
       'Visible net: +184.00 USDT · Exact ownership is not established',
     )
+    expect(cells[6].getAttribute('title')).toContain('realized PnL')
+    expect(cells[6].getAttribute('title')).toContain('+190.00 USDT')
     expect(screen.queryByText('SHORT')).not.toBeInTheDocument()
   })
 
-  it('keeps the exact Wallet Net on the PnL element instead of a second money column', () => {
+  it('shows the Wallet Net in the one money column and keeps the gross on the element', () => {
     const exactAmount = '116.4000000000000000001'
     render(
       <FuturesHistoryPanel
@@ -231,12 +236,14 @@ describe('FuturesHistoryPanel', () => {
       .getAllByRole('cell')
     expect(cells).toHaveLength(7)
     const result = cells[6]
-    // The cell shows the exchange figure; the wallet result is named, exact
-    // to its last digit, on the element.
-    expect(result).toHaveTextContent('+10.00 USDT')
+    // The cell shows the net the app headlines, rounded to cents; the exact
+    // net and the exchange's own gross realized are named on the element.
+    expect(result).toHaveTextContent('+116.40 USDT')
     expect(result).not.toHaveTextContent('Wallet Net')
     expect(result).not.toHaveTextContent('Partial')
     expect(result.getAttribute('title')).toContain(`Wallet Net: +${exactAmount} USDT`)
+    expect(result.getAttribute('title')).toContain('realized PnL')
+    expect(result.getAttribute('title')).toContain('+10.00 USDT')
   })
 
   // Since 2026-08-24 the account pays every fee in BNB. A round whose only
@@ -283,11 +290,14 @@ describe('FuturesHistoryPanel', () => {
     const cells = within(screen.getByRole('row', { name: /BTCUSDT/ }))
       .getAllByRole('cell')
     const result = cells[6]
-    // The face stays the exchange's realized PnL — one number, no BNB line.
-    expect(result).toHaveTextContent('+10.00 USDT')
+    // The face is the valued net — one number, no BNB line; the gross
+    // realized rides the element.
+    expect(result).toHaveTextContent('+8.16 USDT')
     expect(result).not.toHaveTextContent('BNB')
     const title = result.getAttribute('title')
     expect(title).toContain('Wallet Net: +8.16298 USDT')
+    expect(title).toContain('realized PnL')
+    expect(title).toContain('+10.00 USDT')
     expect(title).toContain('fee 0.003 BNB valued −1.83702 USDT')
     expect(title).toContain('BNBUSDT 612.34')
     expect(title).not.toContain('Amounts settle in multiple assets')
@@ -296,6 +306,7 @@ describe('FuturesHistoryPanel', () => {
   it('degrades an unpriced BNB fee to the not-included statement, never a number', () => {
     const degradedRound = indexedClosedRound({
       netExact: false,
+      realizedPnl: 12,
       wallet: {
         walletNet: null,
         visibleNet: [
@@ -333,6 +344,9 @@ describe('FuturesHistoryPanel', () => {
     const cells = within(screen.getByRole('row', { name: /BTCUSDT/ }))
       .getAllByRole('cell')
     const result = cells[6]
+    // The face is the qualified visible net, never the gross wearing it.
+    expect(result).toHaveTextContent('+10.00 USDT')
+    expect(result).not.toHaveTextContent('+12.00')
     expect(result).not.toHaveTextContent('BNB')
     const title = result.getAttribute('title')
     // Today's honest statement survives; nothing invents a price.
@@ -342,52 +356,46 @@ describe('FuturesHistoryPanel', () => {
     expect(title).not.toContain('valued')
   })
 
-  it('rounds the PnL cell to cents and keeps the exact figure lossless on the element', () => {
-    const exactGross = [
+  it('rounds the net cell to cents and keeps the exact figure lossless on the element', () => {
+    const exactNets = [
       {
         // Rounded for the glance; the exact string survives on the element.
-        key: 'gross-rounded-down',
-        realizedPnl: 86.70158975,
-        realizedPnlExact: '86.70158975',
+        key: 'net-rounded-down',
+        walletNet: '86.70158975',
         expected: '+86.70 USDT',
-        expectedExact: 'Exact +86.70158975 USDT',
+        expectedExact: 'Wallet Net: +86.70158975 USDT',
       },
       {
         // Half away from zero on the third decimal.
-        key: 'gross-rounded-up',
-        realizedPnl: 92.577,
-        realizedPnlExact: '92.577',
+        key: 'net-rounded-up',
+        walletNet: '92.577',
         expected: '+92.58 USDT',
-        expectedExact: 'Exact +92.577 USDT',
+        expectedExact: 'Wallet Net: +92.577 USDT',
       },
       {
         // Cents that would print a non-zero amount as 0.00 keep the exact text.
-        key: 'gross-positive-sub-cent',
-        realizedPnl: 0.0049,
-        realizedPnlExact: '0.0049',
+        key: 'net-positive-sub-cent',
+        walletNet: '0.0049',
         expected: '+0.0049 USDT',
         expectedExact: null,
       },
       {
-        key: 'gross-negative-sub-cent',
-        realizedPnl: -0.0049,
-        realizedPnlExact: '-0.0049',
+        key: 'net-negative-sub-cent',
+        walletNet: '-0.0049',
         expected: '−0.0049 USDT',
         expectedExact: null,
       },
       {
         // Rounding is done on the string: past 2^53 a Number round-trip would
         // state a different figure.
-        key: 'gross-beyond-safe-integer',
-        realizedPnl: Number('9007199254740993.12'),
-        realizedPnlExact: '9007199254740993.12',
+        key: 'net-beyond-safe-integer',
+        walletNet: '9007199254740993.12',
         expected: '+9007199254740993.12 USDT',
         expectedExact: null,
       },
       {
-        key: 'gross-canonical-negative-zero',
-        realizedPnl: -0,
-        realizedPnlExact: '-0.0000',
+        key: 'net-canonical-negative-zero',
+        walletNet: '-0.0000',
         expected: '0.00 USDT',
         expectedExact: null,
       },
@@ -399,11 +407,14 @@ describe('FuturesHistoryPanel', () => {
         tickSizes={ticks}
         history={{ ...history, trades: [] }}
         tradeRoundIndex={{
-          closed: exactGross.map((reading, index) => indexedClosedRound({
+          closed: exactNets.map((reading, index) => indexedClosedRound({
             key: reading.key,
             closeTime: 1_784_000_002_000 + index,
-            realizedPnl: reading.realizedPnl,
-            realizedPnlExact: reading.realizedPnlExact,
+            wallet: {
+              walletNet: { asset: 'USDT', amount: reading.walletNet },
+              visibleNet: [{ asset: 'USDT', amount: reading.walletNet }],
+              qualifications: [],
+            },
           })),
           unresolved: [],
           sharedAdjustments: [],
@@ -412,17 +423,17 @@ describe('FuturesHistoryPanel', () => {
     )
 
     const table = screen.getByRole('table', { name: 'Position history' })
-    for (const reading of exactGross) {
-      const gross = within(table.querySelector(`[data-round-key="${reading.key}"]`))
+    for (const reading of exactNets) {
+      const cell = within(table.querySelector(`[data-round-key="${reading.key}"]`))
         .getAllByRole('cell')[6]
-      expect(gross.textContent).toBe(reading.expected)
+      expect(cell.textContent).toBe(reading.expected)
       if (reading.expectedExact !== null) {
-        expect(gross.getAttribute('title')).toContain(reading.expectedExact)
+        expect(cell.getAttribute('title')).toContain(reading.expectedExact)
       }
     }
   })
 
-  it('renders a USDC round gross and exact wallet net in USDC', () => {
+  it('renders a USDC round net in USDC and never as USDT', () => {
     render(
       <FuturesHistoryPanel
         view="tradeHistory"
@@ -451,9 +462,10 @@ describe('FuturesHistoryPanel', () => {
     const cells = within(screen.getByRole('row', { name: /BTCUSDC/ }))
       .getAllByRole('cell')
     expect(cells).toHaveLength(7)
-    expect(cells[6]).toHaveTextContent('+10.00 USDC')
+    expect(cells[6]).toHaveTextContent('+7.00 USDC')
     expect(cells[6]).not.toHaveTextContent('USDT')
     expect(cells[6].getAttribute('title')).toContain('Wallet Net: +7 USDC')
+    expect(cells[6].getAttribute('title')).toContain('+10.00 USDC')
     expect(cells[6].getAttribute('title')).not.toContain('USDT')
   })
 
@@ -519,8 +531,9 @@ describe('FuturesHistoryPanel', () => {
     // column; less the commission on the fill, which is the wallet result the
     // element names.
     expect(cells).toHaveLength(7)
-    expect(cells[6]).toHaveTextContent('−96.74')
+    expect(cells[6]).toHaveTextContent('−96.76')
     expect(cells[6].getAttribute('title')).toContain('Visible net: −96.76 USDT')
+    expect(cells[6].getAttribute('title')).toContain('−96.74 USDT')
   })
 
   // Binance charges commission in BNB whenever the account holds it — the
@@ -602,6 +615,54 @@ describe('FuturesHistoryPanel', () => {
     expect(multiResult.getAttribute('title')).toContain(
       'Visible net: +120 USDT · −0.0045 BNB · Amounts settle in multiple assets',
     )
+  })
+
+  // A zero-USDT round whose only movement is its BNB fee: the app's headline
+  // for it is the valued settlement figure, so the column values it the same
+  // way instead of printing a BNB quantity as the face.
+  it('values a BNB-only wallet net into the settlement column when its price is readable', () => {
+    render(
+      <FuturesHistoryPanel
+        view="tradeHistory"
+        symbol="BTCUSDT"
+        tickSizes={ticks}
+        history={{ ...history, trades: [] }}
+        tradeRoundIndex={{
+          closed: [indexedClosedRound({
+            key: 'bnb-only-valued',
+            realizedPnl: 0,
+            realizedPnlExact: '0',
+            wallet: {
+              walletNet: { asset: 'BNB', amount: '-0.003' },
+              visibleNet: [{ asset: 'BNB', amount: '-0.003' }],
+              qualifications: [],
+            },
+            feesByAsset: [{ asset: 'BNB', amount: 0.003, amountExact: '0.003' }],
+            feeValuations: [{
+              asset: 'BNB',
+              pair: 'BNBUSDT',
+              amount: 0.003,
+              amountExact: '0.003',
+              valuedAmount: '1.83702',
+              complete: true,
+              prices: [{ price: '612.34', minute: 1_756_000_020_000 }],
+              missingMinutes: [],
+            }],
+          })],
+          unresolved: [],
+          sharedAdjustments: [],
+        }}
+      />,
+    )
+
+    const cell = within(screen.getByRole('table', { name: 'Position history' })
+      .querySelector('[data-round-key="bnb-only-valued"]'))
+      .getAllByRole('cell')[6]
+    expect(cell).toHaveTextContent('−1.84 USDT')
+    expect(cell).not.toHaveTextContent('BNB')
+    const title = cell.getAttribute('title')
+    expect(title).toContain('Wallet Net: −1.83702 USDT')
+    expect(title).toContain('fee 0.003 BNB valued −1.83702 USDT')
   })
 
   // A position still running has no exit and no result. It belongs to the live
@@ -899,7 +960,7 @@ describe('FuturesHistoryPanel', () => {
       .getAllByRole('cell')[6]
     const expectQualifiedRetainedValue = () => {
       const result = walletResult()
-      expect(result).toHaveTextContent('+10.00 USDT')
+      expect(result).toHaveTextContent('+9.00 USDT')
       expect(result.getAttribute('title')).toContain('Visible net: +9 USDT')
       expect(result.getAttribute('title')).toContain(
         'Settled-income verification is not ready',
