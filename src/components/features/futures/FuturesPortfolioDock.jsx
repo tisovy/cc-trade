@@ -326,6 +326,16 @@ const openOrderEditorFromKeyboard = (event, order, onOrderEdit) => {
 // so the low mark under 50 USDT equivalent is the desk's only warning ahead
 // of that. Absence and unreadability are stated as themselves rather than as
 // a zero that looks like a reading.
+// Two decimals on the face — the operator's 2026-08-25 ruling ("стоит
+// округлить до 0.00 для BNB") — with the house guard: a non-zero amount never
+// prints as 0.00, and the exact text stays on the element either way.
+const compactReserveAmount = (amount) => {
+  const parsed = Number(amount)
+  if (!Number.isFinite(parsed)) return String(amount)
+  const cents = parsed.toFixed(2)
+  return Number(cents) === 0 && parsed !== 0 ? String(amount) : cents
+}
+
 const feeReserveReading = (reserve) => {
   if (reserve.state === 'unread') {
     return {
@@ -346,7 +356,7 @@ const feeReserveReading = (reserve) => {
   }
   if (reserve.state === 'unpriced') {
     return {
-      text: `${reserve.amount} ${reserve.asset}`,
+      text: `${compactReserveAmount(reserve.amount)} ${reserve.asset}`,
       tone: 'flat',
       low: false,
       title: `${reserve.amount} ${reserve.asset} held — no readable ${reserve.pair} `
@@ -355,12 +365,8 @@ const feeReserveReading = (reserve) => {
   }
   const worth = `≈${reserve.worth.toFixed(2)} USDT`
   const pricedAt = exactFuturesDeskTime(reserve.priceMinute)
-  // Both quantities on the face — the amount is what the operator asked to
-  // watch, the worth is what the low bound is measured in. The exact amount
-  // text stays on the element; the face keeps a readable shortening.
-  const shownAmount = Number(reserve.amount)
   return {
-    text: `${Number.isFinite(shownAmount) ? shownAmount : reserve.amount} ${reserve.asset} ${worth}`,
+    text: `${compactReserveAmount(reserve.amount)} ${reserve.asset} ${worth}`,
     tone: reserve.low ? 'negative' : 'flat',
     low: reserve.low,
     title: `${reserve.amount} ${reserve.asset} remaining, worth ${worth} at `

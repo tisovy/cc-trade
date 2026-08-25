@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import {
   FUTURES_BNB_FEE_RESERVE_LOW_USDT,
+  FUTURES_FEE_RESERVE_REFRESH_MS,
+  futuresFeeReserveWantsPrice,
   collectFuturesFeeValuationMissingMinutes,
   createFuturesFeeValuationPriceLookup,
   futuresFeeNotIncludedTitle,
@@ -179,6 +181,36 @@ describe('fee titles', () => {
     })
     expect(title).toContain('fee 0.0085 BNB not included')
     expect(title).toContain('no readable BNBUSDT price')
+  })
+})
+
+describe('futuresFeeReserveWantsPrice', () => {
+  const requestMinute = minuteA + (30 * MINUTE)
+
+  it('asks only for a missing price or one past the refresh bound', () => {
+    // No price at all: buy one.
+    expect(futuresFeeReserveWantsPrice({
+      state: 'unpriced', requestMinute, priceMinute: null,
+    })).toBe(true)
+    // Fresh enough: the readout must not chase every minute the desk
+    // re-renders in — that was one weight-1 ask per minute in the
+    // 2026-08-25 journal.
+    expect(futuresFeeReserveWantsPrice({
+      state: 'ok', requestMinute, priceMinute: requestMinute - MINUTE,
+    })).toBe(false)
+    // Past the bound: refresh.
+    expect(futuresFeeReserveWantsPrice({
+      state: 'ok',
+      requestMinute,
+      priceMinute: requestMinute - FUTURES_FEE_RESERVE_REFRESH_MS,
+    })).toBe(true)
+    // Nothing to value: nothing to buy.
+    expect(futuresFeeReserveWantsPrice({
+      state: 'absent', requestMinute, priceMinute: null,
+    })).toBe(false)
+    expect(futuresFeeReserveWantsPrice({
+      state: 'unread', requestMinute: null, priceMinute: null,
+    })).toBe(false)
   })
 })
 

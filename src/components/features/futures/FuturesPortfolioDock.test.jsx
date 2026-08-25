@@ -691,9 +691,9 @@ describe('FuturesPortfolioDock', () => {
     )
     const readout = screen.getByTestId('futures-fee-reserve')
     expect(readout).toHaveTextContent('BNB fee reserve')
-    // Both quantities on the face: the amount the operator watches and the
-    // worth the low bound is measured in.
-    expect(readout).toHaveTextContent('1 BNB ≈612.34 USDT')
+    // Both quantities on the face — the amount at two decimals (operator
+    // ruling 2026-08-25) and the worth the low bound is measured in.
+    expect(readout).toHaveTextContent('1.00 BNB ≈612.34 USDT')
     expect(readout).not.toHaveTextContent('low')
     expect(readout.getAttribute('title')).toContain('1.0 BNB')
     expect(readout.getAttribute('title')).toContain('BNBUSDT 612.34')
@@ -739,13 +739,13 @@ describe('FuturesPortfolioDock', () => {
         positions={[position]}
         feeReserve={{
           state: 'unpriced', asset: 'BNB', pair: 'BNBUSDT', lowBoundUsdt: 50,
-          amount: '1.0', worth: null, price: null, priceMinute: null,
+          amount: '0.99783453', worth: null, price: null, priceMinute: null,
           low: false, requestMinute: 1_756_000_020_000,
         }}
       />,
     )
     const unpriced = screen.getByTestId('futures-fee-reserve')
-    expect(unpriced).toHaveTextContent('1.0 BNB')
+    expect(unpriced).toHaveTextContent('1.00 BNB')
     expect(unpriced.getAttribute('title')).toContain('worth is unknown')
 
     rerender(

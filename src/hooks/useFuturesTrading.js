@@ -28,6 +28,7 @@ import {
 import {
   collectFuturesFeeValuationMissingMinutes,
   createFuturesFeeValuationPriceLookup,
+  futuresFeeReserveWantsPrice,
   mergeFuturesFeeValuationPrices,
   readFuturesFeeReserve,
   readFuturesFeeValuationFrame,
@@ -2126,10 +2127,7 @@ const useFuturesTrading = ({
     if (typeof send !== 'function') return
     const askedAtFloor = Date.now() - 60_000
     const needed = collectFuturesFeeValuationMissingMinutes(tradeRoundIndex.all)
-    if (feeReserve.requestMinute !== null
-      && (feeReserve.state === 'unpriced'
-        || (feeReserve.priceMinute !== null
-          && feeReserve.priceMinute < feeReserve.requestMinute))) {
+    if (futuresFeeReserveWantsPrice(feeReserve)) {
       if (!needed.has(feeReserve.pair)) needed.set(feeReserve.pair, [])
       needed.get(feeReserve.pair).unshift(feeReserve.requestMinute)
     }

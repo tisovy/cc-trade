@@ -19,6 +19,23 @@ export const FUTURES_FEE_VALUATION_MINUTE_MS = 60_000
 // a half-hour-old minute close still answers "is the reserve running out".
 export const FUTURES_FEE_RESERVE_PRICE_STALE_MS = 30 * 60_000
 
+// How stale the reserve's price may grow before the desk buys a newer
+// minute. Without this the readout chased every minute the desk re-rendered
+// in — the 2026-08-25 journal shows one weight-1 ask per minute, a standing
+// poll nobody needed. A five-minute-old close still answers "is the reserve
+// running out", and the readout names its price's minute either way.
+export const FUTURES_FEE_RESERVE_REFRESH_MS = 5 * 60_000
+
+// Whether the reserve reading wants a newer price bought: no price at all, or
+// a price older than the refresh bound. Absence and unread states want
+// nothing — there is no reserve to value.
+export const futuresFeeReserveWantsPrice = reserve => (
+  Number.isFinite(reserve?.requestMinute)
+  && (reserve.state === 'unpriced'
+    || (Number.isFinite(reserve.priceMinute)
+      && reserve.priceMinute <= reserve.requestMinute - FUTURES_FEE_RESERVE_REFRESH_MS))
+)
+
 // The bound under which the remaining BNB fee reserve is marked low, in USDT
 // equivalent. Declared where it is enforced (the reserve reading below), from
 // the operator's 2026-08-24 ruling: "помечать его если его становится мало
