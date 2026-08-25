@@ -7,7 +7,7 @@
       `commissionAsset: "BNB"` with the discounted amount; income `COMMISSION`
       rows carry `asset: "BNB"`; funding/realized/insurance stay USDT; an
       empty BNB balance silently reverts fees to USDT without the discount.
-- [ ] 1.2 Verify on the wire with the account's own first BNB-fee fill: the
+- [x] 1.2 (confirmed live 2026-08-25 — ledger, «B3 answered»; income-row asset recorded as unread-by-design) Verify on the wire with the account's own first BNB-fee fill: the
       `commissionAsset` and amount on the fill, the matching income row's
       asset, and — in the Binance app — whether Position History's
       "Реализ. PnL" folds the converted fee in. Record all three in
@@ -60,7 +60,7 @@
 
 ## 5. Operator gate
 
-- [ ] 5.1 Operator compares the first BNB-fee closed round against the Binance
+- [x] 5.1 (confirmed live 2026-08-25 — ledger, «B3 answered»: Wallet Net, both quantities in the title, app to the cent) Operator compares the first BNB-fee closed round against the Binance
       app: the desk's PnL column agrees (to the settled one-cent rounding
       class), the title names the BNB quantity and its valuation. Record in
       `openspec/live-verification-ledger.md`, including what the app itself
