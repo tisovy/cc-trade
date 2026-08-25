@@ -69,6 +69,11 @@ const ORDER_STATE = /^[A-Z][A-Z_]{0,31}$/;
 // an identity from somewhere else loses its line rather than widening it.
 const IDENTITY = /^[A-Za-z0-9_-]{1,64}$/;
 const OUTCOME = /^[a-z][a-z-]{0,31}$/;
+// Which of two states an incomplete settled pass was in. `debt-only` answered
+// every request and waits for the exchange to write a charge it announced;
+// `short` genuinely missed its target or was refused. Null on a pass that was
+// not partial at all.
+const PARTIAL_KIND = /^(?:debt-only|short)$/;
 // How an exchange-info read used the shared cache: a fresh value, a new fetch,
 // an in-flight fetch another caller started, or a bounded-stale value served
 // while it is revalidated. Only reads that have a cache carry it; the rest
@@ -396,6 +401,18 @@ const RECORDED_FIELDS = Object.freeze({
         // budget or the row ceiling, `failed` was refused, `abandoned` was
         // overtaken by a newer activation before it could answer.
         ['outcome', text(OUTCOME)],
+        // `outcome: partial` was one word for two different states, and on
+        // 2026-08-24 the desk announced a failure for the harmless one after
+        // every close. `partialKind` says which: `debt-only` answered every
+        // request and is waiting for the exchange to write a charge it
+        // announced, `short` missed its target. `awaitingLanes` counts the
+        // lanes owing a confirmation — with `reason` it says whether a debt is
+        // standing and whether the same one is standing pass after pass, which
+        // is the ledger's chronic-partial question. A count, like everything
+        // else here: the lane names would be a list, and no list may enter this
+        // file.
+        ['partialKind', optional(text(PARTIAL_KIND))],
+        ['awaitingLanes', optional(count)],
         ['code', tolerated(text(CODE))],
     ]),
     // The calculator's amounts never arrive here. One event is the aggregate

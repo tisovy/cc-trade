@@ -4895,7 +4895,7 @@ describe('setupBinanceConnection user-data orchestration', () => {
         expect(settledLines().at(-1)).toMatchObject({
             outcome: 'complete',
             partialKind: null,
-            awaitingConfirmation: [],
+            awaitingLanes: 0,
         });
 
         // Every request answers; the pass is partial only because the funding
@@ -4908,7 +4908,7 @@ describe('setupBinanceConnection user-data orchestration', () => {
             reason: 'funding',
             outcome: 'partial',
             partialKind: 'debt-only',
-            awaitingConfirmation: ['FUNDING_FEE'],
+            awaitingLanes: 1,
         });
 
         // A refused lane is a short read, whatever else is outstanding.

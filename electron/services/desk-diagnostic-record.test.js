@@ -312,8 +312,62 @@ describe('describeDeskDiagnosticEvent', () => {
             coveredMs: 604800000,
             coverageGainedMs: 86400000,
             outcome: 'complete',
+            partialKind: null,
+            awaitingLanes: null,
             code: null,
         });
+    });
+
+    // The fields a kind does not declare are dropped in silence: the payload
+    // `recordSettled` builds carries `incomeTypes`, `generation` and `status`
+    // too, and none of the three has ever reached the file. So the classifier
+    // that tells an announced charge from a short read is asserted here, at the
+    // boundary that decides what is written, and not only where the call site
+    // hands its object over.
+    it('writes which of the two states an incomplete settled pass was in', () => {
+        const pass = (overrides = {}) => describeDeskDiagnosticEvent('settled', {
+            reason: 'fill',
+            order: 'descending',
+            pages: 6,
+            reads: 6,
+            attempts: 6,
+            chargedWeight: 180,
+            types: 6,
+            lanes: 6,
+            restored: 0,
+            verified: 0,
+            missing: 0,
+            differing: 0,
+            rows: 77,
+            kept: 77,
+            contracts: 6,
+            fundingRows: 12,
+            rebateRows: 0,
+            rebateSymbolRows: 0,
+            rebateTradeRows: 0,
+            recipients: 1,
+            coveredMs: 604800000,
+            coverageGainedMs: 0,
+            outcome: 'partial',
+            code: null,
+            ...overrides,
+        });
+
+        expect(pass({ partialKind: 'debt-only', awaitingLanes: 1 })).toMatchObject({
+            outcome: 'partial',
+            partialKind: 'debt-only',
+            awaitingLanes: 1,
+        });
+        expect(pass({ partialKind: 'short', awaitingLanes: 0 })).toMatchObject({
+            partialKind: 'short',
+            awaitingLanes: 0,
+        });
+
+        // A word this record does not know is a call site that classified
+        // nothing, and losing the line is how it says so — the same rule the
+        // reasons and outcomes are held to.
+        expect(pass({ partialKind: 'maybe', awaitingLanes: 1 })).toBeNull();
+        expect(pass({ partialKind: 'debt-only', awaitingLanes: -1 })).toBeNull();
     });
 
     // The account read's vocabulary has no word for a fill or a funding charge,

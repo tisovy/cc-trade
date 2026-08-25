@@ -3365,7 +3365,7 @@ export function setupBinanceConnection({
                         || incompleteness.awaitingConfirmation.length === 0
                         ? 'short'
                         : 'debt-only',
-                awaitingConfirmation: incompleteness.awaitingConfirmation,
+                awaitingLanes: incompleteness.awaitingConfirmation.length,
                 code,
             });
         };

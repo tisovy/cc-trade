@@ -31,10 +31,15 @@
 
 - [x] 3.1 Separate the two `partial` states where the pass is recorded: the
       `settled` line carries `partialKind` (`debt-only` / `short`) and
-      `awaitingConfirmation` (the lanes holding the debt).
+      `awaitingLanes` (how many lanes owe a confirmation).
       `classifyFuturesSettledIncompleteness` in
       `src/utils/futuresSettledIncomeResource.js` is the one classifier, shared
       by the journal line and the renderer so neither invents its own rule.
+      Both fields are **declared** in `desk-diagnostic-record.js`: a kind
+      writes only the fields it declares, so the first cut passed them to
+      `record()` and the file dropped them in silence — caught by reading the
+      operator's journal, not by the suite. A count, not the lane names: no
+      list may enter that file.
 - [x] 3.2 The surface announces outstanding-debt-only as "A charge the
       exchange announced is still posting; confirming at …" on the round's
       money element, without "failed" and without ↻; "failed" and the
@@ -43,14 +48,16 @@
 
 ## 4. Proof
 
-- [x] 4.1 Tests that bite, all three verified against `main`'s files swapped
-      back in: the panel test reproduced the operator's exact popup text
+- [x] 4.1 Tests that bite, all four verified against `main`'s files swapped
+      back in — including one at the record's own boundary
+      (`describeDeskDiagnosticEvent`), which is where the dropped fields were
+      caught and where the call-site assertion could not see them: the panel test reproduced the operator's exact popup text
       ("Wallet-adjustment refresh failed … Press ↻ to retry.") before the
       change and is silent after; the journal test failed on the missing
       `partialKind`; the classifier's five cases cover debt-only, nearest
       deadline, uncovered target, error-with-debt, and a debt lane whose own
       page walk is unfinished.
-- [x] 4.2 Full suite 2921/2921 across 128 files, eslint clean on the six
+- [x] 4.2 Full suite 2922/2922 across 128 files, eslint clean on the eight
       touched files, and all four guards (circular, runtime-mock,
       futures-production, command-path) pass.
 
