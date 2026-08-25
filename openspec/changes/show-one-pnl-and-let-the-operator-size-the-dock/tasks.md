@@ -94,6 +94,7 @@
       column (net on the face, gross on the element, valued BNB-only net,
       qualified net never replaced by gross); full suite 128 files / 2914
       tests, lint and guards pass.
-- [ ] 6.3 Operator glances at Closed Positions against the app: the column
+- [x] 6.3 Operator glances at Closed Positions against the app: the column
       now reads as the app's headline does, including a BNB-fee row. Record
-      in `openspec/live-verification-ledger.md`.
+      in `openspec/live-verification-ledger.md`. Confirmed 2026-08-25
+      ("теперь вижу net") — ledger, The net column confirmed.

@@ -672,3 +672,9 @@ Binance app to the cent**.
 | `value-the-bnb-commission-in-the-result` | 5.1 | `CONFIRMED` | First BNB-fee closed rounds agree with the app to the cent; the element names the BNB quantity, the USDT valuation and the price used; the row face is one number. Closes the archive-handoff row above. |
 | `value-the-bnb-commission-in-the-result` | 1.2 | `CONFIRMED` | Fill asset: the desk's own `/fapi/v1/userTrades` read carries `commissionAsset: BNB` — that is what the fold valued and the reserve drains against. App fold: the app's headline equals the desk's valued net, so the converted fee **is** folded into the app's figure — "agrees with the app" means net-to-net, as the proposal required recording. Income `COMMISSION` row's asset: not separately read — the desk reads no COMMISSION lane by design (derivable from fills); recorded as unread-by-design rather than assumed. |
 | `verify-final-futures-pnl-live-data` | 1.1 | `CONFIRMED` | The operator confirmed row agreement twice: across the compared rows on 2026-08-25 (against the net) and for a BNB-fee row to the cent in this reading. Per-row transcript (symbol, cents, exact, app value) was not taken — this row stands on the operator's word, stated as such. |
+
+### The net column confirmed — 2026-08-25
+
+| Change | Task | Status | Evidence |
+|---|---:|---|---|
+| `show-one-pnl-and-let-the-operator-size-the-dock` | 6.3 | `CONFIRMED` | Operator on `d855ca2`: "теперь вижу net" — the Closed Positions column reads as the app's headline does. |
