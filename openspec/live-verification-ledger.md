@@ -723,7 +723,7 @@ at 699–828 — both ending exactly on the plot's right edge, gap 0. After
 |---|---:|---|---|
 | `draw-the-price-plates-on-the-quiet-side` | 1.1–3.3 | `IMPLEMENTED` | `11d8384`. Mirrored rather than moved (coloured edge follows the plate, contents pack to the anchored edge), and the layer now stacks above the corner boxes it joined on the left so a draggable handle cannot vanish under ambient text. Biting test verified against `main`'s stylesheet; full suite 2923/2923, lint clean, four guards pass. |
 | `draw-the-price-plates-on-the-quiet-side` | 2.4, 3.4 | `IMPLEMENTED` | `f796857`. The operator looked the same day: "плашки слева - ок, но я бы сделал еще небольшой отступ именно у ордеров, чтобы они не висели прям у самой левой кромки". The handle is held off by the gutter the desk already writes its corner notices at, and shortened by the same amount so the inset cannot push its far end into the price scale; the annotations stay flush, being read rather than reached for. The test takes the gutter from the reading notice's own rule instead of restating it. Re-measured in Chromium: handle 8–137, annotation 0–80. |
-| `draw-the-price-plates-on-the-quiet-side` | 4.1 | `OUTSTANDING` | Operator looks at a contract carrying a position and a working order on `f796857`: plates on the left with the handle held off the edge, nothing over the newest candles, the handle still drags and cancels, and no plate hidden behind a corner notice (reading notice, older-candles line, order-sync line, gesture hint). The left half of this was already looked at and approved; what is open is the gutter and the rest of the checklist. |
+| `draw-the-price-plates-on-the-quiet-side` | 4.1 | `PASSED` | Operator, 2026-08-26: *«как оператор подтверждаю всё работает как я и ожидал»*, closing every gate open at that moment. The left side was separately approved in words earlier the same day — *«плашки слева - ок»* — and the gutter that followed is `f796857`. Closed on the operator's use of the desk rather than on an itemised walkthrough of the four items; recorded that way so a later reader does not take it for one. |
 
 ### The watched position gets a price that keeps up — 2026-08-26
 
@@ -799,7 +799,7 @@ DOGEUSDT on one combined stream, 50.5 frames a second in total:
 | Change | Task | Status | Evidence |
 |---|---:|---|---|
 | `price-every-open-position-at-the-last-print` | 1.1–3.5 | `IMPLEMENTED` | `ca8be7e`. `<symbol>@aggTrade` joins `<symbol>@markPrice@1s` on the feed's existing combined socket for every contract carrying a position — no new socket, no credentialed subscription, no request weight. A position is read at whichever of its two prices the exchange stated more recently, with `FUTURES_LAST_PRICE_GRACE_MS = 1500` above the worst measured mark interval (1272 ms) so the mark's metronome cannot take the reading off a contract that is printing, and below the mark's own age so the fallback is never worse than what it replaces. Notional, margin, margin balance, removable margin and the liquidation buffer stay on the mark; the mark's own uPnL is carried on every row under its own name — a quiet 11 px line on the ticket card, and in what the dock row and the total say about themselves. The renderer's watched-contract tape path is removed: one source for every position. Nine biting tests, each verified failing against the pre-change file; two named as guards rather than biters. Full suite 2934/2934 across 128 files, lint clean, four guards pass. |
-| `price-every-open-position-at-the-last-print` | 4.1 | `OUTSTANDING` | Operator watches open positions through a fast move, including at least one contract they are **not** looking at: every row moves with its own contract rather than once a second, the mark's figure is reachable on each and is the one the Binance app agrees with, and a contract that goes quiet falls back to its mark instead of holding a stale price. |
+| `price-every-open-position-at-the-last-print` | 4.1 | `PASSED` | Operator, 2026-08-26, having traded through it: *«теперь обновление было вообще REALTIME — СУПЕР!»*, and then *«как оператор подтверждаю всё работает как я и ожидал»*. Rows move with their own contract rather than once a second, on `ca8be7e`. |
 
 **Known and accepted:** the headline now disagrees with the Binance app's
 default display by the deviation measured above — about 1 bp of notional at the
@@ -829,10 +829,53 @@ menu's default that is four a second.
 | Change | Task | Status | Evidence |
 |---|---:|---|---|
 | `let-the-operator-bound-how-often-a-position-is-repriced` | 1.1–3.4 | `IMPLEMENTED` | `a9079db`. The feed gates print publications on the operator's tape timeout, floored at its own coalescing window (25 ms), with `throttleEnabled: false` meaning that floor. The first print of a move publishes on the window so the start of a move is seen at once; prints inside a shut gate supersede one another and the newest goes out when it opens; shortening the bound releases a price already waiting. Marks are never bounded by it — one a second is already slower than anything that menu accepts, and it is what funding, margin and liquidation are decided on — so a mark publishes on the coalescing window and carries whatever has printed since. The minimum trade size does not reach the positions: a small print is as real a price as a large one. The connection reads the workstation service's applied settings after each workstation request, so one place decides the number and both followers read it. Four biting feed tests, one biting connection test on the seam itself (verified failing with the wiring line removed), one view test on the panel's own statement. Full suite 2939/2939, lint clean, four guards pass. |
-| `let-the-operator-bound-how-often-a-position-is-repriced` | 4.1 | `OUTSTANDING` | Same sitting as the gate above. With the timeout at its default the rows move about four times a second rather than continuously; lowering it toward 16 ms restores the realtime feel; raising it slows the rows and not the mark. |
+| `let-the-operator-bound-how-often-a-position-is-repriced` | 4.1 | `PASSED` | Same sitting, same words: *«как оператор подтверждаю всё работает как я и ожидал»*, on `a9079db`. |
 
 **Watched for:** a dial that reaches past its own panel is a trap for whoever
 moves it next — including the operator months from now, turning the tape down to
 read the trade list and quietly slowing their position rows with it. The panel
 states both effects, and the floor means the setting can never make a position
 slower than the mark it would otherwise sit on.
+
+### Self-audit of the reprice work — 2026-08-26
+
+Run on the operator's word before archiving. Three defects, all of the same
+kind: the change moved the rule and left older statements of the old rule
+standing where nothing was testing them.
+
+1. **The dock's uPnL column heading still stated the overturned rule** — *"uPnL,
+   ROE and size use the exchange mark… trades between marks do not alter these
+   readings."* A heading weighs as arithmetic (operator ruling, 2026-08-20), and
+   no test guarded it, which is why it went stale silently. Rewritten to state
+   what the cells under it actually do, and now covered by a test asserted
+   against those cells rather than against its wording.
+2. **The canon said the same thing twice more, in requirements this change never
+   touched** — `futures-workstation-presentation`'s "Position rows are valued at
+   the live mark price" (*"unrealized PnL SHALL follow the incoming mark…
+   aggregate trades SHALL NOT alter these readings"*) and
+   `futures-order-visibility`'s "A position row that disagrees with the chart
+   says why" (*"the desk SHALL NOT resolve the disagreement by valuing the row
+   on the tape"*). Archiving as it stood would have produced a canon that
+   contradicts itself — which is the exact reconciliation the 2026-08-24 change
+   was raised to perform once already. Both are now removed with reason and
+   migration, and replaced by requirements that keep every rule of theirs that
+   survives.
+3. **A note that referred to two prices it had not named.** On a raw account
+   position with no live valuation, `futuresPnlReadingNote` could open with *"the
+   two are on opposite sides of your entry"* having named neither. Gated on the
+   naming sentence being present; test added.
+
+Also stated, not changed: the position card's `Last` and the market header's
+`Last` are the same quantity read at two cadences — the card at the operator's
+Aggregate trades timeout, the header on every repaint — so during a fast move
+they can stand a fraction of a second apart. The card says so on the row.
+
+Checked and found sound: the main process's margin/liquidation estimator reads
+the feed's `snapshot()`, which carries mark prices only, so nothing the exchange
+decides moved onto a printed price; the margin editor's removal gate reads
+`markUnrealizedPnl` first; `broadcastFuturesPositionMarks` does not touch the
+diagnostic journal, so raising the publication rate did not inflate it.
+
+| Change | Task | Status | Evidence |
+|---|---:|---|---|
+| `price-every-open-position-at-the-last-print` | audit | `IMPLEMENTED` | `87543ae`. Three defects above fixed, each with a test verified failing against the pre-fix file. Full suite 2941/2941 across 128 files, eslint clean across the whole repo, four guards pass, build passes. |

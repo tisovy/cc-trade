@@ -43,7 +43,7 @@
 
 ## 4. Operator gate
 
-- [ ] 4.1 Can be looked at in the same sitting as task 4.1 of
+- [x] 4.1 Can be looked at in the same sitting as task 4.1 of
       `price-every-open-position-at-the-last-print`. With the Aggregate trades
       timeout at its default, position rows move about four times a second
       rather than continuously; lowering it toward 16 ms restores the realtime

@@ -6,7 +6,56 @@
 **Reason**: The requirement forbids the last traded price from reaching any primary reading. The exchange publishes its mark once a second and the contract prints up to 25 times a second in between, so the rule pins every position row to a figure up to a second and a half old — which the operator, who scalps inside that second, reported as too slow twice in two days. What the rule was written to prevent was a *synthesized* price: uPnL computed at the last mark plus tape movement, a number the exchange never quoted. That danger is real and is kept out by the replacement, which uses the exchange's own printed price and never extrapolates one.
 **Migration**: Replaced by "An open position is read at the newer of its two exchange prices", which keeps the mark as the sole input to notional, margin, liquidation and every risk decision, carries the mark's own unrealized PnL on every row under its own name, and hands the reading back to the mark whenever the contract has not printed recently enough to be the newer statement.
 
+### Requirement: A position row that disagrees with the chart says why
+**Reason**: It states the same overturned rule a third time, and states it as a prohibition — "the desk SHALL NOT resolve the disagreement by valuing the row on the tape" — which is now exactly what the desk does. Its scenario has the row reporting the loss on the mark while the contract prints the other side of the entry; the desk reports the printed side and names the mark's loss beside it.
+**Migration**: Replaced by "A position row that disagrees with the account says why", which keeps everything of it that survives — one shared reading behind the dock and the ticket, the same words on both, and the explanation on the row rather than as a mark overlay on the chart — and only exchanges which of the two figures is the row's and which is the one stated beside it.
+
 ## ADDED Requirements
+
+### Requirement: A position row that disagrees with the account says why
+
+A position row is read at the price its contract last printed; the exchange
+holds it at its mark. On a fast move the two sit on opposite sides of the
+position's entry, so the row shows a profit while the account still records a
+loss — or the reverse. Both figures are correct, and the desk SHALL NOT resolve
+the disagreement by hiding either one.
+
+Where the two place a position on opposite sides of its entry, the row SHALL
+state that this is what has happened: what the exchange's own mark makes the
+position worth, and that the mark is what settles and liquidates. Where they
+agree, the row SHALL say nothing about it, because there is nothing to explain.
+
+An explanation SHALL name both readings before it compares them. A row that has
+not stated which prices it is speaking of SHALL say nothing rather than refer to
+them.
+
+Every surface that states a position's unrealized PnL SHALL say it the same way,
+from one shared reading, so that the dock and the trading ticket cannot give the
+operator two different accounts of the same disagreement.
+
+This SHALL NOT be satisfied by drawing the mark on the chart. "The chart does not
+draw a MARK overlay" holds, and the explanation belongs on the row whose number
+is being questioned.
+
+#### Scenario: The print has crossed the entry and the mark has not
+
+- **WHEN** a short entered at `61000` is read at a print of `60800` while its mark is `61200`
+- **THEN** the row states the profit implied by the print, states what the position is worth on the mark of `61200`, and states that the two are on opposite sides of the entry and that the mark is what settles
+
+#### Scenario: The print and the mark agree
+
+- **WHEN** the printed price and the mark are on the same side of the position's entry
+- **THEN** the row says nothing about the disagreement
+
+#### Scenario: The row has named no prices
+
+- **WHEN** a position carries no live valuation, so the row has stated neither price
+- **THEN** it says nothing about a disagreement rather than referring to two readings it has not named
+
+#### Scenario: The dock and the ticket state the same position
+
+- **WHEN** both the portfolio dock and the trading ticket show the same position while the print and the mark disagree
+- **THEN** both state the disagreement in the same words, from the same reading
 
 ### Requirement: An open position is read at the newer of its two exchange prices
 

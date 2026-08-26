@@ -69,7 +69,7 @@
 
 ## 4. Operator gate
 
-- [ ] 4.1 Operator watches open positions through a fast move, including at
+- [x] 4.1 Operator watches open positions through a fast move, including at
       least one contract they are not looking at: every row moves with its own
       contract rather than once a second, the mark's figure is reachable on each
       and is the one the Binance app agrees with, and a contract that goes quiet

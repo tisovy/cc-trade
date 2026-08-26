@@ -37,7 +37,7 @@
 
 ## 4. Operator gate
 
-- [ ] 4.1 Operator looks at a contract carrying a position and a working order:
+- [x] 4.1 Operator looks at a contract carrying a position and a working order:
       the plates are on the left with the handle held off the edge, nothing sits
       over the newest candles, the handle still drags and cancels, and no plate
       is hidden behind a corner notice. Record in
