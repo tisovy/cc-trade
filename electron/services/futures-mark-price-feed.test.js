@@ -3,6 +3,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
     createFuturesMarkPriceFeed,
+    FUTURES_MARK_PRICE_BATCH_MS,
     futuresMarkPriceStreamUrl,
     readFuturesLastTradeEvent,
     readFuturesMarkPriceEvent,
@@ -267,6 +268,43 @@ describe('createFuturesMarkPriceFeed', () => {
                 BEATUSDT: { markPrice: '3.523', updatedAt: 1_700_000_000_000 },
             },
         }]);
+    });
+
+    // The window exists to fold simultaneous arrivals together, and every
+    // millisecond of it is added to the age of the number a position is valued
+    // at — a value the exchange publishes only once a second and which reaches
+    // the desk a further 220ms later. So it is held to the measurement rather
+    // than to a round number.
+    it('folds marks that arrive together into one publication, on a measured window', () => {
+        harness.feed.track([
+            { symbol: 'BMTUSDT', quantity: '-446082' },
+            { symbol: 'BEATUSDT', quantity: '-1800' },
+        ]);
+        const armed = harness.timers.filter(Boolean).length;
+        harness.sockets[0].emit('message', markFrame('BMTUSDT', '0.03523'));
+        const scheduled = harness.timers.filter(Boolean).slice(armed);
+        expect(scheduled).toHaveLength(1);
+
+        // The second contract's mark arrives inside that window and does not
+        // open another one — which is the only thing the window is for.
+        harness.sockets[0].emit('message', markFrame('BEATUSDT', '3.523'));
+        expect(harness.timers.filter(Boolean).slice(armed)).toHaveLength(1);
+
+        // Measured 2026-08-26, four contracts on one combined stream through
+        // the operator's proxy: the spread between the first and last arrival
+        // of a second's marks was 2ms at the median and 6ms at its worst. Four
+        // times the worst of them, and no more than a twentieth of the one
+        // second the exchange takes to publish the next mark at all.
+        expect(scheduled[0].delay).toBeGreaterThanOrEqual(4 * 6);
+        expect(scheduled[0].delay).toBeLessThanOrEqual(1000 / 20);
+        expect(scheduled[0].delay).toBe(FUTURES_MARK_PRICE_BATCH_MS);
+
+        harness.runTimers();
+        expect(harness.broadcasts).toHaveLength(1);
+        expect(harness.broadcasts[0].marks).toEqual({
+            BMTUSDT: { markPrice: '0.03523', updatedAt: 1_700_000_000_000 },
+            BEATUSDT: { markPrice: '3.523', updatedAt: 1_700_000_000_000 },
+        });
     });
 
     it('exposes only the marks the existing feed still considers live', () => {

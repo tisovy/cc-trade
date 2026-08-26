@@ -8,6 +8,10 @@ import FuturesProductionWorkstation from './FuturesProductionWorkstation.jsx'
 const productionWorkstationMocks = vi.hoisted(() => ({
   viewRender: vi.fn(),
   orderEditorRender: vi.fn(),
+  // What the workstation says it is carrying. Left null by every test that does
+  // not care, so the default below stays the one shape they were written
+  // against.
+  carrying: null,
 }))
 
 // The container is the only surface that knows which contract is on screen.
@@ -22,6 +26,7 @@ vi.mock('../../../hooks/useFuturesProductionWorkstation.js', () => ({
     loadCandleHistory: vi.fn(),
     retry: vi.fn(),
     configureTape: vi.fn(),
+    ...(productionWorkstationMocks.carrying ?? {}),
   }),
 }))
 vi.mock('./FuturesWorkstationView.jsx', () => ({
@@ -53,6 +58,7 @@ const executionState = (overrides = {}) => ({
 
 afterEach(() => {
   vi.clearAllMocks()
+  productionWorkstationMocks.carrying = null
   localStorage.clear()
 })
 
@@ -725,5 +731,63 @@ describe('FuturesProductionWorkstation contract configuration', () => {
     const { props } = productionWorkstationMocks.viewRender.mock.lastCall[0].tradingRail
     expect(props.marginMode).toBeNull()
     expect(props.leverage).toBeNull()
+  })
+})
+
+// The container is where the chart's tape and the account's marks are both in
+// scope, and it is the only place on the desk where that is true.
+describe('the tape behind the position on screen', () => {
+  const carrying = (symbol, header) => {
+    productionWorkstationMocks.carrying = {
+      symbol,
+      resources: { catalog: { contracts: [], state: 'live' }, header },
+    }
+  }
+
+  it('feeds the chart\'s own last price to the position mark store', () => {
+    const store = createFuturesPositionMarkStore()
+    store.replace({ BTCUSDT: { markPrice: '60000', updatedAt: 1000 } })
+    carrying('BTCUSDT', { lastPrice: '60250', eventTime: 1400 })
+
+    render(
+      <FuturesProductionWorkstation
+        enabled
+        executionState={executionState({ positionMarkStore: store })}
+      />,
+    )
+
+    expect(store.get('BTCUSDT')).toEqual({
+      markPrice: '60000',
+      updatedAt: 1000,
+      lastPrice: '60250',
+      lastPriceAt: 1400,
+    })
+  })
+
+  it('reads no tape for a contract the workstation is not carrying yet', () => {
+    const store = createFuturesPositionMarkStore()
+    store.replace({
+      BTCUSDT: { markPrice: '60000', updatedAt: 1000 },
+      ETHUSDT: { markPrice: '2500', updatedAt: 1000 },
+    })
+    carrying('BTCUSDT', { lastPrice: '60250', eventTime: 1400 })
+    render(
+      <FuturesProductionWorkstation
+        enabled
+        executionState={executionState({ positionMarkStore: store })}
+      />,
+    )
+    expect(store.get('BTCUSDT').lastPrice).toBe('60250')
+
+    // The selection moves first and the stream follows: for a moment the header
+    // still belongs to the contract just left. A print read as the new
+    // contract's would be a price from another market sitting beside its mark,
+    // and nothing on the row would say so.
+    act(() => productionWorkstationMocks.viewRender.mock.lastCall[0]
+      .onSymbolChange('ETHUSDT'))
+
+    expect(store.get('BTCUSDT').lastPrice).toBeNull()
+    expect(store.get('ETHUSDT').lastPrice).toBeNull()
+    expect(store.get('BTCUSDT').markPrice).toBe('60000')
   })
 })

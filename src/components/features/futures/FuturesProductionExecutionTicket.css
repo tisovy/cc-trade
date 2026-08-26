@@ -804,6 +804,30 @@
   color: #93a6b7;
 }
 
+/* The chart-priced what-if. Drawn quieter than the figure above it in every
+   way that carries weight — smaller, unemphasised and in the neutral colour
+   rather than the position's own green or red — because the number that
+   settles is the one above, and two figures of equal weight would leave the
+   operator deciding which of them the account agrees with. */
+.futures-production-position-tape {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 3px 0 0;
+  padding: 0 7px;
+  color: #93a6b7;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: calc(var(--fx-ui-scale, 1) * 11px);
+  font-variant-numeric: tabular-nums;
+}
+
+.futures-production-position-tape em {
+  font-style: normal;
+  letter-spacing: 0.02em;
+  opacity: 0.85;
+}
+
 /* Leads the amount, for the same reason as in the dock: after the digits the
    tag read as part of the number rather than as the mode. */
 .futures-production-margin-mode {

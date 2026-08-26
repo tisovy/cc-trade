@@ -11,7 +11,16 @@ export const FUTURES_MARK_PRICE_VERSION = 1;
 // Coalesce marks that arrive together for several open contracts. The source
 // itself is one frame per second; aggregate trades no longer publish position
 // valuations.
-export const FUTURES_MARK_PRICE_BATCH_MS = 200;
+//
+// Measured rather than estimated, 2026-08-26, four contracts on one combined
+// stream through the operator's proxy: across 88 seconds in which all four
+// were delivered, the spread between the first and last arrival was 2ms at the
+// median, 3ms at the 95th percentile and 6ms at its worst. The 200ms this was
+// is four times what folding them together ever needed, and every millisecond
+// of it is added to the age of the number a position is valued at — a value
+// the exchange already publishes only once a second and which reaches the desk
+// a further 220ms later (p95 232ms). Four times the worst measured spread.
+export const FUTURES_MARK_PRICE_BATCH_MS = 25;
 export const FUTURES_MARK_PRICE_RECONNECT_MS = 5000;
 // One mark per symbol per second is the contract, so silence this long is not a
 // quiet market — it is a feed that stopped delivering without closing.

@@ -360,6 +360,100 @@ describe('createFuturesPositionMarkStore', () => {
     expect(btcListener).toHaveBeenCalledTimes(2)
   })
 
+  // The mark arrives once a second; the tape prints whenever the market does.
+  // Joining them is the only way anything on a position row moves in between —
+  // and the whole safety property is that it moves nothing the exchange settles
+  // on.
+  it('lets a tape print stand beside a mark without reaching primary arithmetic', () => {
+    const store = createFuturesPositionMarkStore()
+    const full = vi.fn()
+    const valuation = vi.fn()
+    const value = vi.fn()
+    const presentation = vi.fn()
+    store.subscribe('BTCUSDT', full)
+    store.subscribeValuation('BTCUSDT', valuation)
+    store.subscribeValue('BTCUSDT', value)
+    store.subscribePresentation('BTCUSDT', presentation)
+
+    store.replace({ BTCUSDT: { markPrice: '60000', updatedAt: 1000 } })
+    const marked = readFuturesPositionValuation(
+      { symbol: 'BTCUSDT', positionSide: 'LONG', quantity: '2', entryPrice: '59000', leverage: '10' },
+      store.get('BTCUSDT'),
+    )
+    expect(full).toHaveBeenCalledTimes(1)
+    expect(valuation).toHaveBeenCalledTimes(1)
+
+    expect(store.noteTape('btcusdt', { lastPrice: '60250', lastPriceAt: 1400 })).toBe(true)
+    expect(store.get('BTCUSDT')).toEqual({
+      markPrice: '60000',
+      updatedAt: 1000,
+      lastPrice: '60250',
+      lastPriceAt: 1400,
+    })
+
+    // The channels primary arithmetic subscribes to did not fire; the two that
+    // explain a reading did.
+    expect(valuation).toHaveBeenCalledTimes(1)
+    expect(value).toHaveBeenCalledTimes(1)
+    expect(full).toHaveBeenCalledTimes(2)
+    expect(presentation).toHaveBeenCalledTimes(2)
+    expect(store.version(['BTCUSDT'])).toBe('BTCUSDT:1')
+    expect(store.valueVersion(['BTCUSDT'])).toBe('BTCUSDT:1')
+    expect(store.presentationVersion(['BTCUSDT'])).toBe('BTCUSDT:2')
+
+    const taped = readFuturesPositionValuation(
+      { symbol: 'BTCUSDT', positionSide: 'LONG', quantity: '2', entryPrice: '59000', leverage: '10' },
+      store.get('BTCUSDT'),
+    )
+    expect(taped.unrealizedPnl).toBe(marked.unrealizedPnl)
+    expect(taped.roe).toBe(marked.roe)
+    expect(taped.notional).toBe(marked.notional)
+    expect(taped.markPrice).toBe('60000')
+    // ...and the what-if is there, under its own name, priced off the print.
+    expect(taped.tapeScenario).toEqual({
+      price: '60250',
+      sourceAt: 1400,
+      unrealizedPnl: 2500,
+      disagreesWithMark: false,
+    })
+  })
+
+  it('withdraws a tape reading without disturbing the mark it stood beside', () => {
+    const store = createFuturesPositionMarkStore()
+    const valuation = vi.fn()
+    store.subscribeValuation('BTCUSDT', valuation)
+    store.replace({ BTCUSDT: { markPrice: '60000', updatedAt: 1000 } })
+    store.noteTape('BTCUSDT', { lastPrice: '60250', lastPriceAt: 1400 })
+
+    expect(store.noteTape('BTCUSDT', null)).toBe(true)
+    expect(store.get('BTCUSDT')).toEqual({
+      markPrice: '60000',
+      updatedAt: 1000,
+      lastPrice: null,
+      lastPriceAt: null,
+    })
+    // Withdrawing twice is not a change.
+    expect(store.noteTape('BTCUSDT', null)).toBe(false)
+    expect(valuation).toHaveBeenCalledTimes(1)
+    expect(store.version(['BTCUSDT'])).toBe('BTCUSDT:1')
+  })
+
+  it('refuses a tape print for an unmarked contract and one that arrives late', () => {
+    const store = createFuturesPositionMarkStore()
+
+    // Tape explains a mark; it never stands in for one. A contract the feed is
+    // not marking has nothing for it to explain.
+    expect(store.noteTape('SOLUSDT', { lastPrice: '150', lastPriceAt: 1000 })).toBe(false)
+    expect(store.get('SOLUSDT')).toBeNull()
+
+    store.replace({ BTCUSDT: { markPrice: '60000', updatedAt: 1000 } })
+    expect(store.noteTape('BTCUSDT', { lastPrice: '60250', lastPriceAt: 1400 })).toBe(true)
+    expect(store.noteTape('BTCUSDT', { lastPrice: '60100', lastPriceAt: 1300 })).toBe(false)
+    expect(store.noteTape('BTCUSDT', { lastPrice: '60100', lastPriceAt: null })).toBe(false)
+    expect(store.noteTape('BTCUSDT', { lastPrice: '0', lastPriceAt: 1500 })).toBe(true)
+    expect(store.get('BTCUSDT').lastPrice).toBeNull()
+  })
+
   it('ignores older and duplicate frames without notifying or regressing a symbol', () => {
     const store = createFuturesPositionMarkStore()
     const listener = vi.fn()

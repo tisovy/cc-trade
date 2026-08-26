@@ -206,6 +206,26 @@ const FuturesTradingPositionCard = memo(({
         <strong>{hasPnl ? `${formatSignedUsdt(valuation.unrealizedPnl)} USDT` : '— USDT'}</strong>
         <em>{hasRoe ? formatSignedPercent(valuation.roe) : '—'}</em>
       </div>
+      {/* What the position is worth at the price the chart is drawn from.
+          Its own name and its own line, never the headline: the exchange
+          publishes its mark once a second and settles and liquidates on it, so
+          the figure above is the one the account will agree with. This one
+          exists because during a fast move the mark is over a second behind
+          what the operator is looking at, and nothing on the desk said so. */}
+      {valuation.tapeScenario === null ? null : (
+        <p
+          className="futures-production-position-tape"
+          title={`At the contract's last traded price ${
+            priceOf(valuation.tapeScenario.price)}${
+            valuation.tapeScenario.sourceAt === null
+              ? ''
+              : `, printed ${exactFuturesDeskTime(valuation.tapeScenario.sourceAt)}`
+          } — a reading of the chart, not of the account. The exchange marks once a second and settles on that mark, which is the figure above.`}
+        >
+          <em>At last {priceOf(valuation.tapeScenario.price)}</em>
+          <span>{formatSignedUsdt(valuation.tapeScenario.unrealizedPnl)} USDT</span>
+        </p>
+      )}
       <dl>
         <div><dt>Qty</dt><dd>{exactText(position.quantity)}</dd></div>
         <div><dt>Entry</dt><dd>{priceOf(position.entryPrice)}</dd></div>

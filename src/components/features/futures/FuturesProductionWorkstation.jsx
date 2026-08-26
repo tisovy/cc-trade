@@ -2,6 +2,7 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import useFuturesProductionWorkstation from '../../../hooks/useFuturesProductionWorkstation.js'
 import useFuturesOrderDrag from '../../../hooks/useFuturesOrderDrag.js'
 import useFuturesContractDefaults from '../../../hooks/useFuturesContractDefaults.js'
+import useFuturesWatchedTape from '../../../hooks/useFuturesWatchedTape.js'
 import { useFuturesPositionValuation } from '../../../hooks/useFuturesPositionValuation.js'
 import { applyFuturesPositionValuation } from '../../../utils/futuresPositionMarks.js'
 import {
@@ -124,6 +125,25 @@ export const FuturesProductionWorkstation = ({
   const selectedContract = workstationState.resources.catalog?.contracts?.find(
     contract => contract.symbol === symbol,
   ) ?? null
+  // Where the chart's tape and the account's marks meet, and the only place on
+  // this desk where both are in scope. The header belongs to the contract the
+  // workstation is actually carrying, which lags the selection across a switch;
+  // taking it only while the two agree is what keeps one contract's prints from
+  // being read as another's.
+  const watchedHeader = workstationState.symbol === symbol
+    ? workstationState.resources.header ?? null
+    : null
+  useFuturesWatchedTape({
+    store: executionState?.positionMarkStore ?? null,
+    symbol,
+    lastPrice: watchedHeader?.lastPrice ?? null,
+    // The header's event time, which is exchange time and is the print's own
+    // when a print is what moved the price. Deliberately not a local clock: it
+    // sits in the same reading as the mark's `updatedAt`, and two timestamps in
+    // one object had better come from one clock.
+    lastPriceAt: watchedHeader?.eventTime ?? null,
+    carried: watchedHeader !== null,
+  })
   const accountSynchronizing = executionState?.connected === true
     && Object.values(executionState?.accountResources ?? {}).some(resource => (
       resource?.status === 'idle' || resource?.status === 'loading'

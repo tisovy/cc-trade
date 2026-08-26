@@ -254,6 +254,52 @@ export const createFuturesPositionMarkStore = () => {
     return true
   }
 
+  // The tape of the contract on screen, merged onto that symbol's reading
+  // without touching its mark.
+  //
+  // Kept apart from `replace` deliberately. That one carries the feed's whole
+  // publication and decides admission for the publication; this carries one
+  // contract's own last print, arriving between those publications, off the
+  // socket the chart is already drawn from. The exchange marks once a second;
+  // the tape prints whenever the market does, and this is the only channel by
+  // which anything on a position row can move in between.
+  //
+  // Notifies the full and presentation channels and never the valuation or
+  // value ones. That is the whole safety property: primary uPnL, ROE, notional
+  // and the dock total subscribe to those two, and a tape print may not reach
+  // them. Answers whether anything changed.
+  const noteTape = (symbol, reading) => {
+    const key = normalizedSymbol(symbol)
+    const held = marks[key]
+    // Tape is explanatory only: it stands beside a mark, never in place of one.
+    // A symbol the feed is not marking has nothing for it to explain, and an
+    // entry carrying a tape and no mark would be dropped by the reader anyway.
+    if (!key || held === undefined) return false
+    const lastPrice = reading === null || reading === undefined
+      ? null
+      : positiveNumber(reading.lastPrice)
+    const lastPriceAt = lastPrice === null ? null : safeTime(reading?.lastPriceAt)
+    // A print that reaches this later than a newer one cannot undo it, for the
+    // reason `preferNewestMarkReading` states about its own two sources.
+    if (lastPrice !== null
+      && held.lastPriceAt !== null
+      && (lastPriceAt === null || lastPriceAt < held.lastPriceAt)) return false
+    const next = Object.freeze({
+      markPrice: held.markPrice,
+      updatedAt: held.updatedAt,
+      // The exchange's own decimal text, not a reparsed number: the parse above
+      // decides whether to accept it, and never what to keep.
+      lastPrice: lastPrice === null ? null : String(reading.lastPrice),
+      lastPriceAt,
+    })
+    if (sameMark(held, next)) return false
+    marks = Object.freeze({ ...marks, [key]: next })
+    presentationRevisions.set(key, (presentationRevisions.get(key) ?? 0) + 1)
+    notify(listeners, [key])
+    notify(presentationListeners, [key])
+    return true
+  }
+
   const subscribeTo = (heldListeners, symbol, callback) => {
     const key = normalizedSymbol(symbol)
     if (!key || typeof callback !== 'function') return () => {}
@@ -278,6 +324,7 @@ export const createFuturesPositionMarkStore = () => {
   return Object.freeze({
     replace,
     clear,
+    noteTape,
     get: symbol => marks[normalizedSymbol(symbol)] ?? null,
     subscribe: (symbol, callback) => subscribeTo(listeners, symbol, callback),
     subscribeValuation: (symbol, callback) => subscribeTo(
