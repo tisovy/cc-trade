@@ -706,3 +706,20 @@ the aggregate target runs ahead of the lanes it did not read. It says "nothing
 is owed by a debt; coverage lags", not "something failed". A standing debt is
 `awaitingLanes` above zero, and the same lane count pass after pass is what the
 2026-08-23 all-day partials would look like if they were a stuck debt.
+
+### The chart plates move to the quiet side — 2026-08-26
+
+The operator sent a screenshot: the working order's handle
+(`SHORT · 31215 USDT · ×`) and the position's `ENTRY SHORT` plate sat against
+the right edge of the plotting area, over the newest candles — "мешают когда я
+ставлю или двигаю ордера" — and proposed moving them to the left.
+
+Measured in Chromium against a fixture before touching anything (jsdom lays
+nothing out): plot area 0–828 of a 900px frame, annotation at 748–828, handle
+at 699–828 — both ending exactly on the plot's right edge, gap 0. After
+`11d8384`: 0–80 and 0–129, clearing that edge by 748px and 699px.
+
+| Change | Task | Status | Evidence |
+|---|---:|---|---|
+| `draw-the-price-plates-on-the-quiet-side` | 1.1–3.3 | `IMPLEMENTED` | `11d8384`. Mirrored rather than moved (coloured edge follows the plate, contents pack to the anchored edge), and the layer now stacks above the corner boxes it joined on the left so a draggable handle cannot vanish under ambient text. Biting test verified against `main`'s stylesheet; full suite 2923/2923, lint clean, four guards pass. |
+| `draw-the-price-plates-on-the-quiet-side` | 4.1 | `OUTSTANDING` | Operator looks at a contract carrying a position and a working order on `11d8384`: plates on the left, nothing over the newest candles, the handle still drags and cancels, and no plate hidden behind a corner notice (reading notice, older-candles line, order-sync line, gesture hint). |
