@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
+  FUTURES_LAST_PRICE_GRACE_MS,
   applyFuturesPositionValuation,
   createFuturesPositionMarkStore,
   mergeFuturesPositionMarks,
@@ -70,7 +71,7 @@ describe('readFuturesPositionValuation', () => {
     })
 
     expect(valuation).toMatchObject({
-      source: 'live-mark',
+      source: 'live-price',
       sourceAt: 1_700_000_000_000,
       markPrice: '0.03600',
       complete: true,
@@ -97,7 +98,7 @@ describe('readFuturesPositionValuation', () => {
       unrealizedPnl: -1708.49,
       complete: true,
       roeComplete: true,
-      tapeScenario: null,
+      markScenario: null,
     })
     expect(valuation.notional).toBeCloseTo(15715.46886, 5)
     expect(valuation.roe).toBeCloseTo(-170.849, 5)
@@ -156,13 +157,13 @@ describe('readFuturesPositionValuation', () => {
       updatedAt: 2,
     })
 
-    expect(valuation.source).toBe('live-mark')
+    expect(valuation.source).toBe('live-price')
     expect(valuation.unrealizedPnl).toBeCloseTo(-43.095, 6)
     expect(valuation.notional).toBeCloseTo(9653.28, 6)
     expect(valuation.roe).toBeCloseTo(-43.095, 6)
   })
 
-  it('keeps primary valuation unchanged when only the tape changes', () => {
+  it('reads the position at the price the contract printed and keeps the mark beside it', () => {
     const base = {
       markPrice: '3.36',
       updatedAt: 2,
@@ -174,28 +175,104 @@ describe('readFuturesPositionValuation', () => {
       positionSide: 'SHORT',
       quantity: '2873',
       entryPrice: '3.3450',
+      isolatedWallet: '100',
     }
     const before = readFuturesPositionValuation(short, base)
+
+    expect(before).toMatchObject({
+      source: 'live-price',
+      basis: 'last-price',
+      basisPrice: '3.30',
+      sourceAt: 3,
+      // The mark still names itself, and still sizes the position.
+      markPrice: '3.36',
+      notional: 9653.28,
+    })
+    // A short entered at 3.3450 is in profit at 3.30 and in loss on a mark of
+    // 3.36 — one position, two prices, opposite signs.
+    expect(before.unrealizedPnl).toBeCloseTo(129.285, 6)
+    expect(before.markScenario).toMatchObject({
+      price: '3.36',
+      sourceAt: 2,
+      disagreesWithReading: true,
+    })
+    expect(before.markScenario.unrealizedPnl).toBeCloseTo(-43.095, 6)
+    // ROE follows the figure it is a percentage of; the denominator is the
+    // committed margin either way.
+    expect(before.roe).toBeCloseTo(129.285, 6)
+    expect(before.markScenario.roe).toBeCloseTo(-43.095, 6)
+
     const after = readFuturesPositionValuation(short, {
       ...base,
       lastPrice: '3.34',
       lastPriceAt: 4,
     })
+    expect(after.basisPrice).toBe('3.34')
+    expect(after.sourceAt).toBe(4)
+    expect(after.unrealizedPnl).toBeCloseTo(14.365, 6)
+    // Nothing the exchange requires of the position moved with the print.
+    expect(after.notional).toBe(before.notional)
+    expect(after.margin).toBe(before.margin)
+    expect(after.markScenario.unrealizedPnl).toBe(before.markScenario.unrealizedPnl)
+  })
 
-    expect(after).toMatchObject({
-      source: before.source,
-      sourceAt: before.sourceAt,
-      markPrice: before.markPrice,
-      unrealizedPnl: before.unrealizedPnl,
-      notional: before.notional,
-      roe: before.roe,
-      complete: before.complete,
+  it('hands the reading back to the mark once the contract stops printing', () => {
+    const short = {
+      symbol: 'BEATUSDT',
+      positionSide: 'SHORT',
+      quantity: '2873',
+      entryPrice: '3.3450',
+      isolatedWallet: '100',
+    }
+    const printedAt = 1_700_000_000_000
+    // Still inside the window, the print is what the contract traded at.
+    expect(readFuturesPositionValuation(short, {
+      markPrice: '3.36',
+      updatedAt: printedAt + FUTURES_LAST_PRICE_GRACE_MS,
+      lastPrice: '3.30',
+      lastPriceAt: printedAt,
+    })).toMatchObject({ basis: 'last-price', basisPrice: '3.30' })
+
+    // A millisecond past it the mark is the newer statement and takes the
+    // reading — with nothing left to disagree with.
+    const quiet = readFuturesPositionValuation(short, {
+      markPrice: '3.36',
+      updatedAt: printedAt + FUTURES_LAST_PRICE_GRACE_MS + 1,
+      lastPrice: '3.30',
+      lastPriceAt: printedAt,
     })
-    expect(before.tapeScenario).toMatchObject({
-      price: '3.30',
-      disagreesWithMark: true,
+    expect(quiet).toMatchObject({
+      basis: 'mark',
+      basisPrice: '3.36',
+      sourceAt: printedAt + FUTURES_LAST_PRICE_GRACE_MS + 1,
     })
-    expect(after.tapeScenario.price).toBe('3.34')
+    expect(quiet.unrealizedPnl).toBeCloseTo(-43.095, 6)
+    expect(quiet.markScenario.disagreesWithReading).toBe(false)
+  })
+
+  it('will not prefer a print the exchange did not time', () => {
+    const short = {
+      symbol: 'BEATUSDT',
+      positionSide: 'SHORT',
+      quantity: '2873',
+      entryPrice: '3.3450',
+      isolatedWallet: '100',
+    }
+    // Without a trade time there is nothing to weigh against the mark's, and an
+    // untimed price cannot be shown to be the newer of the two.
+    expect(readFuturesPositionValuation(short, {
+      markPrice: '3.36',
+      updatedAt: 2,
+      lastPrice: '3.30',
+      lastPriceAt: null,
+    })).toMatchObject({ basis: 'mark', basisPrice: '3.36' })
+    // And the same in reverse: an untimed mark cannot be outranked either.
+    expect(readFuturesPositionValuation(short, {
+      markPrice: '3.36',
+      updatedAt: null,
+      lastPrice: '3.30',
+      lastPriceAt: 3,
+    })).toMatchObject({ basis: 'mark', basisPrice: '3.36' })
   })
 
   it('derives live CROSS ROE from the current mark notional and confirmed leverage', () => {
@@ -215,7 +292,7 @@ describe('readFuturesPositionValuation', () => {
     })
 
     expect(valuation).toMatchObject({
-      source: 'live-mark',
+      source: 'live-price',
       unrealizedPnl: 40,
       notional: 240,
       margin: 24,
@@ -248,7 +325,7 @@ describe('readFuturesPositionValuation', () => {
     })
 
     expect(valuation).toMatchObject({
-      source: 'live-mark',
+      source: 'live-price',
       unrealizedPnl: 40,
       notional: 240,
       margin: null,
@@ -303,7 +380,7 @@ describe('readFuturesPositionValuation', () => {
     })
   })
 
-  it('carries the signed tape scenario through the compatibility DTO', () => {
+  it('carries the signed mark scenario through the compatibility DTO', () => {
     const rawPosition = {
       symbol: 'BEATUSDT',
       positionSide: 'SHORT',
@@ -319,12 +396,21 @@ describe('readFuturesPositionValuation', () => {
     })
     const applied = applyFuturesPositionValuation(rawPosition, valuation)
 
-    expect(valuation.tapeScenario).toMatchObject({
-      price: '3.30',
-      disagreesWithMark: true,
+    expect(valuation.markScenario).toMatchObject({
+      price: '3.36',
+      disagreesWithReading: true,
     })
-    expect(valuation.tapeScenario.unrealizedPnl).toBeCloseTo(129.285, 9)
-    expect(applied.tapeScenario).toBe(valuation.tapeScenario)
+    expect(valuation.markScenario.unrealizedPnl).toBeCloseTo(-43.095, 9)
+    expect(applied.markScenario).toBe(valuation.markScenario)
+    // The row carries both figures, each under its own name. The margin ladder
+    // reads the second one, so what the exchange may do to this position is
+    // still decided at 3.36 even though the row is read at 3.30.
+    expect(applied.unrealizedPnl).toBe(String(valuation.unrealizedPnl))
+    expect(applied.markUnrealizedPnl).toBe(String(valuation.markScenario.unrealizedPnl))
+    expect(applied.valuationPrice).toBe('3.30')
+    expect(applied.markPrice).toBe('3.36')
+    expect(describeFuturesPositionMargin(applied).marginBalance)
+      .toBeCloseTo(100 - 43.095, 9)
   })
 })
 
@@ -360,11 +446,18 @@ describe('createFuturesPositionMarkStore', () => {
     expect(btcListener).toHaveBeenCalledTimes(2)
   })
 
-  // The mark arrives once a second; the tape prints whenever the market does.
-  // Joining them is the only way anything on a position row moves in between —
-  // and the whole safety property is that it moves nothing the exchange settles
-  // on.
-  it('lets a tape print stand beside a mark without reaching primary arithmetic', () => {
+  // The mark arrives once a second; the contract prints whenever it trades.
+  // A print is the only thing that can move a position row in between, and it
+  // arrives in the same publication as the mark it stands beside.
+  const long = Object.freeze({
+    symbol: 'BTCUSDT',
+    positionSide: 'LONG',
+    quantity: '2',
+    entryPrice: '59000',
+    leverage: '10',
+  })
+
+  it('moves the money when the contract prints between two marks', () => {
     const store = createFuturesPositionMarkStore()
     const full = vi.fn()
     const valuation = vi.fn()
@@ -376,82 +469,121 @@ describe('createFuturesPositionMarkStore', () => {
     store.subscribePresentation('BTCUSDT', presentation)
 
     store.replace({ BTCUSDT: { markPrice: '60000', updatedAt: 1000 } })
-    const marked = readFuturesPositionValuation(
-      { symbol: 'BTCUSDT', positionSide: 'LONG', quantity: '2', entryPrice: '59000', leverage: '10' },
-      store.get('BTCUSDT'),
-    )
+    const onMark = readFuturesPositionValuation(long, store.get('BTCUSDT'))
+    expect(onMark).toMatchObject({ basis: 'mark', unrealizedPnl: 2000 })
     expect(full).toHaveBeenCalledTimes(1)
-    expect(valuation).toHaveBeenCalledTimes(1)
-
-    expect(store.noteTape('btcusdt', { lastPrice: '60250', lastPriceAt: 1400 })).toBe(true)
-    expect(store.get('BTCUSDT')).toEqual({
-      markPrice: '60000',
-      updatedAt: 1000,
-      lastPrice: '60250',
-      lastPriceAt: 1400,
-    })
-
-    // The channels primary arithmetic subscribes to did not fire; the two that
-    // explain a reading did.
-    expect(valuation).toHaveBeenCalledTimes(1)
     expect(value).toHaveBeenCalledTimes(1)
-    expect(full).toHaveBeenCalledTimes(2)
-    expect(presentation).toHaveBeenCalledTimes(2)
-    expect(store.version(['BTCUSDT'])).toBe('BTCUSDT:1')
-    expect(store.valueVersion(['BTCUSDT'])).toBe('BTCUSDT:1')
-    expect(store.presentationVersion(['BTCUSDT'])).toBe('BTCUSDT:2')
 
-    const taped = readFuturesPositionValuation(
-      { symbol: 'BTCUSDT', positionSide: 'LONG', quantity: '2', entryPrice: '59000', leverage: '10' },
-      store.get('BTCUSDT'),
-    )
-    expect(taped.unrealizedPnl).toBe(marked.unrealizedPnl)
-    expect(taped.roe).toBe(marked.roe)
-    expect(taped.notional).toBe(marked.notional)
-    expect(taped.markPrice).toBe('60000')
-    // ...and the what-if is there, under its own name, priced off the print.
-    expect(taped.tapeScenario).toEqual({
-      price: '60250',
+    // The same mark, and a trade the contract printed after it.
+    expect(store.replace({
+      BTCUSDT: {
+        markPrice: '60000', updatedAt: 1000, lastPrice: '60250', lastPriceAt: 1400,
+      },
+    })).toBe(true)
+
+    // Every channel fires, including the two primary arithmetic subscribes to.
+    // That is the change: 250 dollars of price moved a position row without a
+    // new mark, which is the second the operator was trading blind through.
+    expect(full).toHaveBeenCalledTimes(2)
+    expect(valuation).toHaveBeenCalledTimes(2)
+    expect(value).toHaveBeenCalledTimes(2)
+    expect(presentation).toHaveBeenCalledTimes(2)
+    expect(store.valueVersion(['BTCUSDT'])).toBe('BTCUSDT:2')
+
+    const onPrint = readFuturesPositionValuation(long, store.get('BTCUSDT'))
+    expect(onPrint).toMatchObject({
+      basis: 'last-price',
+      basisPrice: '60250',
       sourceAt: 1400,
       unrealizedPnl: 2500,
-      disagreesWithMark: false,
-    })
-  })
-
-  it('withdraws a tape reading without disturbing the mark it stood beside', () => {
-    const store = createFuturesPositionMarkStore()
-    const valuation = vi.fn()
-    store.subscribeValuation('BTCUSDT', valuation)
-    store.replace({ BTCUSDT: { markPrice: '60000', updatedAt: 1000 } })
-    store.noteTape('BTCUSDT', { lastPrice: '60250', lastPriceAt: 1400 })
-
-    expect(store.noteTape('BTCUSDT', null)).toBe(true)
-    expect(store.get('BTCUSDT')).toEqual({
+      // Sized on the mark, as the exchange sizes it.
       markPrice: '60000',
-      updatedAt: 1000,
-      lastPrice: null,
-      lastPriceAt: null,
+      notional: 120000,
+      margin: 12000,
     })
-    // Withdrawing twice is not a change.
-    expect(store.noteTape('BTCUSDT', null)).toBe(false)
-    expect(valuation).toHaveBeenCalledTimes(1)
-    expect(store.version(['BTCUSDT'])).toBe('BTCUSDT:1')
+    expect(onPrint.markScenario).toEqual({
+      price: '60000',
+      sourceAt: 1000,
+      unrealizedPnl: 2000,
+      roe: onMark.roe,
+      disagreesWithReading: false,
+    })
   })
 
-  it('refuses a tape print for an unmarked contract and one that arrives late', () => {
+  it('does not redraw money for a mark clock that only advances', () => {
+    const store = createFuturesPositionMarkStore()
+    const full = vi.fn()
+    const value = vi.fn()
+    store.subscribe('BTCUSDT', full)
+    store.subscribeValue('BTCUSDT', value)
+    store.replace({
+      BTCUSDT: {
+        markPrice: '60000', updatedAt: 1000, lastPrice: '60250', lastPriceAt: 1400,
+      },
+    })
+    expect(value).toHaveBeenCalledTimes(1)
+
+    // A second mark, unchanged in price, while the print is still the newer of
+    // the two. Nothing on the row is a different number.
+    expect(store.replace({
+      BTCUSDT: {
+        markPrice: '60000', updatedAt: 2000, lastPrice: '60250', lastPriceAt: 1400,
+      },
+    })).toBe(true)
+    expect(full).toHaveBeenCalledTimes(2)
+    expect(value).toHaveBeenCalledTimes(1)
+  })
+
+  it('redraws money when a clock alone hands the reading back to the mark', () => {
+    const store = createFuturesPositionMarkStore()
+    const value = vi.fn()
+    store.subscribeValue('BTCUSDT', value)
+    store.replace({
+      BTCUSDT: {
+        markPrice: '60000', updatedAt: 1000, lastPrice: '60250', lastPriceAt: 1400,
+      },
+    })
+    expect(readFuturesPositionValuation(long, store.get('BTCUSDT')).unrealizedPnl).toBe(2500)
+    expect(value).toHaveBeenCalledTimes(1)
+
+    // Neither price changed. The contract simply stopped trading long enough
+    // for the mark to become the newer statement — and the row's figure is a
+    // different number because of it, so the money channel must say so.
+    expect(store.replace({
+      BTCUSDT: {
+        markPrice: '60000',
+        updatedAt: 1400 + FUTURES_LAST_PRICE_GRACE_MS + 1,
+        lastPrice: '60250',
+        lastPriceAt: 1400,
+      },
+    })).toBe(true)
+    expect(value).toHaveBeenCalledTimes(2)
+    expect(readFuturesPositionValuation(long, store.get('BTCUSDT'))).toMatchObject({
+      basis: 'mark',
+      unrealizedPnl: 2000,
+    })
+  })
+
+  it('refuses a price for a contract with no mark, and a print that arrives late', () => {
     const store = createFuturesPositionMarkStore()
 
-    // Tape explains a mark; it never stands in for one. A contract the feed is
-    // not marking has nothing for it to explain.
-    expect(store.noteTape('SOLUSDT', { lastPrice: '150', lastPriceAt: 1000 })).toBe(false)
+    // A print stands beside a mark, never in place of one: the feed publishes
+    // by walking its marks, and the reader drops anything that arrives without
+    // one anyway.
+    expect(store.replace({ SOLUSDT: { lastPrice: '150', lastPriceAt: 1000 } })).toBe(false)
     expect(store.get('SOLUSDT')).toBeNull()
 
-    store.replace({ BTCUSDT: { markPrice: '60000', updatedAt: 1000 } })
-    expect(store.noteTape('BTCUSDT', { lastPrice: '60250', lastPriceAt: 1400 })).toBe(true)
-    expect(store.noteTape('BTCUSDT', { lastPrice: '60100', lastPriceAt: 1300 })).toBe(false)
-    expect(store.noteTape('BTCUSDT', { lastPrice: '60100', lastPriceAt: null })).toBe(false)
-    expect(store.noteTape('BTCUSDT', { lastPrice: '0', lastPriceAt: 1500 })).toBe(true)
-    expect(store.get('BTCUSDT').lastPrice).toBeNull()
+    store.replace({
+      BTCUSDT: {
+        markPrice: '60000', updatedAt: 1000, lastPrice: '60250', lastPriceAt: 1400,
+      },
+    })
+    expect(store.replace({
+      BTCUSDT: {
+        markPrice: '60000', updatedAt: 1000, lastPrice: '60100', lastPriceAt: 1300,
+      },
+    })).toBe(false)
+    expect(store.get('BTCUSDT').lastPrice).toBe('60250')
   })
 
   it('ignores older and duplicate frames without notifying or regressing a symbol', () => {
@@ -616,7 +748,8 @@ describe('createFuturesPositionMarkStore', () => {
     expect(store.presentationVersion(['BTCUSDT'])).toBe(presentationVersion)
     expect(store.valueVersion(['BTCUSDT'])).toBe(valueVersion)
 
-    // Tape movement changes explanatory presentation only.
+    // A print moves the money. This is the whole point of carrying it: the row
+    // is read at what the contract is trading at, so a trade is a new figure.
     expect(store.replace({
       BTCUSDT: {
         markPrice: '60000.00', updatedAt: 200, lastPrice: '59950', lastPriceAt: 300,
@@ -624,11 +757,15 @@ describe('createFuturesPositionMarkStore', () => {
     })).toBe(true)
     expect(readingListener).toHaveBeenCalledTimes(3)
     expect(presentationListener).toHaveBeenCalledTimes(2)
-    expect(valueListener).toHaveBeenCalledTimes(1)
+    expect(valueListener).toHaveBeenCalledTimes(2)
     expect(store.presentationVersion(['BTCUSDT'])).not.toBe(presentationVersion)
-    expect(store.valueVersion(['BTCUSDT'])).toBe(valueVersion)
+    expect(store.valueVersion(['BTCUSDT'])).not.toBe(valueVersion)
 
-    // Mark movement changes both derived financial value and presentation.
+    // A mark moving while the contract is still printing changes what stands
+    // beside the figure — the mark's own reckoning, the notional, the margin —
+    // and not the figure itself. The money channel stays quiet; the surfaces
+    // that state both prices do not.
+    const printedValueVersion = store.valueVersion(['BTCUSDT'])
     expect(store.replace({
       BTCUSDT: {
         markPrice: '60100', updatedAt: 400, lastPrice: '59950', lastPriceAt: 300,
@@ -637,13 +774,16 @@ describe('createFuturesPositionMarkStore', () => {
     expect(readingListener).toHaveBeenCalledTimes(4)
     expect(presentationListener).toHaveBeenCalledTimes(3)
     expect(valueListener).toHaveBeenCalledTimes(2)
-    expect(store.valueVersion(['BTCUSDT'])).not.toBe(valueVersion)
+    expect(store.valueVersion(['BTCUSDT'])).toBe(printedValueVersion)
   })
 
-  it('can notify explanatory tape movement without changing primary PnL', () => {
+  it('leaves the mark’s own figure where it was when only the contract prints', () => {
     const store = createFuturesPositionMarkStore()
     const listener = vi.fn()
     const valuationListener = vi.fn()
+    const short = {
+      symbol: 'BEATUSDT', positionSide: 'SHORT', quantity: '2873', entryPrice: '3.3450',
+    }
     store.subscribe('BEATUSDT', listener)
     store.subscribeValuation('BEATUSDT', valuationListener)
     store.replace({
@@ -651,46 +791,49 @@ describe('createFuturesPositionMarkStore', () => {
         markPrice: '3.36', updatedAt: 2, lastPrice: '3.30', lastPriceAt: 3,
       },
     })
-    const before = readFuturesPositionValuation({
-      symbol: 'BEATUSDT', positionSide: 'SHORT', quantity: '2873', entryPrice: '3.3450',
-    }, store.get('BEATUSDT'))
-    const primaryVersion = store.version(['BEATUSDT'])
+    const before = readFuturesPositionValuation(short, store.get('BEATUSDT'))
 
     store.replace({
       BEATUSDT: {
         markPrice: '3.36', updatedAt: 2, lastPrice: '3.34', lastPriceAt: 4,
       },
     })
-    const after = readFuturesPositionValuation({
-      symbol: 'BEATUSDT', positionSide: 'SHORT', quantity: '2873', entryPrice: '3.3450',
-    }, store.get('BEATUSDT'))
+    const after = readFuturesPositionValuation(short, store.get('BEATUSDT'))
 
     expect(listener).toHaveBeenCalledTimes(2)
-    expect(valuationListener).toHaveBeenCalledTimes(1)
-    expect(store.version(['BEATUSDT'])).toBe(primaryVersion)
-    expect(after.unrealizedPnl).toBe(before.unrealizedPnl)
+    expect(valuationListener).toHaveBeenCalledTimes(2)
+    // The row moved; what the exchange is holding the position at did not, and
+    // neither did the notional the exchange sizes its requirement on.
+    expect(after.unrealizedPnl).not.toBe(before.unrealizedPnl)
+    expect(after.basisPrice).toBe('3.34')
     expect(after.notional).toBe(before.notional)
-    expect(after.tapeScenario.price).toBe('3.34')
+    expect(after.markScenario).toEqual(before.markScenario)
   })
 })
 
 describe('valuation compatibility and aggregate helpers', () => {
-  it('merges a live mark without letting tape movement alter the primary fields', () => {
+  it('merges the price the contract is trading at and keeps the mark on the row', () => {
     const mark = { markPrice: '0.03600', updatedAt: 1 }
     const [markOnly] = mergeFuturesPositionMarks([position], { BMTUSDT: mark })
-    const [withTape] = mergeFuturesPositionMarks([position], {
+    const [withPrint] = mergeFuturesPositionMarks([position], {
       BMTUSDT: { ...mark, lastPrice: '0.03650', lastPriceAt: 2 },
     })
 
-    expect(withTape).toMatchObject({
+    // The mark is on the row under its own name and still decides the
+    // liquidation; the figures the operator reads are on the printed price.
+    expect(withPrint).toMatchObject({
       markPrice: markOnly.markPrice,
-      valuationPrice: markOnly.valuationPrice,
-      valuationEstimated: false,
-      unrealizedPnl: markOnly.unrealizedPnl,
-      markUnrealizedPnl: markOnly.markUnrealizedPnl,
+      valuationBasis: 'last-price',
+      valuationPrice: '0.03650',
+      markUnrealizedPnl: markOnly.unrealizedPnl,
+      liquidationPrice: position.liquidationPrice,
     })
-    expect(withTape.tapePrice).toBe('0.03650')
-    expect(withTape.liquidationPrice).toBe(position.liquidationPrice)
+    expect(markOnly).toMatchObject({
+      valuationBasis: 'mark',
+      valuationPrice: '0.03600',
+    })
+    expect(Number(withPrint.unrealizedPnl))
+      .toBeCloseTo((0.03650 - 0.03140) * -446082, 6)
   })
 
   it('marks an aggregate incomplete instead of presenting a known subset as complete', () => {

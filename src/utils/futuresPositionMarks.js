@@ -50,8 +50,9 @@ export const readFuturesPositionMarks = (value) => {
     marks[key] = Object.freeze({
       markPrice: String(mark.markPrice),
       updatedAt: safeTime(mark?.updatedAt),
-      // Tape data is explanatory only. It can say why the chart and the mark
-      // disagree, but it never becomes a primary valuation input.
+      // What the contract itself last printed at. A reading never carries one
+      // without a mark beside it — the feed publishes by walking its marks, and
+      // this loop drops any entry without one.
       lastPrice: lastPrice === null ? null : String(mark.lastPrice),
       lastPriceAt: safeTime(mark?.lastPriceAt),
     })
@@ -66,33 +67,82 @@ const sameMark = (left, right) => left === right || (
   && left?.lastPriceAt === right?.lastPriceAt
 )
 
-const samePrimaryMark = (left, right) => left === right || (
-  left?.markPrice === right?.markPrice
-  && left?.updatedAt === right?.updatedAt
-)
+// How far behind the mark the contract's own last print may fall and still be
+// the price the position is valued at.
+//
+// The two are different quantities, not a fast copy and a slow one: the mark is
+// an index the exchange publishes once a second and settles, charges funding and
+// liquidates on; the print is what the contract actually traded at, and it is
+// what the chart draws and what an exit fills near. Measured 2026-08-26 through
+// the operator's proxy over 180s, the print stood 1.0 bps from the mark at the
+// median and up to 7.0 bps at its worst, and inside a single mark second the
+// price roamed as far as 7.0 bps from the standing mark — money a mark-priced
+// row could not show until the second was over.
+//
+// This window decides which of the two is the newer statement about the price,
+// and it is a window rather than a plain comparison because the mark arrives on
+// a metronome: without one, every mark would briefly take the reading back off
+// a contract that is printing perfectly well, and the row would alternate
+// between two figures a bp apart once a second. Set above the worst mark
+// interval that session measured (1272ms, p95 1015ms) so a late mark frame
+// cannot do that either, and no higher, because everything above it is age the
+// operator would be shown instead of the mark's own.
+//
+// Measured print gaps for scale, same session: BTCUSDT p95 196ms, ETHUSDT
+// 354ms, SOLUSDT 712ms, DOGEUSDT 1609ms. A contract that stops trading hands
+// the reading back to the mark within about two marks, which is what should
+// happen — a price nobody has traded at for two seconds is not the fresher one.
+export const FUTURES_LAST_PRICE_GRACE_MS = 1500
 
-// A timestamp refresh is a new reading, but not a new valuation. Keep that
-// distinction available to consumers that only render price-derived money so
-// they can avoid recomputing it without forcing freshness-aware consumers to
-// hold an old source time.
-const sameMarkValue = (left, right) => left === right || (
-  left !== null
-  && left !== undefined
-  && right !== null
-  && right !== undefined
-  && Number(left.markPrice) === Number(right.markPrice)
-)
+// Which price a reading states, and when the exchange said it. One place, so
+// the notification predicates below and the valuation itself cannot disagree
+// about what a row is showing.
+export const readFuturesPositionPriceBasis = (mark) => {
+  const markPrice = positiveNumber(mark?.markPrice)
+  if (markPrice === null) return null
+  const markAt = safeTime(mark?.updatedAt)
+  const onMark = Object.freeze({ basis: 'mark', price: String(mark.markPrice), at: markAt })
+  const lastPrice = positiveNumber(mark?.lastPrice)
+  const lastAt = safeTime(mark?.lastPriceAt)
+  // An untimed print cannot be compared with the mark, and an untimed mark
+  // gives nothing to compare it against. Neither is a reason to prefer it.
+  if (lastPrice === null || lastAt === null || markAt === null) return onMark
+  if (markAt - lastAt > FUTURES_LAST_PRICE_GRACE_MS) return onMark
+  return Object.freeze({ basis: 'last-price', price: String(mark.lastPrice), at: lastAt })
+}
 
-// Rows that explain mark/tape disagreement need both prices, but neither source
-// clock changes their arithmetic. Give those surfaces a middle channel: richer
-// than the aggregate's primary-mark value and cheaper than the full freshness
-// reading.
-const samePresentationValue = (left, right) => sameMarkValue(left, right) && (
-  left.lastPrice === right.lastPrice
-  || (left.lastPrice !== null
-    && right.lastPrice !== null
-    && Number(left.lastPrice) === Number(right.lastPrice))
-)
+// Everything a whole valuation is built from: the price the row is read at with
+// the time the exchange put on it, and the mark, which the row does not state
+// its money at but does take its notional, its margin and the figure it carries
+// beside itself from. Freshness belongs here because the basis can change on a
+// timestamp alone — a mark arriving while the contract has gone quiet takes the
+// reading back without any price having moved.
+const samePrimaryMark = (left, right) => {
+  if (left === right) return true
+  const before = readFuturesPositionPriceBasis(left)
+  const after = readFuturesPositionPriceBasis(right)
+  return left?.markPrice === right?.markPrice
+    && left?.updatedAt === right?.updatedAt
+    && before?.basis === after?.basis
+    && before?.price === after?.price
+    && before?.at === after?.at
+}
+
+// The money, and only the money: a source clock advancing over an unchanged
+// price is not a new figure to draw.
+const sameMarkValue = (left, right) => {
+  if (left === right) return true
+  const before = readFuturesPositionPriceBasis(left)
+  const after = readFuturesPositionPriceBasis(right)
+  if (before === null || after === null) return before === after
+  return Number(before.price) === Number(after.price)
+}
+
+// Rows that state the mark beside the figure need both prices to move them,
+// and neither source clock. A middle channel: richer than the aggregate's
+// single number, cheaper than the full freshness reading.
+const samePresentationValue = (left, right) => sameMarkValue(left, right)
+  && Number(left?.markPrice) === Number(right?.markPrice)
 
 // A full feed frame may arrive after a newer renderer frame when IPC work is
 // interleaved. Preserve each source's newest timestamp independently: a late
@@ -254,52 +304,11 @@ export const createFuturesPositionMarkStore = () => {
     return true
   }
 
-  // The tape of the contract on screen, merged onto that symbol's reading
-  // without touching its mark.
-  //
-  // Kept apart from `replace` deliberately. That one carries the feed's whole
-  // publication and decides admission for the publication; this carries one
-  // contract's own last print, arriving between those publications, off the
-  // socket the chart is already drawn from. The exchange marks once a second;
-  // the tape prints whenever the market does, and this is the only channel by
-  // which anything on a position row can move in between.
-  //
-  // Notifies the full and presentation channels and never the valuation or
-  // value ones. That is the whole safety property: primary uPnL, ROE, notional
-  // and the dock total subscribe to those two, and a tape print may not reach
-  // them. Answers whether anything changed.
-  const noteTape = (symbol, reading) => {
-    const key = normalizedSymbol(symbol)
-    const held = marks[key]
-    // Tape is explanatory only: it stands beside a mark, never in place of one.
-    // A symbol the feed is not marking has nothing for it to explain, and an
-    // entry carrying a tape and no mark would be dropped by the reader anyway.
-    if (!key || held === undefined) return false
-    const lastPrice = reading === null || reading === undefined
-      ? null
-      : positiveNumber(reading.lastPrice)
-    const lastPriceAt = lastPrice === null ? null : safeTime(reading?.lastPriceAt)
-    // A print that reaches this later than a newer one cannot undo it, for the
-    // reason `preferNewestMarkReading` states about its own two sources.
-    if (lastPrice !== null
-      && held.lastPriceAt !== null
-      && (lastPriceAt === null || lastPriceAt < held.lastPriceAt)) return false
-    const next = Object.freeze({
-      markPrice: held.markPrice,
-      updatedAt: held.updatedAt,
-      // The exchange's own decimal text, not a reparsed number: the parse above
-      // decides whether to accept it, and never what to keep.
-      lastPrice: lastPrice === null ? null : String(reading.lastPrice),
-      lastPriceAt,
-    })
-    if (sameMark(held, next)) return false
-    marks = Object.freeze({ ...marks, [key]: next })
-    presentationRevisions.set(key, (presentationRevisions.get(key) ?? 0) + 1)
-    notify(listeners, [key])
-    notify(presentationListeners, [key])
-    return true
-  }
-
+  // There is no second way in. A print used to arrive here on its own, off the
+  // renderer's chart stream and only for the contract on screen; the feed now
+  // carries every open contract's print in the same publication as its mark, so
+  // one publication is one coherent reading of both prices and the admission
+  // rules above apply to all of it.
   const subscribeTo = (heldListeners, symbol, callback) => {
     const key = normalizedSymbol(symbol)
     if (!key || typeof callback !== 'function') return () => {}
@@ -324,7 +333,6 @@ export const createFuturesPositionMarkStore = () => {
   return Object.freeze({
     replace,
     clear,
-    noteTape,
     get: symbol => marks[normalizedSymbol(symbol)] ?? null,
     subscribe: (symbol, callback) => subscribeTo(listeners, symbol, callback),
     subscribeValuation: (symbol, callback) => subscribeTo(
@@ -347,25 +355,47 @@ export const createFuturesPositionMarkStore = () => {
   })
 }
 
-const tapeScenarioOf = (position, mark, primaryPnl) => {
-  const tapePrice = positiveNumber(mark?.lastPrice)
+// What the exchange's own mark makes the position worth.
+//
+// Carried whenever the reading is priced at something else, because this is the
+// figure the account agrees with: funding is charged on it, liquidation is
+// decided by it, and it is what the Binance app shows unless it is told
+// otherwise. The row states the price the contract is trading at; this states
+// the price it is settled at, and on a fast move they are not the same number.
+const markScenarioOf = (position, mark, readingPnl, margin) => {
+  const markPrice = positiveNumber(mark?.markPrice)
   const quantity = signedQuantityOf(position)
   const entryPrice = positiveNumber(position?.entryPrice)
-  if (tapePrice === null || quantity === null || entryPrice === null) return null
-  const unrealizedPnl = stableDerivedNumber((tapePrice - entryPrice) * quantity)
+  if (markPrice === null || quantity === null || entryPrice === null) return null
+  const unrealizedPnl = stableDerivedNumber((markPrice - entryPrice) * quantity)
   return Object.freeze({
-    price: String(mark.lastPrice),
-    sourceAt: safeTime(mark?.lastPriceAt),
+    price: String(mark.markPrice),
+    sourceAt: safeTime(mark?.updatedAt),
     unrealizedPnl,
-    disagreesWithMark: unrealizedPnl !== 0
-      && primaryPnl !== 0
-      && (unrealizedPnl > 0) !== (primaryPnl > 0),
+    roe: margin === null
+      ? null
+      : stableDerivedNumber((unrealizedPnl / margin) * 100),
+    // The two are on opposite sides of the entry: the chart shows the price
+    // past the line while the account still records a loss, or the reverse.
+    // Both are right — one is an index average, the other is what printed — but
+    // a row that contradicts the account without saying why reads as broken
+    // arithmetic, and this is what lets a surface say why.
+    disagreesWithReading: unrealizedPnl !== 0
+      && readingPnl !== 0
+      && (unrealizedPnl > 0) !== (readingPnl > 0),
   })
 }
 
-// Strict source ladder: complete live mark arithmetic, then one confirmed
-// account snapshot, then unknown. The object is the one source for row price,
-// notional, uPnL, ROE and aggregate selection.
+// Strict source ladder: complete live arithmetic on the public price feed, then
+// one confirmed account snapshot, then unknown. The object is the one source
+// for row price, notional, uPnL, ROE and aggregate selection.
+//
+// Within the live rung the price is whichever of the contract's two — its last
+// print and its mark — the exchange stated more recently, as
+// `readFuturesPositionPriceBasis` decides. The mark's own figure is carried
+// alongside as `markScenario` whenever it differs, and the mark alone still
+// sets notional and margin: those are what the exchange requires of the
+// position, and a trade printing does not change them.
 export const readFuturesPositionValuation = (position, mark, {
   snapshotAt = null,
   snapshotConfirmed = true,
@@ -379,9 +409,14 @@ export const readFuturesPositionValuation = (position, mark, {
   const marginState = describeFuturesPositionMargin(position)
   const snapshotMargin = marginState.margin
   const liveMark = positiveNumber(mark?.markPrice)
+  const basis = readFuturesPositionPriceBasis(mark)
 
-  if (quantity !== null && entryPrice !== null && liveMark !== null) {
-    const unrealizedPnl = stableDerivedNumber((liveMark - entryPrice) * quantity)
+  if (quantity !== null && entryPrice !== null && basis !== null) {
+    const livePrice = Number(basis.price)
+    const unrealizedPnl = stableDerivedNumber((livePrice - entryPrice) * quantity)
+    // Notional stays on the mark, and so does the margin derived from it: the
+    // exchange sizes its requirement on the mark, and a print moving does not
+    // change what the position must keep. Only what it is worth moves.
     const notional = stableDerivedNumber(Math.abs(quantity * liveMark))
     const leverage = positiveNumber(position?.leverage)
     // An isolated wallet is committed money and remains a coherent denominator
@@ -395,8 +430,12 @@ export const readFuturesPositionValuation = (position, mark, {
         ? positiveNumber(notional / leverage)
         : null
     return Object.freeze({
-      source: 'live-mark',
-      sourceAt: safeTime(mark?.updatedAt),
+      source: 'live-price',
+      // Which of the contract's two prices this reading is on, and the time the
+      // exchange put on that one — not on the other.
+      basis: basis.basis,
+      basisPrice: basis.price,
+      sourceAt: basis.at,
       markPrice: String(mark.markPrice),
       unrealizedPnl,
       notional,
@@ -407,7 +446,7 @@ export const readFuturesPositionValuation = (position, mark, {
       complete: true,
       roeComplete: liveMargin !== null,
       missingReason: null,
-      tapeScenario: tapeScenarioOf(position, mark, unrealizedPnl),
+      markScenario: markScenarioOf(position, mark, unrealizedPnl, liveMargin),
     })
   }
 
@@ -416,6 +455,12 @@ export const readFuturesPositionValuation = (position, mark, {
     const snapshotMark = positiveNumber(position?.markPrice)
     return Object.freeze({
       source: 'account-snapshot',
+      // A snapshot has one price and it is the account's own. There is no
+      // choice of basis to state.
+      basis: null,
+      basisPrice: snapshotCoherent && positiveNumber(position?.markPrice) !== null
+        ? String(position.markPrice)
+        : null,
       sourceAt: safeTime(snapshotAt),
       // ACCOUNT_UPDATE can replace quantity/entry/uPnL while the reducer keeps
       // the older REST mark. Until provenance says these fields are one
@@ -433,12 +478,14 @@ export const readFuturesPositionValuation = (position, mark, {
       complete: true,
       roeComplete: snapshotCoherent && snapshotMargin !== null,
       missingReason: null,
-      tapeScenario: null,
+      markScenario: null,
     })
   }
 
   return Object.freeze({
     source: 'unknown',
+    basis: null,
+    basisPrice: null,
     sourceAt: null,
     markPrice: null,
     unrealizedPnl: null,
@@ -450,9 +497,15 @@ export const readFuturesPositionValuation = (position, mark, {
     missingReason: quantity === null || entryPrice === null
       ? 'position-inputs-unusable'
       : 'mark-and-snapshot-unavailable',
-    tapeScenario: null,
+    markScenario: null,
   })
 }
+
+// A number the legacy presentation parser must not see as zero when it is
+// absent. `undefined` is dropped from the row; `null` would be read as 0.
+const carriedAmount = value => (
+  value === null || value === undefined ? undefined : String(value)
+)
 
 export const applyFuturesPositionValuation = (position, valuation) => ({
   ...position,
@@ -460,8 +513,11 @@ export const applyFuturesPositionValuation = (position, valuation) => ({
   // Omit unavailable numeric fields so unknown remains unknown without changing
   // that CRITICAL shared parser in this focused change.
   markPrice: valuation?.markPrice ?? undefined,
-  valuationPrice: valuation?.markPrice ?? undefined,
-  valuationEstimated: false,
+  // The price the figures on this row were actually computed at, which is what
+  // a close estimate must use: a market exit fills near what the contract is
+  // printing, not near the index the exchange settles it on.
+  valuationPrice: valuation?.basisPrice ?? valuation?.markPrice ?? undefined,
+  valuationBasis: valuation?.basis ?? null,
   valuationSource: valuation?.source ?? 'unknown',
   valuationSourceAt: valuation?.sourceAt ?? null,
   valuationComplete: valuation?.complete === true,
@@ -474,18 +530,19 @@ export const applyFuturesPositionValuation = (position, valuation) => ({
   // account snapshot amount here made two neighboring figures contradict one
   // another even though the percentage itself was correct.
   valuationMargin: valuation?.margin ?? undefined,
-  unrealizedPnl: valuation?.unrealizedPnl === null || valuation?.unrealizedPnl === undefined
-    ? undefined
-    : String(valuation.unrealizedPnl),
-  markUnrealizedPnl: valuation?.unrealizedPnl === null || valuation?.unrealizedPnl === undefined
-    ? undefined
-    : String(valuation.unrealizedPnl),
-  tapePrice: valuation?.tapeScenario?.price ?? undefined,
-  tapePriceAt: valuation?.tapeScenario?.sourceAt ?? null,
-  // Preserve the already signed secondary arithmetic. Recomputing it from a
-  // raw positive hedge SHORT quantity would silently turn the what-if into a
-  // long even though the primary valuation correctly applied the explicit leg.
-  tapeScenario: valuation?.tapeScenario ?? undefined,
+  unrealizedPnl: carriedAmount(valuation?.unrealizedPnl),
+  // The mark's own figure, under its own name and never merged with the one
+  // above. This is the seam that holds: margin balance, removable margin and
+  // the liquidation buffer all read this field first, so what the exchange will
+  // do to the position stays decided by the price the exchange decides it on,
+  // whatever price the row is being read at. Falls through to the reading only
+  // on the snapshot rung, where there is one price and it is the account's.
+  markUnrealizedPnl: carriedAmount(
+    valuation?.markScenario?.unrealizedPnl ?? valuation?.unrealizedPnl,
+  ),
+  // Preserve the already signed arithmetic rather than recomputing it. From a
+  // raw positive hedge SHORT quantity the sign would silently flip.
+  markScenario: valuation?.markScenario ?? undefined,
 })
 
 export const readFuturesPositionValuationAggregate = (positions, marks, {
@@ -533,9 +590,8 @@ export const readFuturesPositionValuationAggregate = (positions, marks, {
   })
 }
 
-// Compatibility helper for non-React consumers and probes. It now applies the
-// same mark-only valuation; a tape-only change can alter explanatory detail but
-// never the primary position fields.
+// Compatibility helper for non-React consumers and probes. It applies the same
+// live valuation the surfaces read, on the same basis rule.
 export const mergeFuturesPositionMarks = (positions, marks) => {
   if (!Array.isArray(positions) || positions.length === 0) return positions
   if (marks === null || typeof marks !== 'object') return positions
@@ -544,7 +600,7 @@ export const mergeFuturesPositionMarks = (positions, marks) => {
     const mark = marks[normalizedSymbol(position?.symbol)]
     if (positiveNumber(mark?.markPrice) === null) return position
     const valuation = readFuturesPositionValuation(position, mark)
-    if (valuation.source !== 'live-mark') return position
+    if (valuation.source !== 'live-price') return position
     changed = true
     return applyFuturesPositionValuation(position, valuation)
   })

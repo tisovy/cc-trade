@@ -94,9 +94,11 @@ describe('FuturesPortfolioDock', () => {
       .toHaveTextContent('Size (USDT)')
   })
 
-  // Tape is useful context, but it is not an exchange valuation. A print between
-  // marks may update that context without moving the primary row or its total.
-  it('keeps primary PnL on the exchange mark when only the tape changes', () => {
+  // The exchange marks once a second. A row that can only move on a mark is a
+  // second behind the chart above it, and a scalper trades inside that second —
+  // the operator's own reading on 2026-08-26. Every open position's prints move
+  // its row, and the total with it.
+  it('moves the row and the total on a print between two marks', () => {
     const positionMarkStore = createFuturesPositionMarkStore()
     positionMarkStore.replace({
       BTCUSDT: {
@@ -115,12 +117,16 @@ describe('FuturesPortfolioDock', () => {
     )
     const pnl = () => screen.getByRole('table', { name: 'Open positions' })
       .querySelector('.futures-workstation-dock-pnl')
-    expect(pnl().closest('[data-position-key]')).toHaveAttribute('data-valuation-source', 'live-mark')
-    expect(pnl()).toHaveTextContent('−300.00')
-    expect(pnl().getAttribute('title')).toContain('live exchange mark')
-    expect(screen.getByTestId('futures-upnl-total')).toHaveTextContent('−300.00 USDT')
-    expect(screen.getByRole('table', { name: 'Open positions' })).toHaveTextContent('71000')
+    expect(pnl().closest('[data-position-key]'))
+      .toHaveAttribute('data-valuation-source', 'live-price')
+    // A 0.5 short entered at 60000, with the contract printing 60900.
+    expect(pnl()).toHaveTextContent('−450.00')
+    expect(pnl().getAttribute('title')).toContain('the contract’s last print')
+    expect(screen.getByTestId('futures-upnl-total')).toHaveTextContent('−450.00 USDT')
+    // The mark keeps its own column, under its own name.
+    expect(screen.getByRole('table', { name: 'Open positions' })).toHaveTextContent('60600')
 
+    // No new mark; one more trade.
     act(() => positionMarkStore.replace({
       BTCUSDT: {
         markPrice: '60600',
@@ -129,17 +135,19 @@ describe('FuturesPortfolioDock', () => {
         lastPriceAt: 1_784_000_000_200,
       },
     }))
-    expect(pnl()).toHaveTextContent('−300.00')
-    expect(screen.getByTestId('futures-upnl-total')).toHaveTextContent('−300.00 USDT')
-    expect(pnl().getAttribute('title')).not.toContain('carried forward')
+    expect(pnl()).toHaveTextContent('−600.00')
+    expect(screen.getByTestId('futures-upnl-total')).toHaveTextContent('−600.00 USDT')
+    // And what the exchange is holding the position at stays on the row.
+    expect(pnl().getAttribute('title')).toContain('on the exchange’s mark')
+    expect(pnl().getAttribute('title')).toContain('−300.00 USDT')
   })
 
-  // The row is valued on the mark and the chart is drawn from the tape, and on
-  // a fast move the two sit on opposite sides of the entry: the operator sees
-  // price past their own ENTRY line while the row states a loss. Both figures
-  // are right, and a row that says the opposite of the chart without saying why
-  // reads as broken arithmetic — which is exactly how it was reported.
-  it('says when the tape has crossed the entry and the mark has not', () => {
+  // The row is read at what the contract printed and the exchange holds it at
+  // its mark, and on a fast move the two sit on opposite sides of the entry:
+  // the operator sees price past their own ENTRY line while the account still
+  // records a loss. Both figures are right, and a row that contradicts the
+  // account without saying why reads as broken arithmetic.
+  it('says when the print has crossed the entry and the mark has not', () => {
     const positionMarkStore = createFuturesPositionMarkStore()
     positionMarkStore.replace({
       BTCUSDT: {
@@ -166,14 +174,14 @@ describe('FuturesPortfolioDock', () => {
     const row = screen.getByRole('table', { name: 'Open positions' })
       .querySelector('[data-position-key="BTCUSDT:BOTH"]')
     const title = row.querySelector('.futures-workstation-dock-pnl').getAttribute('title')
-    expect(row).toHaveAttribute('data-valuation-source', 'live-mark')
-    expect(row).toHaveTextContent('−100.00')
-    expect(title).toContain('the contract last traded at 60800.0')
-    expect(title).toContain('the other side of your entry')
-    // What the position would be worth there, so the operator can see the size
-    // of the disagreement rather than only that there is one.
-    expect(title).toContain('+100.00 USDT there')
-    expect(title).toContain('the mark is what settles')
+    expect(row).toHaveAttribute('data-valuation-source', 'live-price')
+    expect(row).toHaveTextContent('+100.00')
+    expect(title).toContain('read at the price the contract last printed')
+    // What the exchange itself is holding it at, so the operator can see the
+    // size of the disagreement rather than only that there is one.
+    expect(title).toContain('on the exchange’s mark 61200.0 it is −100.00 USDT')
+    expect(title).toContain('opposite sides of your entry')
+    expect(title).toContain('the mark is what settles and liquidates')
   })
 
   it('says nothing about the tape when it agrees with the mark', () => {
@@ -1239,7 +1247,7 @@ describe('FuturesPortfolioDock', () => {
     expect(table).toHaveTextContent('30600.00')
     expect(table).toHaveTextContent('−600.00')
     expect(table.querySelector('[data-position-key="BTCUSDT:BOTH"]'))
-      .toHaveAttribute('data-valuation-source', 'live-mark')
+      .toHaveAttribute('data-valuation-source', 'live-price')
     expect(screen.getByLabelText('Futures positions and working orders'))
       .toHaveTextContent('−600.00 USDT')
   })

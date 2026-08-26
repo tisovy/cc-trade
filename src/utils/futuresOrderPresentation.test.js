@@ -271,37 +271,40 @@ describe('describeFuturesOrderIntent', () => {
 })
 
 describe('describeFuturesPosition', () => {
-  // The mark and the tape part company on a fast move, and the operator reads
-  // their entry line against the tape because that is what the chart draws.
-  it('states the tape\u2019s own reading and whether it disagrees with the mark', () => {
+  // The row is read at what the contract printed and the exchange holds it at
+  // its mark, and on a fast move the two part company \u2014 occasionally onto
+  // opposite sides of the entry.
+  it('states the mark\u2019s own reading and whether it disagrees with the row', () => {
     const short = {
       symbol: 'BTCUSDT',
       quantity: '-0.5',
       entryPrice: '61000',
       markPrice: '61200',
-      markUnrealizedPnl: '-100',
-      unrealizedPnl: '-100',
       initialMargin: '3050',
     }
-    // Tape below the entry, mark above it: profit there, loss here.
-    const straddling = describeFuturesPosition({ ...short, tapePrice: '60800' })
-    expect(straddling.tapeUnrealizedPnl).toBeCloseTo(100, 6)
-    expect(straddling.tapeDisagreesWithMark).toBe(true)
+    // Read below the entry, marked above it: profit here, loss on the mark.
+    const straddling = describeFuturesPosition({ ...short, unrealizedPnl: '100' })
+    expect(straddling.markUnrealizedPnl).toBeCloseTo(-100, 6)
+    expect(straddling.markDisagreesWithReading).toBe(true)
 
     // Both on the same side of the entry: nothing to explain.
-    const agreeing = describeFuturesPosition({ ...short, tapePrice: '61150' })
-    expect(agreeing.tapeUnrealizedPnl).toBeCloseTo(-75, 6)
-    expect(agreeing.tapeDisagreesWithMark).toBe(false)
+    const agreeing = describeFuturesPosition({ ...short, unrealizedPnl: '-75' })
+    expect(agreeing.markUnrealizedPnl).toBeCloseTo(-100, 6)
+    expect(agreeing.markDisagreesWithReading).toBe(false)
 
-    // No tape reading at all, and a tape sitting exactly on the entry, are both
-    // silence rather than a disagreement: zero has no side.
-    expect(describeFuturesPosition(short).tapeUnrealizedPnl).toBeNull()
-    expect(describeFuturesPosition(short).tapeDisagreesWithMark).toBe(false)
-    expect(describeFuturesPosition({ ...short, tapePrice: '61000' }).tapeDisagreesWithMark)
-      .toBe(false)
+    // No mark to reckon from, and a reading sitting exactly on the entry, are
+    // both silence rather than a disagreement: zero has no side.
+    expect(describeFuturesPosition({
+      quantity: '-0.5', entryPrice: '61000', unrealizedPnl: '100',
+    }).markUnrealizedPnl).toBeNull()
+    expect(describeFuturesPosition({
+      quantity: '-0.5', entryPrice: '61000', unrealizedPnl: '100',
+    }).markDisagreesWithReading).toBe(false)
+    expect(describeFuturesPosition({ ...short, unrealizedPnl: '0' })
+      .markDisagreesWithReading).toBe(false)
   })
 
-  it('preserves a carried tape scenario for a positive-quantity SHORT leg', () => {
+  it('preserves a carried mark scenario for a positive-quantity SHORT leg', () => {
     const presentation = describeFuturesPosition({
       symbol: 'BEATUSDT',
       positionSide: 'SHORT',
@@ -309,20 +312,22 @@ describe('describeFuturesPosition', () => {
       entryPrice: '3.3450',
       markPrice: '3.36',
       markUnrealizedPnl: '-43.095',
-      unrealizedPnl: '-43.095',
-      tapeScenario: {
-        price: '3.30',
-        sourceAt: 3,
-        unrealizedPnl: 129.285,
-        disagreesWithMark: true,
+      unrealizedPnl: '129.285',
+      valuationBasis: 'last-price',
+      markScenario: {
+        price: '3.36',
+        sourceAt: 2,
+        unrealizedPnl: -43.095,
+        disagreesWithReading: true,
       },
     })
 
     expect(presentation).toMatchObject({
       positionSide: 'SHORT',
-      tapePrice: 3.3,
-      tapeUnrealizedPnl: 129.285,
-      tapeDisagreesWithMark: true,
+      pnlBasis: 'last-price',
+      markPnlPrice: 3.36,
+      markUnrealizedPnl: -43.095,
+      markDisagreesWithReading: true,
     })
   })
 

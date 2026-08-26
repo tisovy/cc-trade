@@ -180,12 +180,14 @@ const FuturesTradingPositionCard = memo(({
   const priceOf = value => formatExchangePrice(value, tickSize)
   const hasPnl = valuation.unrealizedPnl !== null
   const hasRoe = valuation.roeComplete && valuation.roe !== null
-  const source = valuation.source === 'live-mark'
-    ? 'Live exchange mark'
+  const source = valuation.source === 'live-price'
+    ? valuation.basis === 'last-price'
+      ? 'Live: what the contract last printed at'
+      : 'Live: the exchange mark — no print since'
     : valuation.source === 'account-snapshot'
       ? `Account snapshot fallback${valuation.sourceAt === null
         ? ''
-        : ` from ${exactFuturesDeskTime(valuation.sourceAt)}`}; live mark unavailable`
+        : ` from ${exactFuturesDeskTime(valuation.sourceAt)}`}; no live price`
       : 'Valuation unavailable'
   return (
     <article
@@ -206,29 +208,32 @@ const FuturesTradingPositionCard = memo(({
         <strong>{hasPnl ? `${formatSignedUsdt(valuation.unrealizedPnl)} USDT` : '— USDT'}</strong>
         <em>{hasRoe ? formatSignedPercent(valuation.roe) : '—'}</em>
       </div>
-      {/* What the position is worth at the price the chart is drawn from.
-          Its own name and its own line, never the headline: the exchange
-          publishes its mark once a second and settles and liquidates on it, so
-          the figure above is the one the account will agree with. This one
-          exists because during a fast move the mark is over a second behind
-          what the operator is looking at, and nothing on the desk said so. */}
-      {valuation.tapeScenario === null ? null : (
+      {/* What the exchange itself is holding the position at, under its own
+          name and never as the headline. The figure above is read at the price
+          the contract is printing, because that is what the operator watches
+          and what an exit fills near; this is the one the account agrees with,
+          the one funding is charged on and the one liquidation is decided by.
+          Shown only while the two are actually different readings. */}
+      {valuation.basis !== 'last-price' || valuation.markScenario === null ? null : (
         <p
-          className="futures-production-position-tape"
-          title={`At the contract's last traded price ${
-            priceOf(valuation.tapeScenario.price)}${
-            valuation.tapeScenario.sourceAt === null
+          className="futures-production-position-mark"
+          title={`What the exchange values this position at on its own mark of ${
+            priceOf(valuation.markScenario.price)}${
+            valuation.markScenario.sourceAt === null
               ? ''
-              : `, printed ${exactFuturesDeskTime(valuation.tapeScenario.sourceAt)}`
-          } — a reading of the chart, not of the account. The exchange marks once a second and settles on that mark, which is the figure above.`}
+              : `, published ${exactFuturesDeskTime(valuation.markScenario.sourceAt)}`
+          } — once a second, and the number the Binance app shows. Funding, margin and liquidation are all decided on it. The figure above is the same position at the price it last traded.`}
         >
-          <em>At last {priceOf(valuation.tapeScenario.price)}</em>
-          <span>{formatSignedUsdt(valuation.tapeScenario.unrealizedPnl)} USDT</span>
+          <em>On the exchange’s mark</em>
+          <span>{formatSignedUsdt(valuation.markScenario.unrealizedPnl)} USDT</span>
         </p>
       )}
       <dl>
         <div><dt>Qty</dt><dd>{exactText(position.quantity)}</dd></div>
         <div><dt>Entry</dt><dd>{priceOf(position.entryPrice)}</dd></div>
+        {valuation.basis === 'last-price' ? (
+          <div><dt>Last</dt><dd>{priceOf(valuation.basisPrice)}</dd></div>
+        ) : null}
         <div><dt>Mark</dt><dd>{priceOf(valuation.markPrice)}</dd></div>
         <div><dt>Liq.</dt><dd>{priceOf(position.liquidationPrice)}</dd></div>
         <div>

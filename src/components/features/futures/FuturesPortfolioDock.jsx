@@ -424,17 +424,23 @@ const positionSnapshotMeta = (resource, positionsKnown, hasHeldRows) => {
 }
 
 const valuationSourceNote = (valuation) => {
-  if (valuation?.source === 'live-mark') {
-    return ` · live exchange mark${valuation.sourceAt === null
+  if (valuation?.source === 'live-price') {
+    // Which of the contract's two prices this row is on. Named rather than
+    // implied: the Mark column beside it is the other one, and on a fast move
+    // the two are visibly different numbers.
+    const at = valuation.sourceAt === null
       ? ''
-      : ` at ${exactFuturesDeskTime(valuation.sourceAt)}`}`
+      : ` at ${exactFuturesDeskTime(valuation.sourceAt)}`
+    return valuation.basis === 'last-price'
+      ? ` · the contract’s last print${at}`
+      : ` · live exchange mark${at}`
   }
   if (valuation?.source === 'account-snapshot') {
     return ` · account snapshot fallback${valuation.sourceAt === null
       ? ''
-      : ` from ${exactFuturesDeskTime(valuation.sourceAt)}`}; live mark unavailable`
+      : ` from ${exactFuturesDeskTime(valuation.sourceAt)}`}; no live price`
   }
-  return ' · unavailable: neither a live mark nor a confirmed account uPnL can value this position'
+  return ' · unavailable: neither a live price nor a confirmed account uPnL can value this position'
 }
 
 const FuturesPortfolioUnrealizedTotal = memo(({
@@ -465,8 +471,8 @@ const FuturesPortfolioUnrealizedTotal = memo(({
     : aggregate.missingCount > 0
       ? `Incomplete total: ${aggregate.missingCount} open position${aggregate.missingCount === 1 ? '' : 's'} cannot be valued. The known rows sum to ${formatSignedUsdt(aggregate.value)} USDT.`
       : aggregate.fallbackCount > 0
-        ? `Complete total using ${aggregate.fallbackCount} qualified account snapshot fallback${aggregate.fallbackCount === 1 ? '' : 's'} while live marks are unavailable.`
-        : 'Complete total from the exchange mark used by every open-position row.'
+        ? `Complete total using ${aggregate.fallbackCount} qualified account snapshot fallback${aggregate.fallbackCount === 1 ? '' : 's'} while live prices are unavailable.`
+        : 'Complete total on the same live price every open-position row is read at — each contract’s own last print while it is trading, its exchange mark otherwise.'
   return (
     <div
       className={`futures-workstation-dock-total is-${tone}${aggregate.complete ? '' : ' is-incomplete'}`}

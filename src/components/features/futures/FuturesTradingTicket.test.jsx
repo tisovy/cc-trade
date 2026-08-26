@@ -2,7 +2,10 @@ import { readFileSync } from 'node:fs'
 import { act, createEvent, fireEvent, render, screen, within } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import FuturesTradingTicket from './FuturesTradingTicket.jsx'
-import { createFuturesPositionMarkStore } from '../../../utils/futuresPositionMarks.js'
+import {
+  FUTURES_LAST_PRICE_GRACE_MS,
+  createFuturesPositionMarkStore,
+} from '../../../utils/futuresPositionMarks.js'
 
 const contract = Object.freeze({
   symbol: 'BTCUSDT',
@@ -1813,10 +1816,10 @@ describe('FuturesTradingTicket', () => {
     const panel = screen.getByLabelText('Open positions')
     expect(panel).toHaveTextContent('LONG')
     expect(panel.querySelector('[data-position-key="BTCUSDT:LONG"]'))
-      .toHaveAttribute('data-valuation-source', 'live-mark')
+      .toHaveAttribute('data-valuation-source', 'live-price')
     expect(panel).toHaveTextContent('+14.45 USDT')
     expect(panel.querySelector('.futures-production-position-pnl'))
-      .toHaveAttribute('title', expect.stringContaining('Live exchange mark'))
+      .toHaveAttribute('title', expect.stringContaining('Live: the exchange mark'))
     // The liquidation price is a function of the margin, so the card that
     // states one states the other — and names the mode, since only an isolated
     // margin can be moved at all.
@@ -1860,9 +1863,11 @@ describe('FuturesTradingTicket', () => {
     fireEvent.click(screen.getByRole('tab', { name: 'Positions 1' }))
     const pnl = screen.getByLabelText('Open positions')
       .querySelector('.futures-production-position-pnl')
-    expect(pnl).toHaveTextContent('−10.00 USDT')
-    expect(pnl).toHaveAttribute('title', expect.stringContaining('last traded at 110'))
+    // Entered at 100, printing at 110, marked at 90.
+    expect(pnl).toHaveTextContent('+10.00 USDT')
+    expect(pnl).toHaveAttribute('title', expect.stringContaining('mark 90.0 it is −10.00 USDT'))
 
+    // The same two prices written differently, with new clocks on them.
     entryPriceRead.mockClear()
     act(() => positionMarkStore.replace({
       BTCUSDT: {
@@ -1870,32 +1875,36 @@ describe('FuturesTradingTicket', () => {
       },
     }))
     expect(entryPriceRead).not.toHaveBeenCalled()
-    expect(pnl).toHaveTextContent('−10.00 USDT')
-    expect(pnl).toHaveAttribute('title', expect.stringContaining('last traded at 110'))
+    expect(pnl).toHaveTextContent('+10.00 USDT')
 
+    // The contract prints lower: the headline follows it.
     act(() => positionMarkStore.replace({
       BTCUSDT: {
         markPrice: '90', updatedAt: 300, lastPrice: '80', lastPriceAt: 300,
       },
     }))
     expect(entryPriceRead).toHaveBeenCalled()
-    expect(pnl).not.toHaveAttribute('title', expect.stringContaining('last traded at'))
+    expect(pnl).toHaveTextContent('−20.00 USDT')
 
+    // The mark moves under a contract that is still printing: the headline is
+    // unchanged, but this card states the mark too, so it does rerender.
     entryPriceRead.mockClear()
     act(() => positionMarkStore.replace({
       BTCUSDT: {
-        markPrice: '95', updatedAt: 400, lastPrice: '80', lastPriceAt: 400,
+        markPrice: '95', updatedAt: 400, lastPrice: '80', lastPriceAt: 300,
       },
     }))
     expect(entryPriceRead).toHaveBeenCalled()
-    expect(pnl).toHaveTextContent('−5.00 USDT')
+    expect(pnl).toHaveTextContent('−20.00 USDT')
+    expect(pnl).toHaveAttribute('title', expect.stringContaining('mark 95.0 it is −5.00 USDT'))
   })
 
-  // The operator, 2026-08-26: "MARK PRICE сильно отстает от того что я вижу
-  // глазами на графике". The exchange marks once a second and settles on that
-  // mark, so it stays the headline; what the chart is showing gets its own line
-  // and its own name, which is what nothing on this desk said before.
-  it('states what the position is worth at the price the chart shows, under its own name', () => {
+  // The operator, 2026-08-26: "мне до сих пор не нравится скорость с которой
+  // обновляется uPnL — для скальпинга это слишком медленно". The card is read
+  // at what the contract is printing; what the exchange is holding the position
+  // at goes on its own line under its own name, and stays reachable because it
+  // is the figure that settles and liquidates.
+  it('reads the position at the printed price and names the mark beside it', () => {
     const position = {
       symbol: 'BTCUSDT', positionSide: 'LONG', quantity: '1',
       entryPrice: '100', markPrice: '90', unrealizedPnl: '-10', isolatedWallet: '20',
@@ -1912,38 +1921,52 @@ describe('FuturesTradingTicket', () => {
     fireEvent.click(screen.getByRole('tab', { name: 'Positions 1' }))
     const panel = screen.getByLabelText('Open positions')
     const pnl = panel.querySelector('.futures-production-position-pnl')
+    const markLine = () => panel.querySelector('.futures-production-position-mark')
 
-    // No print yet: one figure, and it is the exchange's.
+    // No print yet: one figure, and it is the mark's. Nothing to state twice.
     expect(pnl).toHaveTextContent('−10.00 USDT')
-    expect(panel.querySelector('.futures-production-position-tape')).toBeNull()
+    expect(markLine()).toBeNull()
 
-    act(() => positionMarkStore.noteTape('BTCUSDT', { lastPrice: '110', lastPriceAt: 400 }))
-    const tape = panel.querySelector('.futures-production-position-tape')
-    expect(tape).not.toBeNull()
-    expect(tape.textContent).toContain('At last 110')
-    expect(tape.textContent).toContain('+10.00 USDT')
-    // Named, and never the headline: the mark-priced figure is untouched, and
-    // the what-if is not inside the element that carries it.
-    expect(pnl).toHaveTextContent('−10.00 USDT')
-    expect(pnl.contains(tape)).toBe(false)
-    expect(tape).toHaveAttribute('title', expect.stringContaining('last traded price 110'))
-    expect(tape).toHaveAttribute('title', expect.stringContaining('settles on that mark'))
+    act(() => positionMarkStore.replace({
+      BTCUSDT: { markPrice: '90', updatedAt: 100, lastPrice: '110', lastPriceAt: 400 },
+    }))
+    // The headline moved on a print, with no new mark behind it.
+    expect(pnl).toHaveTextContent('+10.00 USDT')
+    expect(markLine()).not.toBeNull()
+    expect(markLine().textContent).toContain('On the exchange’s mark')
+    expect(markLine().textContent).toContain('−10.00 USDT')
+    // Its own element, never inside the one carrying the headline.
+    expect(pnl.contains(markLine())).toBe(false)
+    expect(markLine()).toHaveAttribute('title', expect.stringContaining('its own mark of 90'))
+    expect(markLine()).toHaveAttribute('title', expect.stringContaining('liquidation'))
+    // Both prices are named in the card's own list.
+    expect(panel.textContent).toContain('Last')
+    expect(panel.textContent).toContain('Mark')
 
-    // A further print moves only that line.
-    act(() => positionMarkStore.noteTape('BTCUSDT', { lastPrice: '112', lastPriceAt: 500 }))
-    expect(panel.querySelector('.futures-production-position-tape').textContent)
-      .toContain('+12.00 USDT')
-    expect(pnl).toHaveTextContent('−10.00 USDT')
+    // A further print moves the headline and leaves the mark where it was.
+    act(() => positionMarkStore.replace({
+      BTCUSDT: { markPrice: '90', updatedAt: 100, lastPrice: '112', lastPriceAt: 500 },
+    }))
+    expect(pnl).toHaveTextContent('+12.00 USDT')
+    expect(markLine().textContent).toContain('−10.00 USDT')
 
-    // Withdrawn with the contract the operator left, the line goes with it.
-    act(() => positionMarkStore.noteTape('BTCUSDT', null))
-    expect(panel.querySelector('.futures-production-position-tape')).toBeNull()
+    // The contract stops printing for longer than the window: the mark is the
+    // newer statement, takes the reading back, and stops repeating itself.
+    act(() => positionMarkStore.replace({
+      BTCUSDT: {
+        markPrice: '90',
+        updatedAt: 500 + FUTURES_LAST_PRICE_GRACE_MS + 1,
+        lastPrice: '112',
+        lastPriceAt: 500,
+      },
+    }))
     expect(pnl).toHaveTextContent('−10.00 USDT')
+    expect(markLine()).toBeNull()
 
     // Drawn quieter than the figure it sits under, in every way that carries
     // weight. jsdom lays nothing out, so what the suite can hold is the rule:
     // measured in Chromium against a fixture, 11px and neutral grey under 17px
-    // and the position's own red, on a card whose width does not change.
+    // and the position's own colour, on a card whose width does not change.
     const stylesheet = readFileSync(
       'src/components/features/futures/FuturesProductionExecutionTicket.css',
       'utf8',
@@ -1953,12 +1976,12 @@ describe('FuturesTradingTicket', () => {
       const match = rule.slice(0, rule.indexOf('}')).match(/font-size:[^;]*\*\s*([\d.]+)px/)
       return match === null ? null : Number(match[1])
     }
-    expect(sizeOf('.futures-production-position-tape'))
+    expect(sizeOf('.futures-production-position-mark'))
       .toBeLessThan(sizeOf('.futures-production-position-pnl strong'))
     // Neutral, never the position's green or red: the tone belongs to the
-    // number the account agrees with.
+    // figure the operator is trading against.
     expect(stylesheet.slice(
-      stylesheet.indexOf('.futures-production-position-tape {'),
+      stylesheet.indexOf('.futures-production-position-mark {'),
     ).slice(0, 400)).toMatch(/color:\s*#93a6b7/)
   })
 
@@ -1989,7 +2012,7 @@ describe('FuturesTradingTicket', () => {
       '.futures-production-position-pnl',
     )).toHaveAttribute(
       'title',
-      expect.stringMatching(/^Account snapshot fallback from .+; live mark unavailable/),
+      expect.stringMatching(/^Account snapshot fallback from .+; no live price/),
     )
   })
 

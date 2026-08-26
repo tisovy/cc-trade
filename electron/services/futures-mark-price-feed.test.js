@@ -158,11 +158,14 @@ describe('readFuturesLastTradeEvent', () => {
 });
 
 describe('futuresMarkPriceStreamUrl', () => {
-    it('subscribes only to each symbol mark on the routed market path', () => {
+    // Both of a contract's prices, for every open position, on the routed path.
+    // The mark is what the exchange settles on and arrives once a second; the
+    // tape is what the contract actually traded at and is the only thing that
+    // can move a position row in between.
+    it('subscribes to each symbol’s mark and its trades on the routed market path', () => {
         const url = futuresMarkPriceStreamUrl(STREAM_ORIGIN, ['BTCUSDT', 'ETHUSDT']);
         expect(url).toBe(`${STREAM_ORIGIN}/market/stream?streams=btcusdt@markPrice@1s`
-            + '/ethusdt@markPrice@1s');
-        expect(url).not.toContain('@aggTrade');
+            + '/btcusdt@aggTrade/ethusdt@markPrice@1s/ethusdt@aggTrade');
     });
 
     // The decommissioned path is not a connection error: it opens, stays open
@@ -305,6 +308,99 @@ describe('createFuturesMarkPriceFeed', () => {
             BMTUSDT: { markPrice: '0.03523', updatedAt: 1_700_000_000_000 },
             BEATUSDT: { markPrice: '3.523', updatedAt: 1_700_000_000_000 },
         });
+    });
+
+    // What the contract actually traded at, for every open position rather than
+    // for the one on screen. The exchange marks once a second; a position row
+    // that can only move on a mark is a second behind the chart above it.
+    //
+    // The flush is run on its own rather than through `runTimers`, which would
+    // also fire the stall watchdog armed alongside it and withdraw everything.
+    const runNewestFlush = (armed) => {
+        const scheduled = harness.timers.filter(Boolean).slice(armed);
+        expect(scheduled).toHaveLength(1);
+        harness.timers[harness.timers.indexOf(scheduled[0])] = null;
+        scheduled[0].callback();
+    };
+
+    it('carries each contract’s own last print beside its mark', () => {
+        harness.feed.track([
+            { symbol: 'BMTUSDT', quantity: '-446082' },
+            { symbol: 'BEATUSDT', quantity: '-1800' },
+        ]);
+        const armed = harness.timers.filter(Boolean).length;
+        harness.sockets[0].emit('message', markFrame('BMTUSDT', '0.03523'));
+        harness.sockets[0].emit('message', markFrame('BEATUSDT', '3.523'));
+        runNewestFlush(armed);
+
+        // A trade prints on one of them, with no new mark behind it. That alone
+        // is a new publication — the second the operator was reading blind.
+        harness.sockets[0].emit('message', tradeFrame('BMTUSDT', '0.03530', 1_700_000_000_400));
+        runNewestFlush(armed);
+
+        expect(harness.broadcasts).toHaveLength(2);
+        expect(harness.broadcasts[1].marks).toEqual({
+            BMTUSDT: {
+                markPrice: '0.03523',
+                updatedAt: 1_700_000_000_000,
+                lastPrice: '0.03530',
+                lastPriceAt: 1_700_000_000_400,
+            },
+            // The contract that did not trade says only what it is marked at.
+            BEATUSDT: { markPrice: '3.523', updatedAt: 1_700_000_000_000 },
+        });
+
+        // A print the exchange timed before one already taken cannot undo it,
+        // and schedules nothing.
+        harness.sockets[0].emit('message', tradeFrame('BMTUSDT', '0.03400', 1_700_000_000_300));
+        expect(harness.timers.filter(Boolean).slice(armed)).toHaveLength(0);
+        expect(harness.broadcasts).toHaveLength(2);
+    });
+
+    it('publishes no price at all for a contract it cannot mark', () => {
+        harness.feed.track([{ symbol: 'BMTUSDT', quantity: '-446082' }]);
+        const armed = harness.timers.filter(Boolean).length;
+        // A print arrives before the contract's first mark. It is held rather
+        // than published: a price with no mark beside it has no liveness behind
+        // it, and the reader drops it anyway.
+        harness.sockets[0].emit('message', tradeFrame('BMTUSDT', '0.03530', 1_700_000_000_400));
+        expect(harness.timers.filter(Boolean).slice(armed)).toHaveLength(0);
+        expect(harness.broadcasts).toHaveLength(0);
+
+        // The first mark brings the print it was already holding, rather than
+        // waiting for the next trade — which on a quiet contract is seconds
+        // away. DOGEUSDT went 6.6s between prints in the 2026-08-26 session.
+        harness.sockets[0].emit('message', markFrame('BMTUSDT', '0.03523'));
+        runNewestFlush(armed);
+        expect(harness.broadcasts[0].marks.BMTUSDT).toEqual({
+            markPrice: '0.03523',
+            updatedAt: 1_700_000_000_000,
+            lastPrice: '0.03530',
+            lastPriceAt: 1_700_000_000_400,
+        });
+    });
+
+    // The watchdog measures the one-per-second contract. A busy contract's
+    // trades must not vouch for a mark lane that has stopped delivering —
+    // that failure is the whole reason the watchdog is there.
+    it('does not let a print answer the stall watchdog', () => {
+        harness.feed.track([{ symbol: 'BMTUSDT', quantity: '-446082' }]);
+        harness.sockets[0].emit('open');
+        harness.sockets[0].emit('message', markFrame('BMTUSDT', '0.03523'));
+        harness.runTimers();
+        expect(harness.broadcasts.at(-1).marks.BMTUSDT).toBeDefined();
+
+        // Trades keep arriving; the mark lane says nothing.
+        harness.sockets[0].emit('message', tradeFrame('BMTUSDT', '0.03530', 1_700_000_000_400));
+        harness.runTimers();
+        harness.runTimers();
+
+        expect(harness.logger.warn).toHaveBeenCalledWith(
+            expect.stringContaining('delivered nothing'),
+        );
+        // And the price goes with the mark, rather than the last print being
+        // left standing as if it were current.
+        expect(harness.broadcasts.at(-1).marks).toEqual({});
     });
 
     it('exposes only the marks the existing feed still considers live', () => {

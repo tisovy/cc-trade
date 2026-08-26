@@ -804,12 +804,14 @@
   color: #93a6b7;
 }
 
-/* The chart-priced what-if. Drawn quieter than the figure above it in every
-   way that carries weight — smaller, unemphasised and in the neutral colour
-   rather than the position's own green or red — because the number that
-   settles is the one above, and two figures of equal weight would leave the
-   operator deciding which of them the account agrees with. */
-.futures-production-position-tape {
+/* What the exchange's own mark makes the position worth. Drawn quieter than
+   the figure above it in every way that carries weight — smaller, unemphasised
+   and in the neutral colour rather than the position's own green or red —
+   because the figure above is the one being traded against, and two of equal
+   weight would leave the operator deciding which to read. Quiet is not hidden:
+   this is the number the account agrees with and the one that liquidates, and
+   it is on the card whenever the two differ. */
+.futures-production-position-mark {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
@@ -822,7 +824,7 @@
   font-variant-numeric: tabular-nums;
 }
 
-.futures-production-position-tape em {
+.futures-production-position-mark em {
   font-style: normal;
   letter-spacing: 0.02em;
   opacity: 0.85;

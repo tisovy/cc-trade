@@ -361,22 +361,24 @@ export const describeFuturesPosition = (position) => {
     && margin !== null
     ? (unrealizedPnl / margin) * 100
     : null
-  const confirmedPnl = toFiniteNumber(position?.markUnrealizedPnl) ?? unrealizedPnl
-  // The tape's own reckoning, computed here rather than carried: the merge
-  // states the price, and the same arithmetic every other figure on this row
-  // uses turns it into money.
-  const tapeScenario = position?.tapeScenario
-  const tapePrice = toFiniteNumber(tapeScenario?.price ?? position?.tapePrice)
-  const carriedTapePnl = toFiniteNumber(tapeScenario?.unrealizedPnl)
-  const tapeUnrealizedPnl = carriedTapePnl ?? (tapePrice !== null
-    && tapePrice > 0
-    && signedQuantity !== null
-    && toFiniteNumber(position?.entryPrice) !== null
-    ? (tapePrice - toFiniteNumber(position.entryPrice)) * signedQuantity
-    : null)
-  const carriedTapeDisagreement = carriedTapePnl !== null
-    && typeof tapeScenario?.disagreesWithMark === 'boolean'
-    ? tapeScenario.disagreesWithMark
+  // The mark's own reckoning: carried when the valuation computed it, and
+  // otherwise recomputed here from the same arithmetic every other figure on
+  // this row uses, so a raw account position still gets one.
+  const markScenario = position?.markScenario
+  const markPnlPrice = toFiniteNumber(markScenario?.price) ?? markPrice
+  const carriedMarkPnl = toFiniteNumber(markScenario?.unrealizedPnl)
+  const markUnrealizedPnl = carriedMarkPnl
+    ?? toFiniteNumber(position?.markUnrealizedPnl)
+    ?? (markPnlPrice !== null
+      && markPnlPrice > 0
+      && signedQuantity !== null
+      && toFiniteNumber(position?.entryPrice) !== null
+      ? (markPnlPrice - toFiniteNumber(position.entryPrice)) * signedQuantity
+      : null)
+  const confirmedPnl = markUnrealizedPnl ?? unrealizedPnl
+  const carriedMarkDisagreement = carriedMarkPnl !== null
+    && typeof markScenario?.disagreesWithReading === 'boolean'
+    ? markScenario.disagreesWithReading
     : null
   return Object.freeze({
     positionSide,
@@ -390,54 +392,56 @@ export const describeFuturesPosition = (position) => {
     pnlTone: unrealizedPnl === null || unrealizedPnl === 0
       ? 'flat'
       : unrealizedPnl > 0 ? 'positive' : 'negative',
-    // The PnL beside it was computed on the last traded price rather than on a
-    // confirmed mark. True only between two marks, and never true of the
-    // liquidation price, which is the mark's by definition.
-    pnlEstimated: position?.valuationEstimated === true,
+    // Which of the contract's two prices the figure above was computed at:
+    // `last-price` for what it printed at, `mark` for the index the exchange
+    // settles it on. Null on a row that never went through a live valuation.
+    pnlBasis: typeof position?.valuationBasis === 'string'
+      ? position.valuationBasis
+      : null,
     // The exchange's own arithmetic on its own mark, kept beside the reading so
-    // a surface showing an estimate can always state what it is an estimate of.
-    confirmedUnrealizedPnl: toFiniteNumber(position?.markUnrealizedPnl) ?? unrealizedPnl,
-    // What the same position would be worth on the price the contract last
-    // printed at — the price the chart is drawn from, and the one the operator
-    // reads their own ENTRY line against.
-    tapePrice,
-    tapeUnrealizedPnl,
-    // The tape and the mark are on opposite sides of the entry: the chart shows
-    // the price past the entry line while the row states a loss, or the reverse.
-    // Both are right — the mark is an index average and the tape is what
-    // printed, and on a fast move they part company — but a row that says the
-    // opposite of the chart without saying why reads as broken arithmetic. This
-    // is what lets the surface say why.
-    tapeDisagreesWithMark: carriedTapeDisagreement ?? (tapeUnrealizedPnl !== null
-      && confirmedPnl !== null
-      && tapeUnrealizedPnl !== 0
-      && confirmedPnl !== 0
-      && (tapeUnrealizedPnl > 0) !== (confirmedPnl > 0)),
+    // a surface reading a position at what it is trading at can always state
+    // what the account is holding it at.
+    confirmedUnrealizedPnl: confirmedPnl,
+    markPnlPrice,
+    markUnrealizedPnl,
+    // The reading and the mark are on opposite sides of the entry: the chart
+    // shows price past the entry line while the account still records a loss,
+    // or the reverse. Both are right — one is an index average, the other is
+    // what printed, and on a fast move they part company — but a row that
+    // contradicts the account without saying why reads as broken arithmetic.
+    // This is what lets the surface say why.
+    markDisagreesWithReading: carriedMarkDisagreement ?? (markUnrealizedPnl !== null
+      && unrealizedPnl !== null
+      && markUnrealizedPnl !== 0
+      && unrealizedPnl !== 0
+      && (markUnrealizedPnl > 0) !== (unrealizedPnl > 0)),
   })
 }
 
 // One sentence, written once, for every surface that states a position's PnL.
 //
-// The chart is drawn from the tape and the row is valued on the mark, and on a
-// fast move the two sit on opposite sides of the entry: the operator sees price
-// past their own ENTRY line while the row states a loss. Both figures are
-// right, and without this the only available conclusion is that the desk cannot
-// do arithmetic. So the row says which price it used, what the other one says,
-// and which of the two the exchange will actually settle on.
+// The row is read at the price the contract is printing at, because that is
+// what the operator is watching and what an exit fills near. The exchange
+// settles, charges funding and liquidates on its mark, which it publishes once
+// a second, and on a fast move the two are not the same number — occasionally
+// not even the same sign. Both figures are right, and without this the only
+// available conclusion is that the desk cannot do arithmetic. So the row says
+// which price it used and what the exchange's own says.
 //
 // `formatPrice` is the caller's — the dock and the ticket both round a price to
 // its contract's tick, and a note quoting an unrounded price beside a rounded
 // column would read as a third number.
 export const futuresPnlReadingNote = (presentation, formatPrice = String) => {
   if (presentation === null || typeof presentation !== 'object') return ''
-  const estimate = presentation.pnlEstimated === true
-    ? ` · carried forward from the last print; on the exchange’s mark ${
-      formatSignedUsdt(presentation.confirmedUnrealizedPnl)} USDT`
+  const onTheMark = presentation.pnlBasis === 'last-price'
+    && presentation.markUnrealizedPnl !== null
+    && presentation.markUnrealizedPnl !== undefined
+    ? ` · read at the price the contract last printed; on the exchange’s mark ${
+      formatPrice(presentation.markPnlPrice)} it is ${
+      formatSignedUsdt(presentation.markUnrealizedPnl)} USDT`
     : ''
-  if (presentation.tapeDisagreesWithMark !== true) return estimate
-  return `${estimate} · the contract last traded at ${
-    formatPrice(presentation.tapePrice)}, the other side of your entry — ${
-    formatSignedUsdt(presentation.tapeUnrealizedPnl)} USDT there — but the exchange’s mark has not crossed it, and the mark is what settles`
+  if (presentation.markDisagreesWithReading !== true) return onTheMark
+  return `${onTheMark} · the two are on opposite sides of your entry — the mark is an index of several venues and has not crossed it yet, and the mark is what settles and liquidates`
 }
 
 // Where moving margin would put the liquidation price. Margin does not change

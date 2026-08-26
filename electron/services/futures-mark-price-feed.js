@@ -8,18 +8,21 @@
 
 export const FUTURES_MARK_PRICE_TYPE = 'futures_position_marks';
 export const FUTURES_MARK_PRICE_VERSION = 1;
-// Coalesce marks that arrive together for several open contracts. The source
-// itself is one frame per second; aggregate trades no longer publish position
-// valuations.
+// Coalesce prices that arrive together for several open contracts.
 //
 // Measured rather than estimated, 2026-08-26, four contracts on one combined
 // stream through the operator's proxy: across 88 seconds in which all four
-// were delivered, the spread between the first and last arrival was 2ms at the
-// median, 3ms at the 95th percentile and 6ms at its worst. The 200ms this was
-// is four times what folding them together ever needed, and every millisecond
-// of it is added to the age of the number a position is valued at — a value
-// the exchange already publishes only once a second and which reaches the desk
-// a further 220ms later (p95 232ms). Four times the worst measured spread.
+// were delivered, the spread between the first and last mark arrival was 2ms at
+// the median, 3ms at the 95th percentile and 6ms at its worst. The 200ms this
+// was is four times what folding them together ever needed, and every
+// millisecond of it is added to the age of the number a position is valued at.
+// Four times the worst measured spread.
+//
+// It now also bounds how often prints can republish. The same session measured
+// 50.5 frames a second across BTC, ETH, SOL and DOGE together — BTC alone
+// prints 25.5 times a second — so this is what keeps a burst of prints from
+// costing one publication each while staying far under the eye: at its very
+// busiest it is 40 publications a second, and the operator's screen redraws 60.
 export const FUTURES_MARK_PRICE_BATCH_MS = 25;
 export const FUTURES_MARK_PRICE_RECONNECT_MS = 5000;
 // One mark per symbol per second is the contract, so silence this long is not a
@@ -57,12 +60,28 @@ export const readFuturesPositionSymbols = (positions) => {
 // snapshot gave it while the chart moves on.
 export const FUTURES_MARK_PRICE_ROUTED_PREFIX = '/market/stream?streams=';
 
-// One stream per symbol: the same mark the exchange uses for unrealized PnL and
-// liquidation. The chart already owns trade/tape data; subscribing to aggTrade a
-// second time here spent socket and CPU work to manufacture a non-exchange PnL.
+// Two streams per symbol: the mark the exchange settles and liquidates on, and
+// the trades the contract actually prints.
+//
+// The tape was removed from here on 2026-08-24 because it was being added to
+// the last mark to manufacture a price the exchange had never quoted. It comes
+// back on 2026-08-26 as the exchange's own printed price rather than an
+// extrapolation of one, because the mark arrives once a second and nothing else
+// can move a position row in between — and a second is a long time to a
+// scalper.
+//
+// The subscription follows the position set, not the contract on screen. That
+// is the point: a position in a contract the operator is not looking at was the
+// one valued at a price up to a second and a half old. The workstation's own
+// chart stream overlaps this for the one contract being watched; that duplicate
+// is a public frame on an already-open socket and costs no request weight, and
+// one source for every position is worth more than saving it.
 export const futuresMarkPriceStreamUrl = (streamOrigin, symbols) => {
     const streams = symbols
-        .map(symbol => `${symbol.toLowerCase()}@markPrice@1s`)
+        .flatMap(symbol => [
+            `${symbol.toLowerCase()}@markPrice@1s`,
+            `${symbol.toLowerCase()}@aggTrade`,
+        ])
         .join('/');
     return `${streamOrigin}${FUTURES_MARK_PRICE_ROUTED_PREFIX}${streams}`;
 };
@@ -146,6 +165,16 @@ export const createFuturesMarkPriceFeed = ({
         ? feedEpoch
         : nextFuturesMarkPriceFeedEpoch();
     const marks = new Map();
+    // The last price each tracked contract printed at, kept in its own map
+    // rather than merged into the mark reading.
+    //
+    // A print is published only alongside a live mark, and the split is what
+    // enforces it: `publish` walks the marks, so a contract whose mark has been
+    // withdrawn carries no price at all rather than a printed one standing on
+    // its own. That matters because the mark is the reading that has liveness —
+    // one frame per second, watched for stalls — while a quiet contract can go
+    // seconds between prints without anything being wrong.
+    const tapes = new Map();
     // Exchange event time is the proof that one contract, rather than merely
     // the combined socket, is still moving forward. Keep it across reconnects:
     // marks are withdrawn there because their prices stop being live, but a
@@ -204,14 +233,31 @@ export const createFuturesMarkPriceFeed = ({
         }
     };
 
+    // A contract's whole reading: the mark it is settled on and, when the
+    // contract has printed since this feed started watching it, the price it
+    // printed at. Walking `marks` is what keeps a print from ever standing
+    // without one.
+    const readingOf = (symbol, mark) => {
+        const tape = tapes.get(symbol);
+        if (tape === undefined) return { markPrice: mark.markPrice, updatedAt: mark.updatedAt };
+        return {
+            markPrice: mark.markPrice,
+            updatedAt: mark.updatedAt,
+            lastPrice: tape.lastPrice,
+            lastPriceAt: tape.lastPriceAt,
+        };
+    };
+
     const publish = () => {
         publicationRevision += 1;
+        const readings = {};
+        for (const [symbol, mark] of marks) readings[symbol] = readingOf(symbol, mark);
         broadcast({
             type: FUTURES_MARK_PRICE_TYPE,
             version: FUTURES_MARK_PRICE_VERSION,
             feedEpoch: publicationEpoch,
             revision: publicationRevision,
-            marks: Object.fromEntries(marks),
+            marks: readings,
         });
         published = marks.size > 0;
     };
@@ -223,6 +269,11 @@ export const createFuturesMarkPriceFeed = ({
         }
         const hadMarks = marks.size > 0 || published;
         marks.clear();
+        // A print outlives nothing its mark does not. Withdrawing marks because
+        // the feed can no longer vouch for them and keeping the prints beside
+        // them would let the next mark arrive carrying a price from before the
+        // gap, which is the one thing the withdrawal exists to prevent.
+        tapes.clear();
         if (hadMarks) publish();
     };
 
@@ -242,12 +293,42 @@ export const createFuturesMarkPriceFeed = ({
             marks.delete(symbol);
             dropped = true;
         }
+        for (const symbol of [...tapes.keys()]) {
+            if (!kept.includes(symbol)) tapes.delete(symbol);
+        }
         if (!dropped) return;
         if (flushTimer !== null) {
             clock.clearTimeout(flushTimer);
             flushTimer = null;
         }
         publish();
+    };
+
+    // What the contract last printed at.
+    //
+    // Deliberately not counted as mark progress: the stall watchdog measures the
+    // one-frame-per-second contract, and a quiet contract can go seconds between
+    // trades — DOGEUSDT went 6.6s at its worst in the 2026-08-26 session —
+    // without anything being wrong with the feed. Letting prints answer the
+    // watchdog would let a busy contract's tape vouch for a mark lane that had
+    // stopped, which is precisely the failure that watchdog exists for.
+    const notePrint = (print) => {
+        if (print === null || !symbols.includes(print.symbol)) return;
+        const held = tapes.get(print.symbol);
+        // Frames arrive in order on one socket and both maps are cleared
+        // whenever a socket is replaced, so the only thing left to refuse is a
+        // trade the exchange itself timed before one already taken.
+        if (held !== undefined
+            && Number.isSafeInteger(held.lastPriceAt)
+            && (!Number.isSafeInteger(print.tradedAt)
+                || print.tradedAt < held.lastPriceAt)) return;
+        if (held?.lastPrice === print.lastPrice && held?.lastPriceAt === print.tradedAt) return;
+        tapes.set(print.symbol, { lastPrice: print.lastPrice, lastPriceAt: print.tradedAt });
+        // Held for a contract not yet marked so that its first mark carries the
+        // current price rather than waiting for the next trade — which on a
+        // quiet contract is seconds away. Publishing now would say nothing:
+        // `publish` walks the marks.
+        if (marks.has(print.symbol)) scheduleFlush();
     };
 
     const scheduleFlush = () => {
@@ -349,7 +430,11 @@ export const createFuturesMarkPriceFeed = ({
             if (socket !== opened) return;
             const frame = parseFrame(raw);
             const mark = readFuturesMarkPriceEvent(frame);
-            if (mark === null || !symbols.includes(mark.symbol)) return;
+            if (mark === null) {
+                notePrint(readFuturesLastTradeEvent(frame));
+                return;
+            }
+            if (!symbols.includes(mark.symbol)) return;
             const held = marks.get(mark.symbol);
             const acceptedAt = markEventTimes.get(mark.symbol);
             const timed = Number.isSafeInteger(mark.updatedAt);

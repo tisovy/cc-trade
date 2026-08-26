@@ -2,16 +2,15 @@ import { act, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { readFuturesSymbolHistory } from '../../../utils/futuresSymbolHistory.js'
 import { FUTURES_COMMAND_OUTCOME } from '../../../utils/futuresCommandOutcome.js'
-import { createFuturesPositionMarkStore } from '../../../utils/futuresPositionMarks.js'
+import {
+  FUTURES_LAST_PRICE_GRACE_MS,
+  createFuturesPositionMarkStore,
+} from '../../../utils/futuresPositionMarks.js'
 import FuturesProductionWorkstation from './FuturesProductionWorkstation.jsx'
 
 const productionWorkstationMocks = vi.hoisted(() => ({
   viewRender: vi.fn(),
   orderEditorRender: vi.fn(),
-  // What the workstation says it is carrying. Left null by every test that does
-  // not care, so the default below stays the one shape they were written
-  // against.
-  carrying: null,
 }))
 
 // The container is the only surface that knows which contract is on screen.
@@ -26,7 +25,6 @@ vi.mock('../../../hooks/useFuturesProductionWorkstation.js', () => ({
     loadCandleHistory: vi.fn(),
     retry: vi.fn(),
     configureTape: vi.fn(),
-    ...(productionWorkstationMocks.carrying ?? {}),
   }),
 }))
 vi.mock('./FuturesWorkstationView.jsx', () => ({
@@ -58,7 +56,6 @@ const executionState = (overrides = {}) => ({
 
 afterEach(() => {
   vi.clearAllMocks()
-  productionWorkstationMocks.carrying = null
   localStorage.clear()
 })
 
@@ -409,7 +406,10 @@ describe('FuturesProductionWorkstation account review', () => {
     unmount()
   })
 
-  it('updates the live close preview only when the mark value changes', () => {
+  // A market exit fills near what the contract is printing, not near the index
+  // the exchange settles it on, so the preview follows the print — and does not
+  // rerun for a mark moving underneath a contract that is still trading.
+  it('updates the live close preview only when the price it would exit at changes', () => {
     const entryPriceRead = vi.fn(() => '100')
     const position = {
       symbol: 'BTCUSDT', positionSide: 'BOTH', quantity: '1',
@@ -433,8 +433,10 @@ describe('FuturesProductionWorkstation account review', () => {
         .onPositionClose(position, { x: 200, y: 150 })
     })
     const panel = screen.getByLabelText('Close BTCUSDT LONG position')
-    expect(panel).toHaveTextContent('+10.00')
+    // Entered at 100, the contract is printing at 90.
+    expect(panel).toHaveTextContent('−10.00')
 
+    // The same two prices written differently, with new clocks on them.
     entryPriceRead.mockClear()
     act(() => positionMarkStore.replace({
       BTCUSDT: {
@@ -442,18 +444,36 @@ describe('FuturesProductionWorkstation account review', () => {
       },
     }))
     expect(entryPriceRead).not.toHaveBeenCalled()
-    expect(panel).toHaveTextContent('+10.00')
+    expect(panel).toHaveTextContent('−10.00')
 
+    // The contract prints higher: the exit is worth more, so the preview moves.
     act(() => positionMarkStore.replace({
       BTCUSDT: {
         markPrice: '110', updatedAt: 300, lastPrice: '95', lastPriceAt: 300,
       },
     }))
-    expect(entryPriceRead).not.toHaveBeenCalled()
+    expect(entryPriceRead).toHaveBeenCalled()
+    expect(panel).toHaveTextContent('−5.00')
 
+    // The mark moves while the contract is still printing. Nothing about the
+    // exit changed, so nothing is recomputed.
+    entryPriceRead.mockClear()
     act(() => positionMarkStore.replace({
       BTCUSDT: {
-        markPrice: '120', updatedAt: 400, lastPrice: '95', lastPriceAt: 400,
+        markPrice: '120', updatedAt: 400, lastPrice: '95', lastPriceAt: 300,
+      },
+    }))
+    expect(entryPriceRead).not.toHaveBeenCalled()
+    expect(panel).toHaveTextContent('−5.00')
+
+    // The contract stops printing for longer than the window. The mark is the
+    // newer statement about its price, and the preview says so.
+    act(() => positionMarkStore.replace({
+      BTCUSDT: {
+        markPrice: '120',
+        updatedAt: 300 + FUTURES_LAST_PRICE_GRACE_MS + 1,
+        lastPrice: '95',
+        lastPriceAt: 300,
       },
     }))
     expect(entryPriceRead).toHaveBeenCalled()
@@ -731,63 +751,5 @@ describe('FuturesProductionWorkstation contract configuration', () => {
     const { props } = productionWorkstationMocks.viewRender.mock.lastCall[0].tradingRail
     expect(props.marginMode).toBeNull()
     expect(props.leverage).toBeNull()
-  })
-})
-
-// The container is where the chart's tape and the account's marks are both in
-// scope, and it is the only place on the desk where that is true.
-describe('the tape behind the position on screen', () => {
-  const carrying = (symbol, header) => {
-    productionWorkstationMocks.carrying = {
-      symbol,
-      resources: { catalog: { contracts: [], state: 'live' }, header },
-    }
-  }
-
-  it('feeds the chart\'s own last price to the position mark store', () => {
-    const store = createFuturesPositionMarkStore()
-    store.replace({ BTCUSDT: { markPrice: '60000', updatedAt: 1000 } })
-    carrying('BTCUSDT', { lastPrice: '60250', eventTime: 1400 })
-
-    render(
-      <FuturesProductionWorkstation
-        enabled
-        executionState={executionState({ positionMarkStore: store })}
-      />,
-    )
-
-    expect(store.get('BTCUSDT')).toEqual({
-      markPrice: '60000',
-      updatedAt: 1000,
-      lastPrice: '60250',
-      lastPriceAt: 1400,
-    })
-  })
-
-  it('reads no tape for a contract the workstation is not carrying yet', () => {
-    const store = createFuturesPositionMarkStore()
-    store.replace({
-      BTCUSDT: { markPrice: '60000', updatedAt: 1000 },
-      ETHUSDT: { markPrice: '2500', updatedAt: 1000 },
-    })
-    carrying('BTCUSDT', { lastPrice: '60250', eventTime: 1400 })
-    render(
-      <FuturesProductionWorkstation
-        enabled
-        executionState={executionState({ positionMarkStore: store })}
-      />,
-    )
-    expect(store.get('BTCUSDT').lastPrice).toBe('60250')
-
-    // The selection moves first and the stream follows: for a moment the header
-    // still belongs to the contract just left. A print read as the new
-    // contract's would be a price from another market sitting beside its mark,
-    // and nothing on the row would say so.
-    act(() => productionWorkstationMocks.viewRender.mock.lastCall[0]
-      .onSymbolChange('ETHUSDT'))
-
-    expect(store.get('BTCUSDT').lastPrice).toBeNull()
-    expect(store.get('ETHUSDT').lastPrice).toBeNull()
-    expect(store.get('BTCUSDT').markPrice).toBe('60000')
   })
 })
