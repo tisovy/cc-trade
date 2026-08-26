@@ -812,3 +812,27 @@ default screen must use the mark line, not the headline.
 frame instrument cannot stamp, for the `marks` key collision recorded above.
 Second change running whose numbers come from a probe rather than from the
 operator's journal.
+
+### The operator owns the reprice rate — 2026-08-26
+
+*"отлично, теперь обновление было вообще REALTIME — СУПЕР! Но я бы предложил
+ограничить его значением таймаута которое выставлено в меню Aggregate Trades."*
+
+The behaviour was right; the rate is theirs. The desk already had the dial —
+**Aggregate trades → Throttle / Timeout (ms)**, 16–5000 ms, default 250 — and a
+second control for the same question would have been two numbers to keep in
+step. What it bounds, measured: BTCUSDT prints 25.5 times a second, which the
+coalescing window turned into up to 40 publications a second, each a full frame
+across IPC and a re-render of every position row and the dock total. At the
+menu's default that is four a second.
+
+| Change | Task | Status | Evidence |
+|---|---:|---|---|
+| `let-the-operator-bound-how-often-a-position-is-repriced` | 1.1–3.4 | `IMPLEMENTED` | `a9079db`. The feed gates print publications on the operator's tape timeout, floored at its own coalescing window (25 ms), with `throttleEnabled: false` meaning that floor. The first print of a move publishes on the window so the start of a move is seen at once; prints inside a shut gate supersede one another and the newest goes out when it opens; shortening the bound releases a price already waiting. Marks are never bounded by it — one a second is already slower than anything that menu accepts, and it is what funding, margin and liquidation are decided on — so a mark publishes on the coalescing window and carries whatever has printed since. The minimum trade size does not reach the positions: a small print is as real a price as a large one. The connection reads the workstation service's applied settings after each workstation request, so one place decides the number and both followers read it. Four biting feed tests, one biting connection test on the seam itself (verified failing with the wiring line removed), one view test on the panel's own statement. Full suite 2939/2939, lint clean, four guards pass. |
+| `let-the-operator-bound-how-often-a-position-is-repriced` | 4.1 | `OUTSTANDING` | Same sitting as the gate above. With the timeout at its default the rows move about four times a second rather than continuously; lowering it toward 16 ms restores the realtime feel; raising it slows the rows and not the mark. |
+
+**Watched for:** a dial that reaches past its own panel is a trap for whoever
+moves it next — including the operator months from now, turning the tape down to
+read the trade list and quietly slowing their position rows with it. The panel
+states both effects, and the floor means the setting can never make a position
+slower than the mark it would otherwise sit on.
