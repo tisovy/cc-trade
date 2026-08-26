@@ -958,9 +958,13 @@ export const FuturesPortfolioDock = ({
               {/* The rule, stated once where the number it governs is read. */}
               <span
                 role="columnheader"
-                title={'uPnL, ROE and size use the exchange mark. A qualified account '
-                  + 'snapshot is shown only while a live mark is unavailable; trades '
-                  + 'between marks do not alter these readings.'}
+                title={'uPnL and ROE use whichever of the contract’s two prices the '
+                  + 'exchange stated more recently — its last print while it is '
+                  + 'trading, its mark otherwise. Size, margin and the liquidation '
+                  + 'distance always use the mark, which is what the exchange settles '
+                  + 'and liquidates on; each row states the mark’s own figure. A '
+                  + 'qualified account snapshot is shown only while no live price is '
+                  + 'available.'}
               >
                 uPnL (ROE)
               </span>

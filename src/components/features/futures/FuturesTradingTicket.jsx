@@ -231,8 +231,22 @@ const FuturesTradingPositionCard = memo(({
       <dl>
         <div><dt>Qty</dt><dd>{exactText(position.quantity)}</dd></div>
         <div><dt>Entry</dt><dd>{priceOf(position.entryPrice)}</dd></div>
+        {/* The market header carries a `Last` of its own, restated on every
+            repaint. This one is the print the figures above were computed at,
+            restated no more often than the Aggregate trades timeout allows, so
+            during a fast move the two can stand a fraction of a second apart.
+            Same quantity, two cadences — said here so it does not read as two
+            different prices. */}
         {valuation.basis === 'last-price' ? (
-          <div><dt>Last</dt><dd>{priceOf(valuation.basisPrice)}</dd></div>
+          <div
+            title={'The price this position was valued at — the contract’s last print, '
+              + 'restated at the rate the Aggregate trades timeout allows. The market '
+              + 'header restates its own on every repaint, so the two can differ by '
+              + 'that much during a fast move.'}
+          >
+            <dt>Last</dt>
+            <dd>{priceOf(valuation.basisPrice)}</dd>
+          </div>
         ) : null}
         <div><dt>Mark</dt><dd>{priceOf(valuation.markPrice)}</dd></div>
         <div><dt>Liq.</dt><dd>{priceOf(position.liquidationPrice)}</dd></div>

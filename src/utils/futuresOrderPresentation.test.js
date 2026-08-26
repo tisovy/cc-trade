@@ -8,6 +8,7 @@ import {
   formatSignedPercent,
   formatSignedUsdt,
   formatUsdt,
+  futuresPnlReadingNote,
   orderFilledNotionalUsdt,
   orderNotionalUsdt,
   orderPresentationPrice,
@@ -329,6 +330,37 @@ describe('describeFuturesPosition', () => {
       markUnrealizedPnl: -43.095,
       markDisagreesWithReading: true,
     })
+  })
+
+  // "The two are on opposite sides of your entry" only means something once
+  // both have been named. A raw account position states no basis, so the note
+  // has named nothing — and opened on a pronoun with no referent.
+  it('says nothing about two prices it has not named', () => {
+    const raw = describeFuturesPosition({
+      symbol: 'BTCUSDT',
+      quantity: '-0.5',
+      entryPrice: '61000',
+      markPrice: '61200',
+      unrealizedPnl: '100',
+    })
+
+    expect(raw.pnlBasis).toBeNull()
+    expect(raw.markDisagreesWithReading).toBe(true)
+    expect(futuresPnlReadingNote(raw)).toBe('')
+
+    // Named, the same disagreement is worth a sentence.
+    const valued = describeFuturesPosition({
+      symbol: 'BTCUSDT',
+      quantity: '-0.5',
+      entryPrice: '61000',
+      markPrice: '61200',
+      unrealizedPnl: '100',
+      markUnrealizedPnl: '-100',
+      valuationBasis: 'last-price',
+    })
+    const note = futuresPnlReadingNote(valued)
+    expect(note).toContain('on the exchange’s mark 61200 it is −100.00 USDT')
+    expect(note).toContain('opposite sides of your entry')
   })
 
   it('derives the leg from the signed quantity and reports ROE against margin', () => {

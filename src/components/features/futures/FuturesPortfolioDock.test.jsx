@@ -212,6 +212,42 @@ describe('FuturesPortfolioDock', () => {
       .getAttribute('title')).not.toContain('the other side of your entry')
   })
 
+  // A column heading weighs as arithmetic (operator ruling, 2026-08-20), and
+  // this one states the rule its rows follow — which made it the first thing to
+  // go stale when the rule changed on 2026-08-26. It did, and no test caught it.
+  // Asserted against what the cells beside it actually do, not against its
+  // wording, so the two cannot drift apart again.
+  it('states in its uPnL heading the rule the cells under it follow', () => {
+    const positionMarkStore = createFuturesPositionMarkStore()
+    positionMarkStore.replace({
+      BTCUSDT: {
+        markPrice: '60600',
+        updatedAt: 1_784_000_000_000,
+        lastPrice: '60900',
+        lastPriceAt: 1_784_000_000_100,
+      },
+    })
+    render(
+      <FuturesPortfolioDock
+        selectedSymbol="ETHUSDT"
+        positions={[position]}
+        positionMarkStore={positionMarkStore}
+      />,
+    )
+    const table = screen.getByRole('table', { name: 'Open positions' })
+    // The reading is on the print...
+    expect(table.querySelector('.futures-workstation-dock-pnl'))
+      .toHaveTextContent('−450.00')
+    // ...and the size beside it is still on the mark: 0.5 × 60600.
+    expect(screen.getByTitle('-0.5 contracts')).toHaveTextContent('30300.00')
+
+    const heading = within(table).getByText('uPnL (ROE)').getAttribute('title')
+    expect(heading).toMatch(/last print/i)
+    expect(heading).toMatch(/[Ss]ize.*use the mark/)
+    // The claim it used to make, and no longer may.
+    expect(heading).not.toMatch(/uPnL, ROE and size use the exchange mark/)
+  })
+
   it('marks the aggregate incomplete instead of summing only rows it can value', () => {
     const positionMarkStore = createFuturesPositionMarkStore()
     positionMarkStore.replace({

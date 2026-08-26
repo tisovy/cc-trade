@@ -375,7 +375,6 @@ export const describeFuturesPosition = (position) => {
       && toFiniteNumber(position?.entryPrice) !== null
       ? (markPnlPrice - toFiniteNumber(position.entryPrice)) * signedQuantity
       : null)
-  const confirmedPnl = markUnrealizedPnl ?? unrealizedPnl
   const carriedMarkDisagreement = carriedMarkPnl !== null
     && typeof markScenario?.disagreesWithReading === 'boolean'
     ? markScenario.disagreesWithReading
@@ -400,8 +399,9 @@ export const describeFuturesPosition = (position) => {
       : null,
     // The exchange's own arithmetic on its own mark, kept beside the reading so
     // a surface reading a position at what it is trading at can always state
-    // what the account is holding it at.
-    confirmedUnrealizedPnl: confirmedPnl,
+    // what the account is holding it at. One name for it, not two: the older
+    // `confirmedUnrealizedPnl` said the same thing and was left with no reader
+    // when the note below stopped calling the reading an estimate.
     markPnlPrice,
     markUnrealizedPnl,
     // The reading and the mark are on opposite sides of the entry: the chart
@@ -440,7 +440,10 @@ export const futuresPnlReadingNote = (presentation, formatPrice = String) => {
       formatPrice(presentation.markPnlPrice)} it is ${
       formatSignedUsdt(presentation.markUnrealizedPnl)} USDT`
     : ''
-  if (presentation.markDisagreesWithReading !== true) return onTheMark
+  // "The two" only means something once both have been named. A row that never
+  // said which prices it was talking about would open with a pronoun and leave
+  // the reader to guess — which is the failure this note exists to prevent.
+  if (onTheMark === '' || presentation.markDisagreesWithReading !== true) return onTheMark
   return `${onTheMark} · the two are on opposite sides of your entry — the mark is an index of several venues and has not crossed it yet, and the mark is what settles and liquidates`
 }
 
