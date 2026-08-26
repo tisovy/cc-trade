@@ -722,4 +722,49 @@ at 699–828 — both ending exactly on the plot's right edge, gap 0. After
 | Change | Task | Status | Evidence |
 |---|---:|---|---|
 | `draw-the-price-plates-on-the-quiet-side` | 1.1–3.3 | `IMPLEMENTED` | `11d8384`. Mirrored rather than moved (coloured edge follows the plate, contents pack to the anchored edge), and the layer now stacks above the corner boxes it joined on the left so a draggable handle cannot vanish under ambient text. Biting test verified against `main`'s stylesheet; full suite 2923/2923, lint clean, four guards pass. |
-| `draw-the-price-plates-on-the-quiet-side` | 4.1 | `OUTSTANDING` | Operator looks at a contract carrying a position and a working order on `11d8384`: plates on the left, nothing over the newest candles, the handle still drags and cancels, and no plate hidden behind a corner notice (reading notice, older-candles line, order-sync line, gesture hint). |
+| `draw-the-price-plates-on-the-quiet-side` | 2.4, 3.4 | `IMPLEMENTED` | `f796857`. The operator looked the same day: "плашки слева - ок, но я бы сделал еще небольшой отступ именно у ордеров, чтобы они не висели прям у самой левой кромки". The handle is held off by the gutter the desk already writes its corner notices at, and shortened by the same amount so the inset cannot push its far end into the price scale; the annotations stay flush, being read rather than reached for. The test takes the gutter from the reading notice's own rule instead of restating it. Re-measured in Chromium: handle 8–137, annotation 0–80. |
+| `draw-the-price-plates-on-the-quiet-side` | 4.1 | `OUTSTANDING` | Operator looks at a contract carrying a position and a working order on `f796857`: plates on the left with the handle held off the edge, nothing over the newest candles, the handle still drags and cancels, and no plate hidden behind a corner notice (reading notice, older-candles line, order-sync line, gesture hint). The left half of this was already looked at and approved; what is open is the gutter and the rest of the checklist. |
+
+### The watched position gets a price that keeps up — 2026-08-26
+
+The operator, in the same message: *"надо чтобы наша UPNL цена чаще обновлялась
+в позициях на график которых я сейчас смотрю - а то бывают тормоза когда
+сильные движения и MARK PRICE сильно отстает от того что я вижу глазами на
+графике."*
+
+Measured on the live exchange through the operator's proxy before deciding
+anything, because two different things could have been true and only one of
+them was fixable by refreshing harder:
+
+- **The mark's cadence is the exchange's, and it is already at maximum.** 239
+  frames in 240 seconds on each of BTCUSDT, ETHUSDT and DOGEUSDT; gap p50
+  1000 ms, p95 1012 ms, worst 1141 ms. `@markPrice@1s` is the fastest mark
+  route Binance publishes, and the desk is already on it.
+- **The mark is a different quantity from the chart's price.** Against every
+  print in that window the held mark sat 0.5 bps away at the median (1.16 on
+  DOGEUSDT), 2.4–3.5 bps at the 95th percentile, and up to 5.8 bps in the
+  fastest 5% of seconds. No refresh rate closes that.
+- **The desk was adding age of its own.** Marks for four contracts land within
+  2 ms of each other (p95 3 ms, worst 6 ms), and the feed held every one of
+  them in a 200 ms coalescing window sized to fold exactly that together.
+  Transit is a further 220 ms (p95 232 ms).
+
+So the displayed value could be about **1.4 s old** — 1000 ms of the exchange's
+quantisation, 220 ms transit, 200 ms of the desk's own window — beside a chart
+redrawing on every print (ETHUSDT printed 8.3 times a second in that window,
+DOGEUSDT 1.4).
+
+| Change | Task | Status | Evidence |
+|---|---:|---|---|
+| `value-the-watched-position-at-the-price-on-the-chart` | 1.1–3.4 | `IMPLEMENTED` | `fbf954a`. The contract on screen has its own tape — the `@aggTrade` stream the chart is already drawn from — joined to the position mark store, coalesced to ten a second. The position states what it is worth at that price under its own name on its own line, 11px neutral grey under the 17px position-toned headline (measured in Chromium; jsdom lays nothing out). The mark stays the headline and the only input to ROE, margin, liquidation and the dock total, which is what the canonical requirement already fixes. The coalescing window is cut 200 ms → 25 ms, four times the worst measured spread. Five biting tests, each verified failing against the pre-change file it covers; full suite 2935/2935, lint clean, four guards pass. |
+| `value-the-watched-position-at-the-price-on-the-chart` | 4.1 | `OUTSTANDING` | Operator watches a contract carrying a position through a fast move on `fbf954a`: the "At last" line tracks what the chart shows, the uPnL above it stays the figure the Binance app agrees with, and switching contracts leaves no stale price behind. |
+
+**Not built, and deliberately:** the one lane carrying the price behind uPnL is
+the only lane the desk cannot time. `markAccountFrame` refuses to stamp a
+`futures_position_marks` frame because the payload's own price map is already
+called `marks` and the transport stamp would be the same key twice — so the
+frame instrument covers header, candles, depth, trades, account and orders, and
+not this one. That is why the numbers above come from a probe rather than from
+the operator's journal. Measuring it needs the key collision resolved and a
+commit boundary defined for a store that deliberately does not set React state;
+it is its own change.
