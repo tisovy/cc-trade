@@ -873,25 +873,36 @@
   min-height: 320px;
 }
 
+/* Above the boxes the desk writes in the chart's corners, not behind them.
+   These are the marks the operator physically reaches for — dragged, edited,
+   cancelled — and they now share the left side with the reading notice, the
+   older-candles line, the order-sync line and the gesture hint. A control that
+   disappears under a line of ambient text is a control that cannot be used;
+   text that a handle covers for a moment is still text. */
 .futures-workstation-owned-order-layer {
   position: absolute;
   inset: 0 72px 0 0;
-  z-index: 3;
+  z-index: 7;
   overflow: hidden;
   pointer-events: none;
 }
 
+/* Drawn against the oldest candles, mirrored. The right of the plot is where
+   the newest candles are and where the operator places and moves orders; a
+   plate sitting there covers the only part of the chart being acted on. The
+   coloured edge changes sides with the plate so it still faces the line it
+   names. */
 .futures-workstation-position-annotation {
   position: absolute;
-  right: 0;
+  left: 0;
   box-sizing: border-box;
   max-width: min(112px, 100%);
   height: 16px;
   padding: 0 5px;
   transform: translateY(-50%);
   overflow: hidden;
-  border-left: 2px solid currentcolor;
-  border-radius: 3px 0 0 3px;
+  border-right: 2px solid currentcolor;
+  border-radius: 0 3px 3px 0;
   background: rgba(5, 12, 19, 0.86);
   color: #9eb0c2;
   font-size: var(--futures-position-annotation-font-size);
@@ -952,11 +963,11 @@
 
 .futures-workstation-owned-order {
   position: absolute;
-  left: auto;
-  right: 0;
+  right: auto;
+  left: 0;
   display: flex;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: flex-start;
   gap: 8px;
   height: 16px;
   max-width: 100%;

@@ -204,6 +204,69 @@ describe('FuturesWorkstationChart viewport ownership', () => {
     expect(volumeOptions).toMatchObject({ lastValueVisible: false, priceLineVisible: false })
   })
 
+  // The operator's screenshot, 2026-08-26: the order handle and the ENTRY plate
+  // sat against the right edge of the plot, on the newest candles — the ones
+  // being read while an order is placed or dragged. Measured in Chromium
+  // against a fixture before the change, both boxes ended exactly on the plot's
+  // right edge (gap 0 of 828px); after it they end 699px and 748px short of it.
+  // jsdom lays nothing out, so what the suite can hold is the rule that
+  // produced those numbers.
+  it('draws its own plot labels against the oldest candles, above the desk\'s corner boxes', () => {
+    const stylesheet = readFileSync(
+      'src/components/features/futures/FuturesWorkstation.css',
+      'utf8',
+    )
+    const ruleOf = (selector) => {
+      const start = stylesheet.indexOf(`${selector} {`)
+      expect(start, `${selector} is missing`).toBeGreaterThan(-1)
+      return stylesheet.slice(start, stylesheet.indexOf('}', start))
+    }
+    const declaration = (rule, property) => {
+      const match = rule.match(new RegExp(`(?:^|;|\\{)\\s*${property}:\\s*([^;]+)`))
+      return match === null ? null : match[1].trim()
+    }
+
+    // Anchored to the plot's left edge, and released from its right one: an
+    // element left anchored to both would still stretch across the candles.
+    for (const selector of [
+      '.futures-workstation-position-annotation',
+      '.futures-workstation-owned-order',
+    ]) {
+      const rule = ruleOf(selector)
+      expect(declaration(rule, 'left'), selector).toBe('0')
+      expect(declaration(rule, 'right') ?? 'auto', selector).toBe('auto')
+    }
+
+    // The coloured edge faces the line the plate names, so a mirrored plate is
+    // still read as belonging to its price rather than as loose text.
+    const annotation = ruleOf('.futures-workstation-position-annotation')
+    expect(declaration(annotation, 'border-right')).toContain('currentcolor')
+    expect(declaration(annotation, 'border-left')).toBeNull()
+
+    // Contents pack towards the anchored edge; left-anchored and right-packed
+    // would leave the plate's text floating away from its own line.
+    expect(declaration(ruleOf('.futures-workstation-owned-order'), 'justify-content'))
+      .toBe('flex-start')
+
+    // A handle the operator drags and cancels is never hidden behind a box the
+    // desk writes in the same corner — and the left corners are where all of
+    // them live.
+    const layerDepth = Number(declaration(
+      ruleOf('.futures-workstation-owned-order-layer'),
+      'z-index',
+    ))
+    expect(Number.isFinite(layerDepth)).toBe(true)
+    for (const selector of [
+      '.futures-workstation-reading-notice',
+      '.futures-workstation-history-notice',
+      '.futures-workstation-order-sync',
+      '.futures-workstation-gesture-hint',
+    ]) {
+      expect(Number(declaration(ruleOf(selector), 'z-index')), selector)
+        .toBeLessThan(layerDepth)
+    }
+  })
+
   it('formats chart labels in host-local time without shifting shared series coordinates', () => {
     const NativeDate = globalThis.Date
     const openTime = NativeDate.parse('2026-08-18T15:22:41.000Z')
