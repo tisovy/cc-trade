@@ -1116,51 +1116,6 @@ because its row is the selected contract.
 - **WHEN** the row belongs to a contract that is not selected
 - **THEN** no size shortcut is offered and the cell reads identically to the selected row's cell
 
-### Requirement: Position rows are valued at the live mark price
-Between account snapshots, position rows SHALL be re-valued only from the live mark price feed: mark price, USDT size, unrealized PnL, and return on margin SHALL all follow the incoming mark, and the dock total SHALL be derived from the same re-valued rows. Unrealized PnL SHALL be derived as `(mark price − entry price) × signed quantity`. Aggregate trades SHALL NOT alter these readings.
-
-A position whose entry price, quantity, or live mark is unusable SHALL retain a confirmed account-snapshot unrealized PnL as a qualified fallback when one exists. It SHALL NOT be partially re-valued from a mixture of current and stale inputs. Where neither a complete live valuation nor a confirmed fallback exists, the row and dock aggregate SHALL state that they are incomplete rather than silently summing the known subset.
-
-The mark column SHALL state the same confirmed mark used by the row arithmetic. Source and freshness SHALL remain available so that a snapshot fallback cannot be mistaken for a live mark.
-
-Return on margin SHALL use a denominator coherent with the displayed valuation. When the same surface displays that denominator as position Margin, the amount SHALL be the one used by the adjacent ROE rather than an older snapshot amount. Position-only initial margin SHALL be preferred over an account figure that includes working-order reserve. A live CROSS reading SHALL be unknown unless its denominator can be derived for the current mark from a confirmed leverage; a stale snapshot margin SHALL NOT be presented as current live ROE.
-
-#### Scenario: The market moves with no account event
-- **WHEN** a mark of `0.03600` arrives for a `-446082` contract position entered at `0.03140`
-- **THEN** the row's mark, USDT size, unrealized PnL and return on margin all change from that mark, and the dock total changes with them
-
-#### Scenario: The mark feed is not connected
-- **WHEN** the feed reports no mark for a symbol and the account snapshot has a confirmed unrealized PnL
-- **THEN** the row and Ticket retain the snapshot reading with its source and age, and no aged mark is presented as live
-
-#### Scenario: A mark arrives for a symbol with no open position
-- **WHEN** a mark arrives for a symbol that is not in the position list
-- **THEN** no row is created or changed
-
-#### Scenario: The row is valued between two marks
-- **WHEN** aggregate trades move after the last confirmed mark
-- **THEN** the row's primary valuation and the dock total remain on that mark
-
-#### Scenario: One position cannot be valued
-- **WHEN** at least one open position has neither a complete live valuation nor a confirmed snapshot fallback
-- **THEN** the dock total is marked incomplete and states the missing-row count instead of presenting the sum of known rows as complete
-
-#### Scenario: The account is not yet known
-- **WHEN** the expanded positions resource has not produced its first confirmed reading
-- **THEN** the expanded and collapsed dock both show an unknown aggregate rather than `+0.00`
-
-#### Scenario: A live CROSS mark has no current denominator
-- **WHEN** the mark advances but the position has no confirmed leverage from which current position margin can be derived
-- **THEN** uPnL and notional remain complete while ROE is shown as unavailable rather than dividing by stale snapshot margin or working-order reserve
-
-#### Scenario: A live CROSS denominator moves with notional
-- **WHEN** a current mark changes the position margin derived from confirmed leverage
-- **THEN** the row's Margin amount and ROE use that same current denominator rather than showing a snapshot amount beside a percentage derived from another amount
-
-#### Scenario: An explicit short carries positive quantity
-- **WHEN** tape explanation is calculated for a SHORT leg whose internal quantity is positive
-- **THEN** its tape PnL keeps short direction and the presentation does not recompute it with an unsigned quantity
-
 ### Requirement: The chart opens on enough history to read the market
 Opening a contract or interval SHALL present substantially more than the live
 streaming window of candles. The workstation SHALL request candle history once
@@ -3171,3 +3126,155 @@ list, so the names could not reach the file at all.
 
 - **WHEN** a settled pass fails — a request refused, unanswered, or the walk's outcome is failed
 - **THEN** the failure is announced once in the popup channel with the kept confirmed reading's stamp, and ↻ retries it
+
+### Requirement: The chart's own labels keep off the edge prices are worked at
+
+Labels the chart draws on its plotting area — the order handles and what they
+are worth, and the open position's entry and liquidation annotations — SHALL be
+drawn against the edge holding the oldest candles, not against the edge holding
+the newest, because the newest candles are what the operator reads while
+placing and moving an order. Their coloured edge SHALL face the line they name,
+so a mirrored plate still reads as belonging to its price.
+
+A handle the operator can drag, edit or cancel SHALL NOT be hidden behind an
+ambient box the desk writes in the same corner. Where the two land on the same
+pixels, the handle SHALL be the one drawn on top.
+
+A label that is only read MAY sit flush against that edge. One the operator
+reaches for SHALL be held off it by the same gutter the desk writes its own
+corner notices at, and SHALL be shortened by that gutter so that insetting it
+cannot push its far end past the opposite edge of the plot.
+
+#### Scenario: The operator reaches for a handle at the plot's edge
+
+- **WHEN** an order handle and a position annotation are drawn against the oldest-candle edge
+- **THEN** the handle is inset by the desk's own corner gutter while the annotation stays flush, and the handle's width is reduced by that same gutter
+
+#### Scenario: A working order and an open position are on screen
+
+- **WHEN** the chart draws a working order's handle and the position's entry and liquidation annotations
+- **THEN** each is drawn against the plot's oldest-candle edge, leaving the newest candles and the price scale unobstructed
+
+#### Scenario: A handle lands on a corner the desk is writing in
+
+- **WHEN** an order's price places its handle over the reading notice, the older-candles line, the order-sync line or the gesture hint
+- **THEN** the handle is drawn over that box rather than behind it, and stays draggable and cancellable
+
+### Requirement: A position row states which price it is read at, and what the exchange holds it at
+
+Every surface that states an open position's unrealized PnL SHALL make both
+figures available on the element that carries the reading: the figure at the
+price the row is read at, and the exchange's own figure on its mark.
+
+The reading SHALL be the headline. The mark's figure SHALL be stated under a
+name of its own — never as a second unlabelled number, never merged into the
+headline, and never with the same visual weight. On a surface with room for a
+line of its own it SHALL be drawn quieter than the headline in size, emphasis
+and colour, and SHALL be omitted while the row is already read at the mark,
+because there is then nothing to state twice.
+
+Where a surface names a price, it SHALL name which price it is. A column or row
+labelled as the mark SHALL show the mark.
+
+A live close estimate SHALL be computed at the price the position is read at
+rather than at the mark: an exit fills near what the contract is printing.
+
+#### Scenario: The contract prints between two marks
+
+- **WHEN** an open position's contract trades after its latest mark
+- **THEN** the row's headline PnL, its return on margin and the dock total move to the printed price, and the mark's own figure remains stated beside them
+
+#### Scenario: A position is open on a contract that is not on screen
+
+- **WHEN** the operator is watching one contract while holding positions in others
+- **THEN** every open position is read on its own contract's prices, at the same freshness, whether or not it is the one being watched
+
+#### Scenario: The row is already read at the mark
+
+- **WHEN** a contract has not printed recently enough for its trade to be the newer price
+- **THEN** the row is read at the mark and states no separate mark figure beside it
+
+#### Scenario: The mark moves under a contract that is still trading
+
+- **WHEN** a new mark arrives while the row is read at a recent print
+- **THEN** the headline is unchanged, and the mark's stated figure, the position's notional and its margin are recomputed
+
+### Requirement: Position rows are valued at the live price, and say which one
+
+Between account snapshots, position rows SHALL be re-valued only from the live
+position price feed. Unrealized PnL and return on margin SHALL follow whichever
+of the contract's two prices the exchange stated more recently, as
+`futures-order-visibility` fixes; the mark price column and USDT size SHALL
+follow the mark. The dock total SHALL be derived from the same re-valued rows.
+Unrealized PnL SHALL be derived as `(reading price − entry price) × signed
+quantity`.
+
+A position whose entry price, quantity, or live price is unusable SHALL retain
+a confirmed account-snapshot unrealized PnL as a qualified fallback when one
+exists. It SHALL NOT be partially re-valued from a mixture of current and stale
+inputs. Where neither a complete live valuation nor a confirmed fallback exists,
+the row and dock aggregate SHALL state that they are incomplete rather than
+silently summing the known subset.
+
+The mark column SHALL state the same confirmed mark the row's mark-derived
+figures use. Source and freshness SHALL remain available so that a snapshot
+fallback cannot be mistaken for a live price, and so that a row states which of
+the two prices its own reading is on.
+
+Return on margin SHALL use a denominator coherent with the displayed valuation.
+When the same surface displays that denominator as position Margin, the amount
+SHALL be the one used by the adjacent ROE rather than an older snapshot amount.
+Position-only initial margin SHALL be preferred over an account figure that
+includes working-order reserve. A live CROSS reading SHALL be unknown unless its
+denominator can be derived for the current mark from a confirmed leverage; a
+stale snapshot margin SHALL NOT be presented as current live ROE.
+
+#### Scenario: The market moves with no account event
+
+- **WHEN** a mark of `0.03600` arrives for a `-446082` contract position entered at `0.03140` and the contract has not printed since
+- **THEN** the row's mark, USDT size, unrealized PnL and return on margin all change from that mark, and the dock total changes with them
+
+#### Scenario: The price feed is not connected
+
+- **WHEN** the feed reports no price for a symbol and the account snapshot has a confirmed unrealized PnL
+- **THEN** the row and Ticket retain the snapshot reading with its source and age, and no aged price is presented as live
+
+#### Scenario: A price arrives for a symbol with no open position
+
+- **WHEN** a mark or a trade arrives for a symbol that is not in the position list
+- **THEN** no row is created or changed
+
+#### Scenario: One position cannot be valued
+
+- **WHEN** at least one open position has neither a complete live valuation nor a confirmed snapshot fallback
+- **THEN** the dock total is marked incomplete and states the missing-row count instead of presenting the sum of known rows as complete
+
+#### Scenario: The account is not yet known
+
+- **WHEN** the expanded positions resource has not produced its first confirmed reading
+- **THEN** the expanded and collapsed dock both show an unknown aggregate rather than `+0.00`
+
+#### Scenario: A live CROSS mark has no current denominator
+
+- **WHEN** the mark advances but the position has no confirmed leverage from which current position margin can be derived
+- **THEN** uPnL and notional remain complete while ROE is shown as unavailable rather than dividing by stale snapshot margin or working-order reserve
+
+### Requirement: A control that reaches past its own panel says so
+
+When an operator control governs anything outside the panel it sits in, that
+panel SHALL state what else it governs, in the panel, beside the control — not
+only in a specification or a commit message. It SHALL also state what it does
+not govern where a reader could reasonably assume otherwise.
+
+The reason is that the effect is invisible at the point of use. An operator
+turning a dial down to make one panel quieter, months later and for an unrelated
+reason, has no way to know what else they slowed unless the dial tells them.
+
+That statement SHALL be drawn quieter than the control's own reading: it is
+standing text that does not change when a value is applied, and the value is
+what the operator opened the panel to see.
+
+#### Scenario: The tape throttle also bounds position repricing
+
+- **WHEN** the operator opens the Aggregate trades settings
+- **THEN** the panel states that its throttle and timeout also bound how often open positions are repriced, and that marks keep their own once-a-second cadence

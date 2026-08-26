@@ -1279,44 +1279,6 @@ A working order drawn on the chart SHALL use its positive limit price where it h
 - **WHEN** a working stop-limit reports a positive limit price and a different trigger price
 - **THEN** the chart draws its working order line at the limit price and keeps the trigger as activation information
 
-### Requirement: A position row that disagrees with the chart says why
-The chart is drawn from the price the contract traded at; a position row is
-valued on the exchange's mark. On a fast move the two sit on opposite sides of a
-position's entry, so the operator sees price past their own entry line while the
-row states a loss — or the reverse. Both figures are correct, and the desk SHALL
-NOT resolve the disagreement by valuing the row on the tape, because the mark is
-what the exchange settles and liquidates on.
-
-Where the tape and the mark place a position on opposite sides of its entry, the
-row SHALL state that this is what has happened: the price the contract last
-traded at, what the position would be worth there, and that the mark has not
-crossed the entry and is what settles. Where they agree, the row SHALL say
-nothing about the tape, because there is nothing to explain.
-
-Every surface that states a position's unrealized PnL SHALL say it the same way,
-from one shared reading, so that the dock and the trading ticket cannot give the
-operator two different accounts of the same disagreement.
-
-This SHALL NOT be satisfied by drawing the mark on the chart. "The chart does not
-draw a MARK overlay" holds, and the explanation belongs on the row whose number
-is being questioned.
-
-#### Scenario: The tape has crossed the entry and the mark has not
-- **WHEN** a short entered at `61000` is valued at a mark of `61200` while the contract last traded at `60800`
-- **THEN** the row states the loss on the mark, and states that the contract last traded at `60800` — the other side of the entry — what the position would be worth there, and that the mark is what settles
-
-#### Scenario: The tape and the mark agree
-- **WHEN** the last traded price and the mark are on the same side of the position's entry
-- **THEN** the row says nothing about the tape
-
-#### Scenario: The tape sits exactly on the entry
-- **WHEN** the contract last traded at exactly the position's entry price
-- **THEN** the row says nothing about the tape, because a reading of zero has no side to disagree from
-
-#### Scenario: The dock and the ticket state the same position
-- **WHEN** both the portfolio dock and the trading ticket show the same position while the tape and the mark disagree
-- **THEN** both state the disagreement in the same words, from the same reading
-
 ### Requirement: A kept reading is verified against the exchange, not trusted
 A reading kept on disk SHALL be re-read whole from the exchange on a cadence the
 desk can afford, and what is held SHALL be replaced by what the exchange
@@ -2198,51 +2160,6 @@ The system SHALL mark a symbol's trade history dirty and schedule its bounded re
 - **WHEN** the user-data stream reports a `TRADE` execution or positive fill evidence
 - **THEN** that symbol's fill-history activity advances, its prior frozen proof no longer suppresses reconciliation, and one bounded trade repair is scheduled for the fill burst
 
-### Requirement: An open position's unrealized PnL is mark-authoritative
-Every primary surface that states Futures unrealized PnL, return on margin, position value, or an aggregate of those readings SHALL use the current exchange mark for that position. A last trade or any price extrapolated from trades SHALL NOT change those primary readings. When no current mark is available, a confirmed account-snapshot unrealized PnL MAY remain as a visibly qualified fallback; otherwise the reading SHALL be unknown rather than zero.
-
-The last traded price MAY explain why the chart and the mark-based position disagree, or MAY support a separately named what-if reading, but that value SHALL NOT be labelled uPnL, included in the dock total, or used by margin, liquidation, or risk decisions.
-
-#### Scenario: A trade prints between marks
-- **WHEN** aggregate trades print after the latest mark and no new mark has arrived
-- **THEN** primary uPnL, return on margin, position value, and aggregate uPnL do not change
-
-#### Scenario: A mark changes
-- **WHEN** a new valid mark arrives for an open position
-- **THEN** every primary position valuation changes from that mark in one consistent direction and the aggregate is recomputed from the same readings
-
-#### Scenario: A delayed or replayed mark arrives after an accepted mark
-- **WHEN** an older, untimed, duplicate, or same-time conflicting mark frame arrives after a newer timed frame for the same contract
-- **THEN** the accepted mark, other newer symbol readings, liveness proof, and the funding-settlement observation baseline do not change, and the next current frame does not create a false settlement event
-
-#### Scenario: The exchange reschedules funding earlier
-- **WHEN** a newer mark frame moves the next funding time earlier and a later frame advances it
-- **THEN** the earlier time becomes the baseline without reporting a settlement, and the later advance triggers one reconciliation only after exchange event time has reached the held funding boundary
-
-#### Scenario: A market activation keeps the same feed instance
-- **WHEN** a new renderer market generation clears visible marks while the shared feed continues in the same epoch
-- **THEN** the renderer preserves that epoch's revision admission, rejects revisions no newer than the last accepted frame, and accepts the next higher revision from the same feed
-
-#### Scenario: An actual replacement feed restarts revisions
-- **WHEN** a newer feed epoch publishes revision one after an older feed epoch
-- **THEN** revision one opens the newer namespace and later non-empty or terminal frames from the older epoch are rejected
-
-#### Scenario: The tape and mark straddle entry
-- **WHEN** a short entered at `3.3450` has a mark of `3.36` and last trade of `3.30`
-- **THEN** primary uPnL reports the loss implied by the mark, while any tape-based profit is explicitly secondary and non-additive
-
-#### Scenario: No current mark exists
-- **WHEN** an account snapshot contains a confirmed unrealized PnL but the live mark feed is unavailable
-- **THEN** the snapshot value is retained with its snapshot age/source, and no aged mark is described as live
-
-#### Scenario: Neither mark nor snapshot can value the position
-- **WHEN** an open position lacks both a usable current mark and a confirmed snapshot uPnL
-- **THEN** its primary valuation, any aggregate that requires it, and margin/removal calculations that depend on its uPnL are reported as incomplete rather than zero
-
-#### Scenario: A complete aggregate contains an undated source
-- **WHEN** every row has a complete valuation but at least one included reading has no trustworthy source time
-- **THEN** the aggregate remains numerically complete while its aggregate source time is unknown
-
 ### Requirement: Live mark delivery is consumer-bound and backpressure-safe
 The shared mark-price feed SHALL treat liveness as forward exchange-time progress for every tracked contract, not merely traffic from any contract. A replay SHALL NOT prove liveness. When any tracked contract fails its liveness window, all live marks SHALL be withdrawn before the combined stream reconnects so an aged reading is not presented as live.
 
@@ -2428,3 +2345,225 @@ again for what was already answered, never a source of record.
 #### Scenario: The kept reading cannot state its own coverage
 - **WHEN** a kept reading is loaded without the span it was read over, or under an identity scheme the desk no longer uses
 - **THEN** it is discarded and the window is read again, rather than shown as a reading
+
+### Requirement: The desk does not hold a mark longer than folding it together earns
+
+The mark feed coalesces marks that arrive together for several contracts into
+one publication. The length of that window SHALL be set from a measurement of
+how far apart those arrivals actually are, and SHALL NOT exceed what folding
+them together earns.
+
+The reason is that the window is added to the age of every mark, on a value
+that is already the oldest thing the desk displays: the exchange publishes it
+once a second, and it reaches the desk a further fifth of a second later. A
+window sized by estimate rather than by measurement spends the operator's
+freshness on a saving that was never that large.
+
+The measured basis SHALL be stated where the window is set, so a later reader
+can tell a number that was measured from one that was guessed.
+
+#### Scenario: Marks for several contracts arrive together
+
+- **WHEN** the exchange delivers a mark for every tracked contract at the same second boundary
+- **THEN** they are published as one frame, and the window that folded them together is no longer than the measured spread of those arrivals with headroom
+
+#### Scenario: A single contract is tracked
+
+- **WHEN** only one contract has an open position, so there is nothing to fold together
+- **THEN** its mark is published without waiting longer than that same window
+
+### Requirement: A position row that disagrees with the account says why
+
+A position row is read at the price its contract last printed; the exchange
+holds it at its mark. On a fast move the two sit on opposite sides of the
+position's entry, so the row shows a profit while the account still records a
+loss — or the reverse. Both figures are correct, and the desk SHALL NOT resolve
+the disagreement by hiding either one.
+
+Where the two place a position on opposite sides of its entry, the row SHALL
+state that this is what has happened: what the exchange's own mark makes the
+position worth, and that the mark is what settles and liquidates. Where they
+agree, the row SHALL say nothing about it, because there is nothing to explain.
+
+An explanation SHALL name both readings before it compares them. A row that has
+not stated which prices it is speaking of SHALL say nothing rather than refer to
+them.
+
+Every surface that states a position's unrealized PnL SHALL say it the same way,
+from one shared reading, so that the dock and the trading ticket cannot give the
+operator two different accounts of the same disagreement.
+
+This SHALL NOT be satisfied by drawing the mark on the chart. "The chart does not
+draw a MARK overlay" holds, and the explanation belongs on the row whose number
+is being questioned.
+
+#### Scenario: The print has crossed the entry and the mark has not
+
+- **WHEN** a short entered at `61000` is read at a print of `60800` while its mark is `61200`
+- **THEN** the row states the profit implied by the print, states what the position is worth on the mark of `61200`, and states that the two are on opposite sides of the entry and that the mark is what settles
+
+#### Scenario: The print and the mark agree
+
+- **WHEN** the printed price and the mark are on the same side of the position's entry
+- **THEN** the row says nothing about the disagreement
+
+#### Scenario: The row has named no prices
+
+- **WHEN** a position carries no live valuation, so the row has stated neither price
+- **THEN** it says nothing about a disagreement rather than referring to two readings it has not named
+
+#### Scenario: The dock and the ticket state the same position
+
+- **WHEN** both the portfolio dock and the trading ticket show the same position while the print and the mark disagree
+- **THEN** both state the disagreement in the same words, from the same reading
+
+### Requirement: An open position is read at the newer of its two exchange prices
+
+A contract has two prices the exchange publishes: the mark, once a second, and
+the price the contract last traded at. Both SHALL be prices the exchange itself
+stated. No primary reading SHALL be computed from a price extrapolated,
+interpolated or otherwise synthesized from either.
+
+Every primary surface that states Futures unrealized PnL, return on margin, or
+an aggregate of those readings SHALL use whichever of the two the exchange
+stated more recently, by exchange event time. The last traded price SHALL be
+preferred only while its own event time is no further behind the mark's than a
+bounded window; past that window the mark SHALL be used, because a price nobody
+has traded at recently is not the fresher statement. That window SHALL be set
+from a measurement of how long the contracts the desk trades actually go between
+trades and how long a mark can be late, SHALL exceed the worst measured mark
+interval so a late mark cannot alone take the reading, and SHALL NOT exceed what
+the mark's own age would have been.
+
+A reading SHALL state which of the two prices it is on and the exchange time of
+that price, and SHALL NOT report the other price's time as its own.
+
+Position notional, committed margin, margin balance, removable margin, the
+liquidation buffer and every other figure describing what the exchange requires
+of the position SHALL be computed from the mark alone, whatever price the
+reading is on.
+
+The mark's own unrealized PnL SHALL be carried alongside every live reading not
+on the mark, under a name of its own, and SHALL be reachable on every surface
+that states the reading — it is the figure the account agrees with, the one
+funding is charged on and the one liquidation is decided by. When the two fall
+on opposite sides of the position's entry, the surface SHALL say so.
+
+A last traded price SHALL NOT be admitted for a contract the desk holds no
+current mark for. When no current price is available at all, a confirmed
+account-snapshot unrealized PnL MAY remain as a visibly qualified fallback;
+otherwise the reading SHALL be unknown rather than zero.
+
+#### Scenario: A trade prints between marks
+
+- **WHEN** the contract trades after the latest mark and no new mark has arrived
+- **THEN** unrealized PnL, return on margin and the aggregate are recomputed at the printed price, while position notional, margin and the liquidation buffer stay on the mark
+
+#### Scenario: A mark arrives while the contract is still trading
+
+- **WHEN** a new mark arrives and the contract's last print is still within the window
+- **THEN** the reading stays on the printed price, and the mark's own carried figure, the notional and the margin are recomputed from the new mark
+
+#### Scenario: A contract stops trading
+
+- **WHEN** the exchange's mark event time is further past the last print than the window allows
+- **THEN** the reading moves to the mark, states the mark's time as its own, and no longer carries a separate mark figure to disagree with
+
+#### Scenario: A price the exchange did not time
+
+- **WHEN** a last traded price arrives without an exchange trade time, or a mark arrives without an exchange event time
+- **THEN** the untimed price cannot be shown to be the newer of the two and the mark is used
+
+#### Scenario: The reading and the mark straddle entry
+
+- **WHEN** a short entered at `3.3450` last printed at `3.30` while its mark is `3.36`
+- **THEN** the row reports the profit implied by the print, states the mark's loss beside it under its own name, and says that the two are on opposite sides of the entry and that the mark is what settles
+
+#### Scenario: A delayed or replayed price arrives after an accepted one
+
+- **WHEN** an older, untimed, duplicate or same-time conflicting mark or trade frame arrives after a newer timed frame for the same contract
+- **THEN** the accepted price of that kind, other newer symbol readings, liveness proof, and the funding-settlement observation baseline do not change
+
+#### Scenario: Neither price nor snapshot can value the position
+
+- **WHEN** an open position lacks both a usable current price and a confirmed snapshot uPnL
+- **THEN** its primary valuation, any aggregate that requires it, and margin/removal calculations that depend on its uPnL are reported as incomplete rather than zero
+
+### Requirement: The price feed carries both prices for every open position
+
+The shared position price feed SHALL subscribe, on its one combined public
+stream, to both the mark and the aggregate trades of every contract carrying an
+open position — not only of the contract currently on screen. No additional
+socket, credentialed subscription or request weight SHALL be spent on this.
+
+A last traded price SHALL be published only alongside a live mark for the same
+contract. When the feed withdraws a contract's mark — a close, a stall, a
+rebuild, an untracked symbol — it SHALL withdraw that contract's last traded
+price with it, so a price cannot outlive the liveness proof that vouches for it.
+
+Trade frames SHALL NOT count as liveness for the mark lane. The stall watchdog
+measures forward exchange-time progress of the once-a-second contract, and a
+contract can go seconds between trades with nothing wrong.
+
+#### Scenario: A contract trades between two of its marks
+
+- **WHEN** an aggregate trade arrives for a tracked contract that the feed already holds a mark for
+- **THEN** it is published in the next coalesced frame beside that mark, and contracts that did not trade carry their mark alone
+
+#### Scenario: A contract trades before its first mark
+
+- **WHEN** an aggregate trade arrives for a tracked contract the feed holds no mark for
+- **THEN** nothing is published for that contract, and its first mark carries the held print rather than waiting for the next trade
+
+#### Scenario: The mark lane goes silent while trades keep arriving
+
+- **WHEN** a tracked contract's marks stop making forward exchange-time progress through the liveness window while its trades continue
+- **THEN** the watchdog still reports the stall, the whole live price set is withdrawn, and the last print is not left standing as if it were current
+
+### Requirement: How often a position is repriced is the operator's to bound
+
+The rate at which the desk republishes an open position's traded price SHALL
+follow the operator's existing tape control — the throttle and timeout of the
+Aggregate trades panel — rather than a second control of its own. When that
+throttle is off, the bound SHALL be the feed's own coalescing window.
+
+That window SHALL be the floor: a setting below it SHALL be treated as the
+window, because below it there is nothing left to fold together and the
+measurement that sized it does not support going lower.
+
+The bound SHALL space out publications rather than discard prices. The first
+print after an open gate SHALL publish on the coalescing window, so the start of
+a move is seen at once; prints arriving while the gate is shut SHALL supersede
+one another and the newest SHALL publish when it opens. Shortening the bound
+SHALL release a price already waiting rather than hold it for a window the
+operator has stopped asking for.
+
+Marks SHALL NOT be bounded by that setting. A mark arrives once a second, which
+is slower than any value the control accepts, and it is the reading funding,
+margin and liquidation are decided on; a publication caused by a mark SHALL go
+out on the coalescing window and SHALL carry whatever the contract has printed
+since.
+
+The tape control's minimum trade size SHALL NOT reach position valuation. It
+selects which prints are worth drawing in a list; a position is worth what the
+contract traded at, whatever the size of that trade.
+
+#### Scenario: The contract prints faster than the operator asked to see
+
+- **WHEN** trades arrive for a tracked contract more often than the tape timeout allows
+- **THEN** the first publishes on the coalescing window, the rest are superseded while the gate is shut, and the newest publishes when it opens
+
+#### Scenario: A mark arrives while the gate is shut
+
+- **WHEN** a new mark arrives inside the operator's window
+- **THEN** it is published on the coalescing window and carries the newest print with it
+
+#### Scenario: The operator shortens the bound
+
+- **WHEN** the tape timeout is lowered while a price is waiting out the previous window
+- **THEN** that price is published on the coalescing window instead of serving out the window it no longer belongs to
+
+#### Scenario: The operator sets a value under the coalescing window
+
+- **WHEN** the tape timeout is set below the feed's coalescing window, or the throttle is switched off
+- **THEN** the bound is that window, and no publication is spaced more tightly than the measurement that sized it
