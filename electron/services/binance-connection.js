@@ -8390,6 +8390,15 @@ export function setupBinanceConnection({
                             },
                         },
                     );
+                    // The Aggregate trades dial bounds two things: how often the
+                    // trade list redraws, and how often an open position is
+                    // repriced — the operator asked for the second on
+                    // 2026-08-26. Read off the service after the request rather
+                    // than parsed again here, so there is one place that decides
+                    // what the setting is and one number that both follow.
+                    futuresMarkPriceFeed?.boundPrints(
+                        futuresProductionWorkstationRuntime.service.tapeSettings,
+                    );
                 } catch (error) {
                     logger.warn(`[futures-production-workstation] request rejected (${error?.code || error?.name || 'unknown'})`);
                 }

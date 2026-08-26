@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
     FUTURES_PRODUCTION_WORKSTATION_EVENT_TYPE,
     FUTURES_PRODUCTION_WORKSTATION_HISTORY_OUTCOME_TYPE,
+    createFuturesProductionWorkstationConfigureTapeRequest,
     createFuturesProductionWorkstationLoadCandleHistoryRequest,
     createFuturesProductionWorkstationSubscribeRequest,
 } from '../../src/utils/futuresProductionWorkstationProtocol.js';
@@ -932,6 +933,95 @@ describe('setupBinanceConnection user-data orchestration', () => {
             version: 1,
             marks: { BMTUSDT: { markPrice: '0.03500', updatedAt: 1_784_000_000_000 } },
         });
+    });
+
+    // The operator, 2026-08-26: *"я бы предложил ограничить его значением
+    // таймаута которое выставлено в меню Aggregate Trades."* One dial, two
+    // things bounded — and the seam between the workstation channel that owns
+    // the dial and the account-scoped feed that publishes the prices is exactly
+    // where a wire like this goes missing without anyone noticing.
+    it('bounds position reprices by the Aggregate trades timeout the operator set', async () => {
+        moduleMocks.futuresAdapter.getAccountRefreshOperations.mockReturnValue([{
+            type: 'positions',
+            weight: 5,
+            errorLabel: 'positions',
+            loadPayload: vi.fn().mockResolvedValue({
+                futures_positions: [{
+                    symbol: 'BMTUSDT', positionSide: 'BOTH', quantity: '-446422',
+                    entryPrice: '0.03140', markPrice: '0.03398', unrealizedPnl: '-1151.77',
+                }],
+            }),
+        }]);
+        await connectRenderer('futures-live');
+        await vi.advanceTimersByTimeAsync(2_000);
+        await flushMicrotasks();
+
+        await moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify(createFuturesProductionWorkstationSubscribeRequest({
+                requestId: 'tape-bound-subscribe',
+                symbol: 'BMTUSDT',
+                interval: '1m',
+            })),
+        });
+        await vi.advanceTimersByTimeAsync(2_000);
+        await flushMicrotasks();
+        await moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify(createFuturesProductionWorkstationConfigureTapeRequest({
+                requestId: 'tape-bound-subscribe',
+                symbol: 'BMTUSDT',
+                interval: '1m',
+                throttleEnabled: true,
+                timeoutMs: 2_000,
+                minNotionalUsdt: '0',
+            })),
+        });
+        await flushMicrotasks();
+
+        const { default: MockWebSocket } = await import('ws');
+        const streamIndex = MockWebSocket.mock.calls
+            .findIndex(([url]) => String(url).includes('@markPrice@1s'));
+        const markSocket = MockWebSocket.mock.results[streamIndex].value;
+        const repriceCount = () => moduleMocks.rendererConnection.sendUTF.mock.calls
+            .map(([message]) => JSON.parse(message))
+            .filter(payload => payload.type === 'futures_position_marks').length;
+
+        markSocket.handlers.message(JSON.stringify({
+            stream: 'bmtusdt@markPrice@1s',
+            data: { e: 'markPriceUpdate', E: 1_784_000_000_000, s: 'BMTUSDT', p: '0.03500' },
+        }));
+        markSocket.handlers.message(JSON.stringify({
+            stream: 'bmtusdt@aggTrade',
+            data: { e: 'aggTrade', E: 1_784_000_000_100, s: 'BMTUSDT', p: '0.03505', T: 1_784_000_000_100 },
+        }));
+        await vi.advanceTimersByTimeAsync(100);
+        const opened = repriceCount();
+        expect(opened).toBeGreaterThan(0);
+
+        // The contract keeps printing. Inside the operator's window the desk
+        // stops republishing — and keeps the newest price for when it opens.
+        for (let step = 1; step <= 5; step += 1) {
+            markSocket.handlers.message(JSON.stringify({
+                stream: 'bmtusdt@aggTrade',
+                data: {
+                    e: 'aggTrade',
+                    E: 1_784_000_000_100 + step * 100,
+                    s: 'BMTUSDT',
+                    p: `0.0351${step}`,
+                    T: 1_784_000_000_100 + step * 100,
+                },
+            }));
+            await vi.advanceTimersByTimeAsync(100);
+        }
+        expect(repriceCount()).toBe(opened);
+
+        await vi.advanceTimersByTimeAsync(2_000);
+        expect(repriceCount()).toBeGreaterThan(opened);
+        const marks = moduleMocks.rendererConnection.sendUTF.mock.calls
+            .map(([message]) => JSON.parse(message))
+            .filter(payload => payload.type === 'futures_position_marks');
+        expect(marks.at(-1).marks.BMTUSDT.lastPrice).toBe('0.03515');
     });
 
     it('sends position marks only to renderers whose current market is Futures', async () => {

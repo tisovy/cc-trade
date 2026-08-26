@@ -1397,6 +1397,14 @@ export const FuturesWorkstationView = ({
                 Effective: {tapeSettings.throttleEnabled ? 'throttled' : 'unthrottled'} ·{' '}
                 {tapeSettings.timeoutMs} ms · ≥ {tapeSettings.minNotionalUsdt} USDT
               </output>
+              {/* The throttle bounds two things, and a dial with an invisible
+                  second effect is a trap for whoever moves it next. The minimum
+                  trade size does not reach the positions: a small print is still
+                  a price the contract traded at. */}
+              <span className="futures-workstation-tape-scope">
+                Throttle and timeout also bound how often open positions are
+                repriced. Marks keep their own once-a-second cadence.
+              </span>
               {tapeSettingsError ? (
                 <span className="futures-workstation-tape-error" role="alert">{tapeSettingsError}</span>
               ) : null}

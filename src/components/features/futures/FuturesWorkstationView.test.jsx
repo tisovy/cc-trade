@@ -821,6 +821,14 @@ describe('pure Futures workstation presentation', () => {
     openTapeSettings()
 
     expect(screen.getByText(/Effective: throttled · 250 ms · ≥ 0 USDT/)).toBeInTheDocument()
+    // Since 2026-08-26 this dial bounds two things — the trade list and how
+    // often an open position is repriced — and a control with an invisible
+    // second effect is a trap for whoever moves it next. It also says what it
+    // does not reach, because the mark's cadence is the exchange's.
+    expect(screen.getByText(/also bound how often open positions are repriced/i))
+      .toBeInTheDocument()
+    expect(screen.getByText(/Marks keep their own once-a-second cadence/i))
+      .toBeInTheDocument()
     fireEvent.change(screen.getByLabelText('Tape timeout in ms'), {
       target: { value: '15' },
     })

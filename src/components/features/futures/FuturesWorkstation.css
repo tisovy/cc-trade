@@ -272,10 +272,19 @@
 }
 
 .futures-workstation-tape-effective,
+.futures-workstation-tape-scope,
 .futures-workstation-tape-error {
   grid-column: 1 / -1;
   color: #8192a4;
   font-size: calc(var(--fx-ui-scale, 1) * 11px);
+}
+
+/* What the dial reaches beyond this panel. Quieter than the reading above it:
+   it is standing text that does not change when the operator applies a value,
+   and the value is what they came here to read. */
+.futures-workstation-tape-scope {
+  color: #6a7c8e;
+  line-height: 1.35;
 }
 
 .futures-workstation-tape-error {

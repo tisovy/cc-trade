@@ -35,7 +35,13 @@ const tradeFrame = (symbol, price, tradeTime = 1_700_000_000_500) => JSON.string
     data: { e: 'aggTrade', E: tradeTime, s: symbol, p: price, T: tradeTime },
 });
 
-const createHarness = ({ feedEpoch = 1 } = {}) => {
+const UNTHROTTLED_TAPE = Object.freeze({
+    throttleEnabled: false,
+    timeoutMs: 250,
+    minNotionalUsdt: '0',
+});
+
+const createHarness = ({ feedEpoch = 1, tapeSettings } = {}) => {
     const sockets = [];
     const broadcasts = [];
     const timers = [];
@@ -79,6 +85,7 @@ const createHarness = ({ feedEpoch = 1 } = {}) => {
         logger,
         clock,
         feedEpoch,
+        ...(tapeSettings === undefined ? {} : { tapeSettings }),
     });
     return { feed, sockets, broadcasts, logger, settlements, timers, runTimers };
 };
@@ -324,22 +331,31 @@ describe('createFuturesMarkPriceFeed', () => {
     };
 
     it('carries each contract’s own last print beside its mark', () => {
-        harness.feed.track([
+        // Unthrottled, so this test is about carrying the print and not about
+        // the operator's bound on how often it may be carried.
+        const open = createHarness({ tapeSettings: UNTHROTTLED_TAPE });
+        open.feed.track([
             { symbol: 'BMTUSDT', quantity: '-446082' },
             { symbol: 'BEATUSDT', quantity: '-1800' },
         ]);
-        const armed = harness.timers.filter(Boolean).length;
-        harness.sockets[0].emit('message', markFrame('BMTUSDT', '0.03523'));
-        harness.sockets[0].emit('message', markFrame('BEATUSDT', '3.523'));
-        runNewestFlush(armed);
+        const armed = open.timers.filter(Boolean).length;
+        const flush = () => {
+            const scheduled = open.timers.filter(Boolean).slice(armed);
+            expect(scheduled).toHaveLength(1);
+            open.timers[open.timers.indexOf(scheduled[0])] = null;
+            scheduled[0].callback();
+        };
+        open.sockets[0].emit('message', markFrame('BMTUSDT', '0.03523'));
+        open.sockets[0].emit('message', markFrame('BEATUSDT', '3.523'));
+        flush();
 
         // A trade prints on one of them, with no new mark behind it. That alone
         // is a new publication — the second the operator was reading blind.
-        harness.sockets[0].emit('message', tradeFrame('BMTUSDT', '0.03530', 1_700_000_000_400));
-        runNewestFlush(armed);
+        open.sockets[0].emit('message', tradeFrame('BMTUSDT', '0.03530', 1_700_000_000_400));
+        flush();
 
-        expect(harness.broadcasts).toHaveLength(2);
-        expect(harness.broadcasts[1].marks).toEqual({
+        expect(open.broadcasts).toHaveLength(2);
+        expect(open.broadcasts[1].marks).toEqual({
             BMTUSDT: {
                 markPrice: '0.03523',
                 updatedAt: 1_700_000_000_000,
@@ -352,9 +368,137 @@ describe('createFuturesMarkPriceFeed', () => {
 
         // A print the exchange timed before one already taken cannot undo it,
         // and schedules nothing.
-        harness.sockets[0].emit('message', tradeFrame('BMTUSDT', '0.03400', 1_700_000_000_300));
-        expect(harness.timers.filter(Boolean).slice(armed)).toHaveLength(0);
+        open.sockets[0].emit('message', tradeFrame('BMTUSDT', '0.03400', 1_700_000_000_300));
+        expect(open.timers.filter(Boolean).slice(armed)).toHaveLength(0);
+        expect(open.broadcasts).toHaveLength(2);
+    });
+
+    // The operator, 2026-08-26, having watched the prints arrive: *"обновление
+    // было вообще REALTIME — СУПЕР! Но я бы предложил ограничить его значением
+    // таймаута которое выставлено в меню Aggregate Trades."* One dial, already
+    // on the desk, now bounding both the trade list and the position rows.
+    it('spaces prints out by the Aggregate trades timeout, and marks not at all', () => {
+        expect(harness.feed.printWindowMs).toBe(250);
+        harness.feed.track([{ symbol: 'BMTUSDT', quantity: '-446082' }]);
+        const armed = harness.timers.filter(Boolean).length;
+        const newest = () => harness.timers.filter(Boolean).slice(armed);
+        const fire = (timer) => {
+            harness.timers[harness.timers.indexOf(timer)] = null;
+            timer.callback();
+        };
+        harness.sockets[0].emit('message', markFrame('BMTUSDT', '0.03523'));
+        fire(newest()[0]);
+        expect(harness.broadcasts).toHaveLength(1);
+
+        // The first print goes out on the coalescing window: a move that starts
+        // is seen at once, and the bound is what spaces out what follows.
+        harness.sockets[0].emit('message', tradeFrame('BMTUSDT', '0.03530', 1_700_000_000_400));
+        const opening = newest();
+        expect(opening).toHaveLength(1);
+        expect(opening[0].delay).toBe(FUTURES_MARK_PRICE_BATCH_MS);
+        fire(opening[0]);
         expect(harness.broadcasts).toHaveLength(2);
+        expect(harness.broadcasts[1].marks.BMTUSDT.lastPrice).toBe('0.03530');
+
+        // The gate is now shut for the operator's timeout. A burst of prints
+        // inside it publishes nothing — and loses nothing: the newest price is
+        // held, which is what a coalescing window is.
+        const gate = newest();
+        expect(gate).toHaveLength(1);
+        expect(gate[0].delay).toBe(250);
+        harness.sockets[0].emit('message', tradeFrame('BMTUSDT', '0.03540', 1_700_000_000_500));
+        harness.sockets[0].emit('message', tradeFrame('BMTUSDT', '0.03550', 1_700_000_000_600));
+        expect(newest()).toHaveLength(1);
+        expect(harness.broadcasts).toHaveLength(2);
+
+        // The gate opens; the newest print goes out on the coalescing window.
+        fire(gate[0]);
+        const released = newest();
+        expect(released).toHaveLength(1);
+        expect(released[0].delay).toBe(FUTURES_MARK_PRICE_BATCH_MS);
+        fire(released[0]);
+        expect(harness.broadcasts).toHaveLength(3);
+        expect(harness.broadcasts[2].marks.BMTUSDT.lastPrice).toBe('0.03550');
+    });
+
+    it('never makes the mark wait behind the operator’s bound', () => {
+        // Five seconds is what that menu allows, and the mark is already the
+        // oldest number on the desk: the exchange publishes it once a second
+        // and settles, charges funding and liquidates on it.
+        harness.feed.boundPrints({
+            throttleEnabled: true, timeoutMs: 5000, minNotionalUsdt: '0',
+        });
+        harness.feed.track([{ symbol: 'BMTUSDT', quantity: '-446082' }]);
+        const armed = harness.timers.filter(Boolean).length;
+        const newest = () => harness.timers.filter(Boolean).slice(armed);
+        const fire = (timer) => {
+            harness.timers[harness.timers.indexOf(timer)] = null;
+            timer.callback();
+        };
+        harness.sockets[0].emit('message', markFrame('BMTUSDT', '0.03523'));
+        harness.sockets[0].emit('message', tradeFrame('BMTUSDT', '0.03530', 1_700_000_000_400));
+        fire(newest()[0]);
+        // The gate is shut for five seconds.
+        expect(newest()[0].delay).toBe(5000);
+
+        // A new mark arrives inside it and is published on the coalescing
+        // window, carrying whatever the contract has printed since.
+        harness.sockets[0].emit('message', tradeFrame('BMTUSDT', '0.03560', 1_700_000_000_600));
+        harness.sockets[0].emit('message', markFrame('BMTUSDT', '0.03524', 1_700_000_001_000));
+        const markFlush = newest().find(timer => timer.delay === FUTURES_MARK_PRICE_BATCH_MS);
+        expect(markFlush).toBeDefined();
+        fire(markFlush);
+        expect(harness.broadcasts.at(-1).marks.BMTUSDT).toMatchObject({
+            markPrice: '0.03524',
+            lastPrice: '0.03560',
+        });
+    });
+
+    it('takes its bound from the menu, with the coalescing window as the floor', () => {
+        expect(harness.feed.boundPrints({
+            throttleEnabled: true, timeoutMs: 1000, minNotionalUsdt: '0',
+        })).toBe(1000);
+        // Unthrottled in the menu is unthrottled here: the feed's own floor.
+        expect(harness.feed.boundPrints({
+            throttleEnabled: false, timeoutMs: 1000, minNotionalUsdt: '0',
+        })).toBe(FUTURES_MARK_PRICE_BATCH_MS);
+        // Below the floor there is nothing left to fold together, and the
+        // measurement that sized the floor does not support going under it.
+        expect(harness.feed.boundPrints({
+            throttleEnabled: true, timeoutMs: 16, minNotionalUsdt: '0',
+        })).toBe(FUTURES_MARK_PRICE_BATCH_MS);
+        expect(harness.feed.boundPrints(null)).toBe(FUTURES_MARK_PRICE_BATCH_MS);
+    });
+
+    it('releases a waiting price when the operator shortens the bound', () => {
+        harness.feed.boundPrints({
+            throttleEnabled: true, timeoutMs: 5000, minNotionalUsdt: '0',
+        });
+        harness.feed.track([{ symbol: 'BMTUSDT', quantity: '-446082' }]);
+        const armed = harness.timers.filter(Boolean).length;
+        const newest = () => harness.timers.filter(Boolean).slice(armed);
+        const fire = (timer) => {
+            harness.timers[harness.timers.indexOf(timer)] = null;
+            timer.callback();
+        };
+        harness.sockets[0].emit('message', markFrame('BMTUSDT', '0.03523'));
+        harness.sockets[0].emit('message', tradeFrame('BMTUSDT', '0.03530', 1_700_000_000_400));
+        fire(newest()[0]);
+        expect(newest()[0].delay).toBe(5000);
+        harness.sockets[0].emit('message', tradeFrame('BMTUSDT', '0.03590', 1_700_000_000_500));
+        const held = harness.broadcasts.length;
+
+        // The operator turns the dial down. A price waiting out a window they
+        // have just stopped asking for goes now, not in five seconds.
+        harness.feed.boundPrints({
+            throttleEnabled: true, timeoutMs: 250, minNotionalUsdt: '0',
+        });
+        const released = newest();
+        expect(released).toHaveLength(1);
+        expect(released[0].delay).toBe(FUTURES_MARK_PRICE_BATCH_MS);
+        fire(released[0]);
+        expect(harness.broadcasts).toHaveLength(held + 1);
+        expect(harness.broadcasts.at(-1).marks.BMTUSDT.lastPrice).toBe('0.03590');
     });
 
     it('publishes no price at all for a contract it cannot mark', () => {

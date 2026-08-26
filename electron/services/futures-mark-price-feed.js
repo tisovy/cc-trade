@@ -6,9 +6,14 @@
 // values a position at, needs no credentials and costs no REST weight, so the
 // desk follows the market because it is fed by it, not because it polls harder.
 
+import {
+    FUTURES_WORKSTATION_DEFAULT_TAPE_SETTINGS,
+} from '../../src/utils/futuresWorkstationProtocolShared.js';
+
 export const FUTURES_MARK_PRICE_TYPE = 'futures_position_marks';
 export const FUTURES_MARK_PRICE_VERSION = 1;
-// Coalesce prices that arrive together for several open contracts.
+// Coalesce prices that arrive together for several open contracts, and the
+// floor under everything below.
 //
 // Measured rather than estimated, 2026-08-26, four contracts on one combined
 // stream through the operator's proxy: across 88 seconds in which all four
@@ -17,13 +22,35 @@ export const FUTURES_MARK_PRICE_VERSION = 1;
 // was is four times what folding them together ever needed, and every
 // millisecond of it is added to the age of the number a position is valued at.
 // Four times the worst measured spread.
-//
-// It now also bounds how often prints can republish. The same session measured
-// 50.5 frames a second across BTC, ETH, SOL and DOGE together — BTC alone
-// prints 25.5 times a second — so this is what keeps a burst of prints from
-// costing one publication each while staying far under the eye: at its very
-// busiest it is 40 publications a second, and the operator's screen redraws 60.
 export const FUTURES_MARK_PRICE_BATCH_MS = 25;
+// How often prints may republish, as distinct from how often marks may.
+//
+// The operator, 2026-08-26, after watching the prints arrive: *"обновление было
+// вообще REALTIME — СУПЕР! Но я бы предложил ограничить его значением таймаута
+// которое выставлено в меню Aggregate Trades."* So the dial already on the desk
+// — Aggregate trades → Throttle / Timeout (ms) — now bounds two things: how
+// often the trade list redraws, and how often an open position is repriced.
+// One number, one place, and the operator can take it down to the floor when
+// they want the tape rate back.
+//
+// The mark is deliberately not bounded by it. It arrives once a second, which
+// is already slower than any setting in that menu, and it is the reading that
+// funding, margin and liquidation are decided on; delaying it by up to the five
+// seconds that menu allows would make the slowest number on the desk slower
+// still. Marks keep the coalescing window above.
+//
+// The floor is that window, for the reason it states: below it there is nothing
+// left to fold together, and the measurement that sized it does not support
+// going lower.
+export const futuresPrintPublicationWindow = (settings) => {
+    if (settings?.throttleEnabled !== true) return FUTURES_MARK_PRICE_BATCH_MS;
+    const timeoutMs = settings?.timeoutMs;
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= FUTURES_MARK_PRICE_BATCH_MS) {
+        return FUTURES_MARK_PRICE_BATCH_MS;
+    }
+    return timeoutMs;
+};
+
 export const FUTURES_MARK_PRICE_RECONNECT_MS = 5000;
 // One mark per symbol per second is the contract, so silence this long is not a
 // quiet market — it is a feed that stopped delivering without closing.
@@ -150,6 +177,11 @@ export const createFuturesMarkPriceFeed = ({
     batchIntervalMs = FUTURES_MARK_PRICE_BATCH_MS,
     reconnectDelayMs = FUTURES_MARK_PRICE_RECONNECT_MS,
     stallTimeoutMs = FUTURES_MARK_PRICE_STALL_MS,
+    // What the operator has the Aggregate trades menu set to. The default is
+    // that menu's own default, because a renderer whose stored settings already
+    // match it sends nothing on startup — the feed would otherwise be running a
+    // bound the operator never chose and cannot see.
+    tapeSettings = FUTURES_WORKSTATION_DEFAULT_TAPE_SETTINGS,
     feedEpoch = null,
 }) => {
     let symbols = [];
@@ -160,6 +192,13 @@ export const createFuturesMarkPriceFeed = ({
     let reconnectTimer = null;
     let stallTimer = null;
     let published = false;
+    let printWindowMs = futuresPrintPublicationWindow(tapeSettings);
+    // A print is waiting to be published, and the gate is the operator's bound
+    // on how often that may happen. Closed by any publication that carried a
+    // pending print — including one a mark caused, because that publication
+    // delivered it — and reopened one window later.
+    let printPending = false;
+    let printGateTimer = null;
     let publicationRevision = 0;
     const publicationEpoch = Number.isSafeInteger(feedEpoch) && feedEpoch > 0
         ? feedEpoch
@@ -248,6 +287,14 @@ export const createFuturesMarkPriceFeed = ({
         };
     };
 
+    const openPrintGate = () => {
+        printGateTimer = null;
+        // Nothing printed while the gate was shut, so there is nothing owed.
+        // The next print opens its own window rather than waiting out one it
+        // was not here for.
+        if (printPending) scheduleFlush();
+    };
+
     const publish = () => {
         publicationRevision += 1;
         const readings = {};
@@ -260,6 +307,14 @@ export const createFuturesMarkPriceFeed = ({
             marks: readings,
         });
         published = marks.size > 0;
+        // Whatever caused this publication, it carried the pending print, so
+        // the operator's bound starts counting from here.
+        if (!printPending) return;
+        printPending = false;
+        if (printGateTimer !== null) clock.clearTimeout(printGateTimer);
+        printGateTimer = printWindowMs > batchIntervalMs
+            ? clock.setTimeout(openPrintGate, printWindowMs)
+            : null;
     };
 
     const clearMarks = () => {
@@ -274,6 +329,14 @@ export const createFuturesMarkPriceFeed = ({
         // them would let the next mark arrive carrying a price from before the
         // gap, which is the one thing the withdrawal exists to prevent.
         tapes.clear();
+        printPending = false;
+        // The bound spaces out publications of live prices. There are none
+        // left, so the next contract to print starts from an open gate rather
+        // than serving out a window that belonged to a withdrawn reading.
+        if (printGateTimer !== null) {
+            clock.clearTimeout(printGateTimer);
+            printGateTimer = null;
+        }
         if (hadMarks) publish();
     };
 
@@ -328,7 +391,12 @@ export const createFuturesMarkPriceFeed = ({
         // current price rather than waiting for the next trade — which on a
         // quiet contract is seconds away. Publishing now would say nothing:
         // `publish` walks the marks.
-        if (marks.has(print.symbol)) scheduleFlush();
+        if (!marks.has(print.symbol)) return;
+        printPending = true;
+        // A shut gate is the operator's bound doing its work: the newest price
+        // is kept, and goes out when the gate opens. Nothing is dropped, only
+        // superseded — which is what a coalescing window is.
+        if (printGateTimer === null) scheduleFlush();
     };
 
     const scheduleFlush = () => {
@@ -524,6 +592,26 @@ export const createFuturesMarkPriceFeed = ({
             // measuring their age. Arming here puts them under the same window
             // as any other mark; a second call once the socket opens is a no-op.
             armStallCheck();
+        },
+        // The operator moved the Aggregate trades dial. Answers the window now
+        // in force, which is the menu's timeout or this feed's own floor,
+        // whichever is longer.
+        boundPrints(settings) {
+            const next = futuresPrintPublicationWindow(settings);
+            if (next === printWindowMs) return printWindowMs;
+            printWindowMs = next;
+            // A gate armed at the old bound would hold a price for a length the
+            // operator has just stopped asking for. Drop it; anything waiting
+            // goes out on the coalescing window and re-arms at the new bound.
+            if (printGateTimer === null) return printWindowMs;
+            clock.clearTimeout(printGateTimer);
+            printGateTimer = null;
+            if (printPending) scheduleFlush();
+            return printWindowMs;
+        },
+        // Test and diagnostic surface: the bound currently in force.
+        get printWindowMs() {
+            return printWindowMs;
         },
         // A diagnostic reader sees only marks the feed still considers live.
         // Disconnect and stall handling already clear this map, so the snapshot
