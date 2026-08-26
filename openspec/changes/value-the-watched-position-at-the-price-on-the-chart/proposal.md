@@ -1,5 +1,27 @@
 # Value the watched position at the price on the chart
 
+## Superseded in part, 2026-08-26
+
+The operator read it the same day and answered: *"мне до сих пор не нравится
+скорость с которой обновляется uPnL у открытых позиций — для скальпинга это
+слишком медленно. я бы предложил — чтобы на все открытые позиции мы держали
+сокет соединение с последней ценой и обновляли быстрей, чем сейчас."*
+
+Both halves of this change's presentation answer were wrong for the desk they
+were built for. It gave the printed price to the **contract on screen** and the
+operator holds positions in contracts they are not looking at; and it put that
+price on a **second line** while leaving the headline on a number that moves
+once a second, which is the number they are watching. Neither is a defect in
+what shipped — it does what it says — and both are settled by
+`price-every-open-position-at-the-last-print`, which supersedes this change's
+`futures-workstation-presentation` delta (removed here rather than left to
+reach canon) and retires its operator gate unlooked-at.
+
+What stands, and is not superseded: every measurement below, and the
+`futures-order-visibility` delta on the coalescing window. That window was
+sized from the arrival measurement and is unchanged by the later work — the
+later change only adds prints to what it folds together.
+
 ## Why
 
 The operator, 2026-08-26: *"надо чтобы наша UPNL цена чаще обновлялась в
@@ -58,6 +80,10 @@ were never joined.
   can never sit beside a live mark.
 
 ## Non-goals
+
+*Both of these were overturned by the operator on the same day — see
+**Superseded in part** above. Kept as written, because they are the reasoning
+the correction had to argue with.*
 
 The headline uPnL does not move to the tape. The canonical requirement already
 settles that — the last traded price "MAY support a separately named what-if

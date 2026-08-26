@@ -757,7 +757,7 @@ DOGEUSDT 1.4).
 | Change | Task | Status | Evidence |
 |---|---:|---|---|
 | `value-the-watched-position-at-the-price-on-the-chart` | 1.1–3.4 | `IMPLEMENTED` | `fbf954a`. The contract on screen has its own tape — the `@aggTrade` stream the chart is already drawn from — joined to the position mark store, coalesced to ten a second. The position states what it is worth at that price under its own name on its own line, 11px neutral grey under the 17px position-toned headline (measured in Chromium; jsdom lays nothing out). The mark stays the headline and the only input to ROE, margin, liquidation and the dock total, which is what the canonical requirement already fixes. The coalescing window is cut 200 ms → 25 ms, four times the worst measured spread. Five biting tests, each verified failing against the pre-change file it covers; full suite 2935/2935, lint clean, four guards pass. |
-| `value-the-watched-position-at-the-price-on-the-chart` | 4.1 | `OUTSTANDING` | Operator watches a contract carrying a position through a fast move on `fbf954a`: the "At last" line tracks what the chart shows, the uPnL above it stays the figure the Binance app agrees with, and switching contracts leaves no stale price behind. |
+| `value-the-watched-position-at-the-price-on-the-chart` | 4.1 | `RETIRED` | Never looked at. The operator answered the shipped behaviour in words the same day (next section), and the check no longer describes the desk: the "At last" line it was written for is gone, and the headline it was written to protect has moved. Replaced by task 4.1 of `price-every-open-position-at-the-last-print`. That change's `futures-workstation-presentation` delta was withdrawn rather than left to reach canon; its `futures-order-visibility` delta on the coalescing window stands. |
 
 **Not built, and deliberately:** the one lane carrying the price behind uPnL is
 the only lane the desk cannot time. `markAccountFrame` refuses to stamp a
@@ -768,3 +768,47 @@ not this one. That is why the numbers above come from a probe rather than from
 the operator's journal. Measuring it needs the key collision resolved and a
 commit boundary defined for a store that deliberately does not set React state;
 it is its own change.
+
+### Every open position moves with its own contract — 2026-08-26
+
+The operator, having looked at the change above on the same day: *"мне до сих
+пор не нравится скорость с которой обновляется uPnL у открытых позиций — для
+скальпинга это слишком медленно. я бы предложил — чтобы на все открытые позиции
+мы держали сокет соединение с последней ценой и обновляли быстрей, чем сейчас."*
+
+Two corrections in one sentence. **Coverage**: the printed price reached only
+the contract on screen, and positions in contracts the operator is not looking
+at were the ones sitting on a price up to a second and a half old.
+**Weight**: the printed price was a second line under a headline that still
+moved once a second, and the headline is what is being watched.
+
+Measured again through the operator's proxy, 180 s, BTCUSDT/ETHUSDT/SOLUSDT/
+DOGEUSDT on one combined stream, 50.5 frames a second in total:
+
+- **Mark cadence, confirmed against a fourth contract.** 178 frames per contract
+  in 180 s; gap p50 1000 ms, p95 1015 ms, worst 1272 ms.
+- **The contracts print far faster.** BTCUSDT 25.5 trades a second (gap p95
+  196 ms), ETHUSDT 15.0 (354 ms), SOLUSDT 4.0 (712 ms), DOGEUSDT 2.0 (1609 ms,
+  worst 6579 ms).
+- **And the price moves inside a mark second.** Roam from the standing mark,
+  per mark-second: p50 0.68 bps (BTC), 0.80 (ETH), 1.15 (SOL), 1.99 (DOGE);
+  worst 3.59 / 6.02 / 6.20 / 6.99. On a 10 000 USDT position that is up to
+  7 USDT that existed and was not on the row until the second was over.
+- **Transit** p50 210–336 ms, p95 341–403 ms.
+
+| Change | Task | Status | Evidence |
+|---|---:|---|---|
+| `price-every-open-position-at-the-last-print` | 1.1–3.5 | `IMPLEMENTED` | `ca8be7e`. `<symbol>@aggTrade` joins `<symbol>@markPrice@1s` on the feed's existing combined socket for every contract carrying a position — no new socket, no credentialed subscription, no request weight. A position is read at whichever of its two prices the exchange stated more recently, with `FUTURES_LAST_PRICE_GRACE_MS = 1500` above the worst measured mark interval (1272 ms) so the mark's metronome cannot take the reading off a contract that is printing, and below the mark's own age so the fallback is never worse than what it replaces. Notional, margin, margin balance, removable margin and the liquidation buffer stay on the mark; the mark's own uPnL is carried on every row under its own name — a quiet 11 px line on the ticket card, and in what the dock row and the total say about themselves. The renderer's watched-contract tape path is removed: one source for every position. Nine biting tests, each verified failing against the pre-change file; two named as guards rather than biters. Full suite 2934/2934 across 128 files, lint clean, four guards pass. |
+| `price-every-open-position-at-the-last-print` | 4.1 | `OUTSTANDING` | Operator watches open positions through a fast move, including at least one contract they are **not** looking at: every row moves with its own contract rather than once a second, the mark's figure is reachable on each and is the one the Binance app agrees with, and a contract that goes quiet falls back to its mark instead of holding a stale price. |
+
+**Known and accepted:** the headline now disagrees with the Binance app's
+default display by the deviation measured above — about 1 bp of notional at the
+median, up to 7 bps in a fast second. The app offers the same choice
+(*Calculate PnL based on: Last Price*); this desk states both figures at once
+instead of asking for a setting. A reconciliation done by eye against the app's
+default screen must use the mark line, not the headline.
+
+**Still not built:** the `futures_position_marks` lane remains the one lane the
+frame instrument cannot stamp, for the `marks` key collision recorded above.
+Second change running whose numbers come from a probe rather than from the
+operator's journal.
