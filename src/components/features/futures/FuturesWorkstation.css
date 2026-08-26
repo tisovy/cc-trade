@@ -961,16 +961,22 @@
   letter-spacing: 0.02em;
 }
 
+/* Held off the edge by the same gutter the desk's own corner notices use. A
+   handle is grabbed, not just read: flush against the frame there is no margin
+   for a pointer that arrives a pixel early, and the plate reads as part of the
+   border rather than as something resting on the chart. The position
+   annotations stay flush — they are labels, and nothing is ever aimed at
+   them. */
 .futures-workstation-owned-order {
   position: absolute;
   right: auto;
-  left: 0;
+  left: 8px;
   display: flex;
   align-items: center;
   justify-content: flex-start;
   gap: 8px;
   height: 16px;
-  max-width: 100%;
+  max-width: calc(100% - 8px);
   padding: 0 6px;
   transform: translateY(-50%);
   border: 1px solid currentColor;

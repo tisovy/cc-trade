@@ -233,9 +233,23 @@ describe('FuturesWorkstationChart viewport ownership', () => {
       '.futures-workstation-owned-order',
     ]) {
       const rule = ruleOf(selector)
-      expect(declaration(rule, 'left'), selector).toBe('0')
+      expect(declaration(rule, 'left'), selector).toMatch(/^(?:0|\d+px)$/)
       expect(declaration(rule, 'right') ?? 'auto', selector).toBe('auto')
     }
+
+    // The operator, 2026-08-26: the handle should not hang off the very edge.
+    // A grabbed thing gets the gutter the desk already writes its own corner
+    // notices at; a label that is only read stays flush. Read from the notice
+    // rather than restated, so the two cannot drift apart.
+    const gutter = declaration(ruleOf('.futures-workstation-reading-notice'), 'left')
+    expect(gutter).toMatch(/^\d+px$/)
+    expect(declaration(ruleOf('.futures-workstation-owned-order'), 'left')).toBe(gutter)
+    expect(declaration(ruleOf('.futures-workstation-position-annotation'), 'left')).toBe('0')
+
+    // Inset from the left without shortening, the plate would reach that same
+    // distance past the plot's right edge — into the price scale.
+    expect(declaration(ruleOf('.futures-workstation-owned-order'), 'max-width'))
+      .toBe(`calc(100% - ${gutter})`)
 
     // The coloured edge faces the line the plate names, so a mirrored plate is
     // still read as belonging to its price rather than as loose text.

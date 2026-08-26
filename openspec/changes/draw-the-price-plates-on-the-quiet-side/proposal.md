@@ -29,6 +29,11 @@ operator physically reaches for, never got it.
   carries the handles and annotations stacks above them: the handle is a
   control the operator drags and cancels with, the boxes are text the desk
   writes, and the left side now carries both.
+- The operator looked at the moved plates the same day: "плашки слева - ок, но
+  я бы сделал еще небольшой отступ именно у ордеров, чтобы они не висели прям у
+  самой левой кромки". The handle is held off the edge by the gutter the desk
+  already writes its own corner notices at. The position annotations stay
+  flush — they are read, never reached for.
 
 ## Non-goals
 

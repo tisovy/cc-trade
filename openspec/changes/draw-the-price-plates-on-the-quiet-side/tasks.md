@@ -15,6 +15,9 @@
       mark that follows the pointer) to the left edge, including the direction
       its contents pack in.
 - [x] 2.3 Stack the layer carrying both above the chart's ambient corner boxes.
+- [x] 2.4 Hold the order handle off that edge by the desk's own corner gutter,
+      shortened by the same amount so the inset cannot push it into the price
+      scale. The annotations stay flush.
 
 ## 3. Proof
 
@@ -27,10 +30,15 @@
       by 748px and 699px.
 - [x] 3.3 Full suite 2923/2923 across 128 files, eslint clean, and all four
       guards pass.
+- [x] 3.4 The gutter is read from the reading notice's own rule rather than
+      restated, so the two cannot drift apart; the test fails against the flush
+      `left: 0`. Re-measured in Chromium: the handle now occupies 8–137 and the
+      annotation stays at 0–80.
 
 ## 4. Operator gate
 
 - [ ] 4.1 Operator looks at a contract carrying a position and a working order:
-      the plates are on the left, nothing sits over the newest candles, the
-      handle still drags and cancels, and no plate is hidden behind a corner
-      notice. Record in `openspec/live-verification-ledger.md`.
+      the plates are on the left with the handle held off the edge, nothing sits
+      over the newest candles, the handle still drags and cancels, and no plate
+      is hidden behind a corner notice. Record in
+      `openspec/live-verification-ledger.md`.
