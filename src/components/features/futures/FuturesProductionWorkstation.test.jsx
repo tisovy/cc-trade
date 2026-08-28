@@ -753,3 +753,62 @@ describe('FuturesProductionWorkstation contract configuration', () => {
     expect(props.leverage).toBeNull()
   })
 })
+
+// The journal's view of this screen. A remount that reopens the stored
+// contract and an operator's own switch were indistinguishable on 2026-08-28 —
+// the desk left the pair the operator was standing on and nothing wrote why.
+// The report states the symbol shown, where it came from, and which of the two
+// causes put it there.
+describe('FuturesProductionWorkstation display reporting', () => {
+  const displayEvents = sendMessage => sendMessage.mock.calls
+    .map(([message]) => message)
+    .filter(message => message?.action === 'report_display_event')
+
+  it('reports the restored contract at mount, and an operator switch by its cause', () => {
+    const sendMessage = vi.fn()
+    render(
+      <FuturesProductionWorkstation
+        enabled
+        executionState={executionState()}
+        sendMessage={sendMessage}
+      />,
+    )
+
+    expect(displayEvents(sendMessage)).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        event: 'symbol-shown',
+        symbol: 'BTCUSDT',
+        from: null,
+        cause: 'restored',
+      }),
+      expect.objectContaining({ event: 'workspace-mounted', symbol: 'BTCUSDT' }),
+    ]))
+
+    const { onSymbolChange } = productionWorkstationMocks.viewRender.mock.lastCall[0]
+    act(() => onSymbolChange('ETHUSDT'))
+
+    expect(displayEvents(sendMessage)).toContainEqual(expect.objectContaining({
+      event: 'symbol-shown',
+      symbol: 'ETHUSDT',
+      from: 'BTCUSDT',
+      cause: 'operator',
+    }))
+  })
+
+  it('reports the unmount with the contract that was on screen', () => {
+    const sendMessage = vi.fn()
+    const { unmount } = render(
+      <FuturesProductionWorkstation
+        enabled
+        executionState={executionState()}
+        sendMessage={sendMessage}
+      />,
+    )
+    unmount()
+
+    expect(displayEvents(sendMessage)).toContainEqual(expect.objectContaining({
+      event: 'workspace-unmounted',
+      symbol: 'BTCUSDT',
+    }))
+  })
+})

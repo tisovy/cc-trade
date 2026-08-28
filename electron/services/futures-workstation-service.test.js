@@ -345,8 +345,12 @@ describe('production Futures workstation service', () => {
             durationMs: 50,
             outcome: 'ok',
             cache: null,
+            // The contract is deliberately named: without it a held session's
+            // rebuild cycle reads as the desk's own. It is an identity, not a
+            // payload — the leak guard below still holds for everything else.
+            symbol: 'BTCUSDT',
         }]);
-        expect(JSON.stringify(timings)).not.toMatch(/BTCUSDT|price|payload|url|credential/i);
+        expect(JSON.stringify(timings)).not.toMatch(/price|payload|url|credential/i);
     });
 
     it.each([
@@ -523,6 +527,7 @@ describe('production Futures workstation service', () => {
         expect(faults).toContainEqual({
             phase: 'book-recovery',
             code: 'DEPTH_BOOTSTRAP_NOT_BRIDGED',
+            symbol: 'BTCUSDT',
         });
         expect(timings).toContainEqual(expect.objectContaining({
             phase: 'aggregate-ready',
@@ -1980,8 +1985,8 @@ describe('production Futures workstation service', () => {
         })]);
         // Every refusal reaches the fault log; only the first reaches the desk.
         expect(faults).toEqual([
-            { phase: 'stream-frame', code: 'STREAM_FRAME_REFUSED' },
-            { phase: 'stream-frame', code: 'STREAM_FRAME_REFUSED' },
+            { phase: 'stream-frame', code: 'STREAM_FRAME_REFUSED', symbol: 'BTCUSDT' },
+            { phase: 'stream-frame', code: 'STREAM_FRAME_REFUSED', symbol: 'BTCUSDT' },
         ]);
 
         // The window is the session's own clock, which moves when the session
@@ -3266,7 +3271,11 @@ describe('the book is bought as deep as it is read', () => {
         walkTheMarketOut(session);
         runtime.service.ensureDepthCovers(session);
         await vi.waitFor(() => expect(readDepthSnapshot.mock.calls.length).toBe(2));
-        expect(faults).toContainEqual({ phase: 'book-recovery', code: 'DEPTH_BAND_WALKED' });
+        expect(faults).toContainEqual({
+            phase: 'book-recovery',
+            code: 'DEPTH_BAND_WALKED',
+            symbol: 'BTCUSDT',
+        });
     });
 
     // Six paths deliver a book. All of them build it here, so the panel's step

@@ -514,7 +514,7 @@ export class FuturesProductionWorkstationService {
             // A failed history read leaves the chart exactly as it was; the
             // operator can scroll again. It is never a reason to resync a live
             // session that is otherwise healthy.
-            this.onInternalError({ phase: 'candle-history', code: safeCode(error) });
+            this.onInternalError({ phase: 'candle-history', code: safeCode(error), symbol: session.symbol });
             // Returning here and saying nothing left the renderer holding its
             // request forever: one failed read disabled scrolling left for the
             // rest of the session, with nothing on screen to say why. The
@@ -825,7 +825,7 @@ export class FuturesProductionWorkstationService {
             session.intervalBootstrapping = false;
             session.pendingCandleEvents = [];
             const reasonCode = safeCode(error);
-            this.onInternalError({ phase: 'interval-bootstrap', code: reasonCode });
+            this.onInternalError({ phase: 'interval-bootstrap', code: reasonCode, symbol: session.symbol });
             this.scheduleIntervalResync(session, reasonCode);
         } finally {
             session.abortController.signal.removeEventListener?.('abort', abortFromSession);
@@ -1074,6 +1074,10 @@ export class FuturesProductionWorkstationService {
                 durationMs,
                 outcome,
                 cache: null,
+                // The contract this aggregate came up for. Without it, a held
+                // session's endless rebuild cycle reads as the desk's own —
+                // which is exactly how 2026-08-28 read.
+                symbol: session.symbol,
             }));
         } catch {
             // Diagnostics are observational and cannot affect market-data delivery.
@@ -1436,7 +1440,7 @@ export class FuturesProductionWorkstationService {
         } catch (error) {
             if (!this.isHeld(session)) return;
             this.emitAggregateTiming(session, 'error');
-            this.onInternalError({ phase: 'bootstrap', code: safeCode(error) });
+            this.onInternalError({ phase: 'bootstrap', code: safeCode(error), symbol: session.symbol });
             this.scheduleResync(session, safeCode(error));
         } finally {
             // Any bootstrap read still in flight after this generation settles
@@ -1665,7 +1669,7 @@ export class FuturesProductionWorkstationService {
             this.applyStreamEvent(session, event);
         } catch (error) {
             if (!this.isHeld(session)) return;
-            this.onInternalError({ phase: 'stream', code: safeCode(error) });
+            this.onInternalError({ phase: 'stream', code: safeCode(error), symbol: session.symbol });
             // A depth frame the desk could not read is a book problem. Only a
             // frame from the streams the desk actually trades on — price,
             // candles, tape — is worth the whole session.
@@ -1723,7 +1727,7 @@ export class FuturesProductionWorkstationService {
             // Inside the guard: anything that raises out here would leave
             // `bookRecovering` set and the book unable to ask again for the rest
             // of the session.
-            this.onInternalError({ phase: 'book-recovery', code: reasonCode });
+            this.onInternalError({ phase: 'book-recovery', code: reasonCode, symbol: session.symbol });
             this.markResourceStale(
                 session,
                 FUTURES_WORKSTATION_RESOURCES.DEPTH,
@@ -1764,11 +1768,12 @@ export class FuturesProductionWorkstationService {
                         this.onInternalError({
                             phase: 'book-recovery',
                             code: depthBootstrapCode(bridged.reason),
+                            symbol: session.symbol,
                         });
                         continue;
                     }
                 } catch (error) {
-                    this.onInternalError({ phase: 'book-recovery', code: safeCode(error) });
+                    this.onInternalError({ phase: 'book-recovery', code: safeCode(error), symbol: session.symbol });
                     continue;
                 }
                 outcome = 'recovered';
@@ -1883,7 +1888,7 @@ export class FuturesProductionWorkstationService {
                     this.markResourceStale(session, FUTURES_WORKSTATION_RESOURCES.TRADES, null);
                 }
             } catch (error) {
-                this.onInternalError({ phase: 'freshness', code: safeCode(error) });
+                this.onInternalError({ phase: 'freshness', code: safeCode(error), symbol: session.symbol });
                 this.scheduleResync(session, safeCode(error));
             }
         }, FUTURES_PRODUCTION_WORKSTATION_FRESHNESS.CHECK_MS);
@@ -1915,7 +1920,7 @@ export class FuturesProductionWorkstationService {
             ? reason
             : 'STREAM_FRAME_REFUSED';
         try {
-            this.onInternalError({ phase: 'stream-frame', code: reasonCode });
+            this.onInternalError({ phase: 'stream-frame', code: reasonCode, symbol: session.symbol });
             // Only a desk that is actually live may say so. Before the bootstrap
             // settles, and while a reconnect owns the session, the fault log is
             // the whole report.
@@ -2064,11 +2069,11 @@ export class FuturesProductionWorkstationService {
     // previous contract's sockets delivering and its timers armed while the desk
     // had already moved on — which is what the operator saw as two contracts
     // flickering against each other.
-    release(step) {
+    release(step, symbol = null) {
         try {
             step();
         } catch (error) {
-            this.onInternalError({ phase: 'release', code: safeCode(error) });
+            this.onInternalError({ phase: 'release', code: safeCode(error), symbol });
         }
     }
 
@@ -2079,19 +2084,19 @@ export class FuturesProductionWorkstationService {
         if (!session) return;
         if (this.sessions.get(session.symbol) === session) this.sessions.delete(session.symbol);
         if (this.shown === session) this.shown = null;
-        this.release(() => session.abortController.abort());
-        this.release(() => session.intervalAbortController?.abort());
-        this.release(() => session.stream?.close?.());
-        this.release(() => session.orderBook.stop());
-        this.release(() => this.clearPendingTapeTimer(session));
-        this.release(() => this.clearPendingDepthDelivery(session));
+        this.release(() => session.abortController.abort(), session.symbol);
+        this.release(() => session.intervalAbortController?.abort(), session.symbol);
+        this.release(() => session.stream?.close?.(), session.symbol);
+        this.release(() => session.orderBook.stop(), session.symbol);
+        this.release(() => this.clearPendingTapeTimer(session), session.symbol);
+        this.release(() => this.clearPendingDepthDelivery(session), session.symbol);
         this.release(() => {
             if (session.freshnessTimer !== null) this.clock.clearInterval(session.freshnessTimer);
             if (session.reconnectTimer !== null) this.clock.clearTimeout(session.reconnectTimer);
             if (session.intervalReconnectTimer !== null) {
                 this.clock.clearTimeout(session.intervalReconnectTimer);
             }
-        });
+        }, session.symbol);
         session.freshnessTimer = null;
         session.reconnectTimer = null;
         session.intervalReconnectTimer = null;

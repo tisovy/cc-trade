@@ -114,6 +114,13 @@ export const FuturesProductionWorkstation = ({
   })
   const gestureSequenceRef = useRef(0)
   const sizeSequenceRef = useRef(0)
+  // The journal's view of this screen. Held as refs so the mount line fires
+  // once per real mount rather than once per socket identity, and so a report
+  // is dropped without a trace when the link cannot carry it — a report may
+  // never block the desk.
+  const reportDisplayEventRef = useRef(null)
+  const shownSymbolRef = useRef(null)
+  const displayCauseRef = useRef(null)
   const workstationState = useFuturesProductionWorkstation({
     enabled,
     symbol,
@@ -121,6 +128,45 @@ export const FuturesProductionWorkstation = ({
     wsConnection,
     sendMessage,
   })
+
+  useEffect(() => {
+    reportDisplayEventRef.current = (payload) => {
+      if (!enabled || typeof sendMessage !== 'function') return
+      try {
+        sendMessage({ action: 'report_display_event', ...payload })
+      } catch {
+        // Reporting only: the desk never waits on its own diagnostics.
+      }
+    }
+  }, [enabled, sendMessage])
+
+  // The contract the operator is actually looking at, stated whenever it
+  // changes. `restored` is a symbol this component initialized from storage —
+  // a mount, a remount after an activation flap — and `operator` is a click or
+  // a quick-switch pick. The distinction is the point: on 2026-08-28 a remount
+  // that reopened the previous pair was indistinguishable from a selection
+  // nobody made, and the journal had nothing to say about either.
+  useEffect(() => {
+    const from = shownSymbolRef.current
+    if (from === symbol) return
+    shownSymbolRef.current = symbol
+    const cause = displayCauseRef.current ?? 'restored'
+    displayCauseRef.current = null
+    reportDisplayEventRef.current?.({ event: 'symbol-shown', symbol, from, cause })
+  }, [symbol])
+
+  useEffect(() => {
+    reportDisplayEventRef.current?.({
+      event: 'workspace-mounted',
+      symbol: shownSymbolRef.current,
+    })
+    return () => {
+      reportDisplayEventRef.current?.({
+        event: 'workspace-unmounted',
+        symbol: shownSymbolRef.current,
+      })
+    }
+  }, [])
   const selectedContract = workstationState.resources.catalog?.contracts?.find(
     contract => contract.symbol === symbol,
   ) ?? null
@@ -163,6 +209,7 @@ export const FuturesProductionWorkstation = ({
   }, [])
 
   const handleSymbolChange = useCallback((nextSymbol) => {
+    displayCauseRef.current = 'operator'
     setDraftPrice(null)
     setDraftPriceReading(null)
     setGestureRequest(null)

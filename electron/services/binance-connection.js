@@ -4899,9 +4899,17 @@ export function setupBinanceConnection({
 
         const connection = request.accept(null, request.origin);
         logger.info("Connection accepted.");
-        
+
         // Track this renderer connection
         rendererConnections.add(connection);
+        // The one record of the local link's lifecycle. A workspace that
+        // remounts on a link flap is unexplainable without this line, and the
+        // count beside it is what says a second window or a leaked subscriber
+        // is listening where one renderer is expected.
+        diagnosticRecord.record('link', {
+            event: 'renderer-connected',
+            connections: rendererConnections.size,
+        });
 
         // Two lanes out of here from this point on: account traffic ahead of
         // market data, and market data replaced rather than stacked when this
@@ -5038,21 +5046,25 @@ export function setupBinanceConnection({
         const marketStreamManager = channelManager.getMarketStreamManager();
         const futuresProductionWorkstationRuntime = futuresCredentialsReady
             ? createFuturesProductionWorkstationRuntime({
-                onTiming: ({ phase, durationMs, outcome, cache, code = null }) => {
+                onTiming: ({ phase, durationMs, outcome, cache, code = null, symbol = null }) => {
                     logger.info(
                         `[futures-production-workstation:timing] ${phase} ${durationMs}ms ${outcome}`
                         + (cache === null ? '' : ` cache=${cache}`)
-                        + (code === null ? '' : ` code=${code}`),
+                        + (code === null ? '' : ` code=${code}`)
+                        + (symbol === null ? '' : ` symbol=${symbol}`),
                     );
-                    diagnosticRecord.record('timing', { phase, durationMs, outcome, cache, code });
+                    diagnosticRecord.record('timing', { phase, durationMs, outcome, cache, code, symbol });
                 },
                 // The faults the desk absorbs without telling the operator: a
                 // book that could not bridge, a recovery, a rejected frame, a
                 // history read that failed. A timing line says a phase ended
                 // badly; only this says what was wrong with it.
-                onInternalError: ({ phase, code }) => {
-                    logger.warn(`[futures-production-workstation:fault] ${phase} ${code}`);
-                    diagnosticRecord.record('fault', { phase, code });
+                onInternalError: ({ phase, code, symbol = null }) => {
+                    logger.warn(
+                        `[futures-production-workstation:fault] ${phase} ${code}`
+                        + (symbol === null ? '' : ` symbol=${symbol}`),
+                    );
+                    diagnosticRecord.record('fault', { phase, code, symbol });
                 },
             })
             : null;
@@ -8459,6 +8471,23 @@ export function setupBinanceConnection({
                 });
                 return;
             }
+            // What the renderer says the screen switched to, and why. Answered
+            // beside the frame marks and under the same rules: it reaches no
+            // exchange, moves no order, and the record's own field rules are
+            // the validation — a malformed report loses its line and no more.
+            // The workstation's frames say what was delivered; only the
+            // renderer can say what is being looked at, and a remount that
+            // reopened the previous contract is indistinguishable from the
+            // operator's own choice without the cause it states here.
+            if (data.action === 'report_display_event') {
+                diagnosticRecord.record('display', {
+                    event: data.event,
+                    symbol: data.symbol ?? null,
+                    from: data.from ?? null,
+                    cause: data.cause ?? null,
+                });
+                return;
+            }
             if (!credentialPreflight.ready) {
                 emit(createCommandRejection(
                     typeof data.action === 'string' ? data.action : data.request || 'startup',
@@ -8649,6 +8678,10 @@ export function setupBinanceConnection({
             rendererOutboxes.get(connection)?.dispose();
             rendererOutboxes.delete(connection);
             rendererConnections.delete(connection);
+            diagnosticRecord.record('link', {
+                event: 'renderer-disconnected',
+                connections: rendererConnections.size,
+            });
             spotRendererConnections.delete(connection);
             futuresRendererConnections.delete(connection);
             futuresHistorySession.disposed = true;

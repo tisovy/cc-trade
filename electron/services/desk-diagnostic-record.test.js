@@ -101,7 +101,12 @@ describe('describeDeskDiagnosticEvent', () => {
         expect(describeDeskDiagnosticEvent('fault', {
             phase: 'book-recovery',
             code: 'DEPTH_SEQUENCE_GAP',
-        })).toEqual({ kind: 'fault', phase: 'book-recovery', code: 'DEPTH_SEQUENCE_GAP' });
+        })).toEqual({
+            kind: 'fault',
+            phase: 'book-recovery',
+            code: 'DEPTH_SEQUENCE_GAP',
+            symbol: null,
+        });
     });
 
     // The answer to a command, which is what makes the command's own line
@@ -928,6 +933,7 @@ describe('what may not reach the record', () => {
             kind: 'fault',
             phase: 'bootstrap',
             code: 'DEPTH_BOOTSTRAP_GAP',
+            symbol: null,
         }]);
     });
 
@@ -1157,12 +1163,14 @@ describe('the record on disk', () => {
                 cache: null,
                 // A phase that did not fail has no reason to state.
                 code: null,
+                symbol: null,
             },
             {
                 at: '2026-08-11T14:20:32.482Z',
                 kind: 'fault',
                 phase: 'stream-frame',
                 code: 'STREAM_FRAME_REFUSED',
+                symbol: null,
             },
         ]);
     });
@@ -1186,6 +1194,7 @@ describe('the record on disk', () => {
                 outcome: 'error',
                 cache: 'miss',
                 code: 'REQUEST_ABORTED',
+                symbol: null,
             },
             {
                 at: '2026-08-11T14:20:32.482Z',
@@ -1197,6 +1206,7 @@ describe('the record on disk', () => {
                 // A reason this file will not repeat costs the reason. Losing
                 // the line instead would lose the fact that it failed at all.
                 code: null,
+                symbol: null,
             },
         ]);
     });
@@ -1236,6 +1246,7 @@ describe('the record on disk', () => {
                 outcome: 'aborted',
                 cache: 'miss',
                 code: 'REQUEST_ABORTED',
+                symbol: null,
             },
             {
                 at: '2026-08-11T14:20:32.182Z',
@@ -1245,6 +1256,7 @@ describe('the record on disk', () => {
                 outcome: 'ok',
                 cache: 'shared',
                 code: null,
+                symbol: null,
             },
             {
                 at: '2026-08-11T14:20:33.182Z',
@@ -1254,6 +1266,7 @@ describe('the record on disk', () => {
                 outcome: 'ok',
                 cache: 'stale',
                 code: null,
+                symbol: null,
             },
         ]);
     });
@@ -1433,5 +1446,153 @@ describe('what the record costs the desk', () => {
         expect(createDeskDiagnosticRecord({ directory: '' })).toBe(DESK_DIAGNOSTICS_UNRECORDED);
         expect(DESK_DIAGNOSTICS_UNRECORDED.record('fault', { phase: 'a', code: 'B' })).toBe(false);
         expect(DESK_DIAGNOSTICS_UNRECORDED.observeOutbound({ command_rejected: {} })).toBe(false);
+    });
+});
+
+// Binance lists USDⓈ-M perpetuals whose tickers are CJK words. On 2026-08-28
+// the operator traded 龙虾USDT while its session resynchronized every fifteen
+// seconds — and the record shows none of it, because the symbol rule read
+// ASCII and a malformed field refuses the whole line. The record reads the
+// same identity alphabet the workstation protocol does, or a storm on such a
+// listing is invisible exactly where the operator would look for it.
+describe('unicode listing symbols', () => {
+    it('keeps a status line for a CJK listing instead of dropping it', () => {
+        expect(describeDeskDiagnosticEvent('status', {
+            symbol: '龙虾USDT',
+            state: 'resynchronizing',
+            code: 'CROSSED_ORDER_BOOK',
+        })).toEqual({
+            kind: 'status',
+            symbol: '龙虾USDT',
+            state: 'resynchronizing',
+            code: 'CROSSED_ORDER_BOOK',
+        });
+    });
+
+    it('keeps a delivery-dated symbol and still refuses shapes that could carry an amount', () => {
+        expect(describeDeskDiagnosticEvent('status', {
+            symbol: 'BTCUSDT_260929',
+            state: 'live',
+            code: null,
+        }).symbol).toBe('BTCUSDT_260929');
+        expect(describeDeskDiagnosticEvent('status', {
+            symbol: '0.0431',
+            state: 'live',
+            code: null,
+        })).toBeNull();
+        expect(describeDeskDiagnosticEvent('status', {
+            symbol: 'btcusdt',
+            state: 'live',
+            code: null,
+        })).toBeNull();
+    });
+});
+
+// The faults and phase timings of 2026-08-28 named no contract: fifteen-second
+// resynchronization cycles read as "the desk's", when the whole storm belonged
+// to one held session. A fault or a timing raised inside a session carries the
+// session's contract; one raised outside any session still keeps its line.
+describe('session-scoped faults and timings', () => {
+    it('carries the symbol a fault names', () => {
+        expect(describeDeskDiagnosticEvent('fault', {
+            phase: 'book-recovery',
+            code: 'DEPTH_BAND_WALKED',
+            symbol: '龙虾USDT',
+        })).toEqual({
+            kind: 'fault',
+            phase: 'book-recovery',
+            code: 'DEPTH_BAND_WALKED',
+            symbol: '龙虾USDT',
+        });
+    });
+
+    it('keeps a fault that names no session', () => {
+        expect(describeDeskDiagnosticEvent('fault', {
+            phase: 'release',
+            code: 'INVALID_CLOCK',
+        })).toEqual({
+            kind: 'fault',
+            phase: 'release',
+            code: 'INVALID_CLOCK',
+            symbol: null,
+        });
+    });
+
+    it('carries the symbol a phase timing belongs to when the caller names one', () => {
+        expect(describeDeskDiagnosticEvent('timing', {
+            phase: 'aggregate-ready',
+            durationMs: 1650,
+            outcome: 'ok',
+            cache: null,
+            code: null,
+            symbol: '龙虾USDT',
+        }).symbol).toBe('龙虾USDT');
+    });
+});
+
+// What the renderer says the screen switched to, and when the local link came
+// and went. The workstation's own frames say what was delivered; only the
+// renderer can say what is being looked at — a remount that reopened the
+// previous contract is indistinguishable from an operator's choice without the
+// cause beside it. Link lines are the one record of renderer sockets at all:
+// on 2026-08-28 the workspace remounted twice in a minute and nothing wrote
+// why, and a doubled frame reporter ran for two hours with nothing counting
+// the sockets it implied.
+describe('display and link lines', () => {
+    it('keeps what the renderer says the screen switched to', () => {
+        expect(describeDeskDiagnosticEvent('display', {
+            event: 'symbol-shown',
+            symbol: '龙虾USDT',
+            from: 'VELVETUSDT',
+            cause: 'restored',
+        })).toEqual({
+            kind: 'display',
+            event: 'symbol-shown',
+            symbol: '龙虾USDT',
+            from: 'VELVETUSDT',
+            cause: 'restored',
+        });
+        expect(describeDeskDiagnosticEvent('display', {
+            event: 'workspace-mounted',
+            symbol: 'VELVETUSDT',
+            from: null,
+            cause: null,
+        })).toEqual({
+            kind: 'display',
+            event: 'workspace-mounted',
+            symbol: 'VELVETUSDT',
+            from: null,
+            cause: null,
+        });
+    });
+
+    it('refuses an event or a cause outside the stated vocabulary', () => {
+        expect(describeDeskDiagnosticEvent('display', {
+            event: 'window-painted',
+            symbol: 'VELVETUSDT',
+            from: null,
+            cause: null,
+        })).toBeNull();
+        expect(describeDeskDiagnosticEvent('display', {
+            event: 'symbol-shown',
+            symbol: 'VELVETUSDT',
+            from: null,
+            cause: 'hmr',
+        })).toBeNull();
+    });
+
+    it('counts renderer links as they come and go', () => {
+        expect(describeDeskDiagnosticEvent('link', {
+            event: 'renderer-connected',
+            connections: 1,
+        })).toEqual({ kind: 'link', event: 'renderer-connected', connections: 1 });
+        expect(describeDeskDiagnosticEvent('link', {
+            event: 'renderer-disconnected',
+            connections: 0,
+        })).toEqual({ kind: 'link', event: 'renderer-disconnected', connections: 0 });
+        expect(describeDeskDiagnosticEvent('link', {
+            event: 'renderer-connected',
+            connections: -1,
+        })).toBeNull();
     });
 });

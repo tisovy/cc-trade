@@ -240,7 +240,7 @@ const operatorConnection = fs.readFileSync(
     path.join(ROOT, 'electron/services/binance-connection.js'),
     'utf8',
 );
-if (!/onInternalError:\s*\(\{\s*phase,\s*code\s*\}\)\s*=>\s*\{[^}]*futures-production-workstation:fault/
+if (!/onInternalError:\s*\(\{\s*phase,\s*code,\s*symbol\s*=\s*null\s*\}\)\s*=>\s*\{[^}]*futures-production-workstation:fault/
     .test(operatorConnection)) {
     fail('The operator connection does not log the faults the workstation absorbs');
 }

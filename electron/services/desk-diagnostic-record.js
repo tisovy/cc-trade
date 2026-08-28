@@ -54,7 +54,18 @@ const SEGMENT_NAME = /^desk-(\d{4}-\d{2}-\d{2})-(\d{3})\.jsonl$/;
 const PHASE = /^[a-z][a-z0-9-]{0,32}(?::\d{1,12})?$/;
 const CODE = /^[A-Z][A-Z0-9_]{0,95}$/;
 const STATE = /^[a-z][a-z-]{0,31}$/;
-const SYMBOL = /^[A-Z0-9]{1,24}$/;
+// The workstation protocol's identity alphabet, not ASCII: Binance lists
+// perpetuals whose tickers are CJK words, and under the ASCII rule every line
+// about one — the statuses naming a resynchronization storm included — lost
+// itself to the malformed-field rule while the operator traded the contract
+// (龙虾USDT, 2026-08-28). Letters without lowercase and numbers still cannot
+// spell a decimal amount: `.` and `-` stay outside the class. The dated
+// alternative is the delivery-contract form.
+const SYMBOL_CHARACTERS = '[\\p{Lu}\\p{Lt}\\p{Lo}\\p{N}]';
+const SYMBOL = new RegExp(
+    `^(?:${SYMBOL_CHARACTERS}{1,24}|${SYMBOL_CHARACTERS}{1,17}_[0-9]{6})$`,
+    'u',
+);
 const ACTION = /^[a-z][A-Za-z0-9._-]{0,63}$/;
 const MARKET = /^[a-z][a-z-]{0,15}$/;
 const SIDE = /^(?:BUY|SELL)$/;
@@ -89,6 +100,15 @@ const RESULT = /^(?:rejected|unresolved|resolved)$/;
 const EXCHANGE_CODE_NUMBER = /^-?\d{1,6}$/;
 const EXCHANGE_CODE_NAME = /^[A-Z][A-Z0-9_]{0,39}$/;
 const EVENT = /^(?:started|stopped)$/;
+// What the renderer reports the screen doing, and why it switched. A closed
+// vocabulary on both: the renderer is the desk's own, but these are still
+// fields a caller chooses the value of.
+const DISPLAY_EVENT = /^(?:symbol-shown|workspace-mounted|workspace-unmounted)$/;
+const DISPLAY_CAUSE = /^(?:operator|restored)$/;
+// A renderer socket arriving or leaving. The count beside it is the sockets
+// open after the event — two where one is expected is a second window or a
+// leaked subscriber, and this line is the only record either has.
+const LINK_EVENT = /^(?:renderer-connected|renderer-disconnected)$/;
 // Why the desk read the signed account. A closed vocabulary rather than free
 // text: a reason the record does not know is a read site that never stated one,
 // and losing that line is how it says so.
@@ -172,16 +192,40 @@ const RECORDED_FIELDS = Object.freeze({
     // three fast rejections it was. `tolerated` rather than `optional` for the
     // same reason the exchange's own refusal code is — a reason in a shape this
     // file will not repeat costs the reason, never the fact that it happened.
+    // `symbol` on both: a fault or a timing raised inside a workstation session
+    // belongs to that session's contract, and without it a held session's storm
+    // reads as the desk's own — 2026-08-28, fifteen-second resynchronization
+    // cycles that named no one. Optional, because the phases outside any
+    // session are real too.
     timing: Object.freeze([
         ['phase', text(PHASE)],
         ['durationMs', count],
         ['outcome', text(OUTCOME)],
         ['cache', optional(text(CACHE))],
         ['code', tolerated(text(CODE))],
+        ['symbol', optional(text(SYMBOL))],
     ]),
     fault: Object.freeze([
         ['phase', text(PHASE)],
         ['code', text(CODE)],
+        ['symbol', optional(text(SYMBOL))],
+    ]),
+    // What the renderer says the screen switched to. The frame lines say what
+    // was delivered; only the renderer can say what is being looked at — a
+    // remount that reopens the previous contract is indistinguishable from the
+    // operator's own choice without the cause beside it.
+    display: Object.freeze([
+        ['event', text(DISPLAY_EVENT)],
+        ['symbol', optional(text(SYMBOL))],
+        ['from', optional(text(SYMBOL))],
+        ['cause', optional(text(DISPLAY_CAUSE))],
+    ]),
+    // A renderer socket arriving or leaving, with the sockets open after it.
+    // The local link was the one lifecycle the record never wrote, and a
+    // workspace that remounts on a link flap looks like a haunting without it.
+    link: Object.freeze([
+        ['event', text(LINK_EVENT)],
+        ['connections', count],
     ]),
     status: Object.freeze([
         ['symbol', text(SYMBOL)],
