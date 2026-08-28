@@ -147,3 +147,46 @@ describe('searchFuturesSymbols', () => {
     expect(searchFuturesSymbols()).toEqual([])
   })
 })
+
+// Binance lists USDⓈ-M perpetuals whose tickers are CJK words — 龙虾USDT traded
+// live on 2026-08-28 — and a history that only read ASCII forgot the contract
+// the operator was standing on: every workspace remount reopened the previous
+// ASCII pair instead. The history reads the same identity alphabet the
+// workstation protocol does.
+describe('unicode listings', () => {
+  const createStorage = (initial = {}) => {
+    const entries = new Map(Object.entries(initial))
+    return {
+      getItem: key => entries.get(key) ?? null,
+      setItem: (key, value) => entries.set(key, value),
+    }
+  }
+
+  it('remembers a CJK perpetual and restores it as the last symbol', () => {
+    const storage = createStorage()
+    let history = readFuturesSymbolHistory(storage)
+    history = rememberFuturesSymbol(history, 'VELVETUSDT')
+    history = rememberFuturesSymbol(history, '龙虾USDT')
+    writeFuturesSymbolHistory(history, storage)
+
+    expect(readFuturesSymbolHistory(storage)).toMatchObject({
+      recent: ['龙虾USDT', 'VELVETUSDT'],
+      lastSymbol: '龙虾USDT',
+    })
+  })
+
+  it('remembers a delivery contract under its dated name', () => {
+    const history = rememberFuturesSymbol(
+      readFuturesSymbolHistory(createStorage()),
+      'BTCUSDT_260929',
+    )
+    expect(history.lastSymbol).toBe('BTCUSDT_260929')
+  })
+
+  it('still refuses spaces, punctuation and fragments', () => {
+    const history = readFuturesSymbolHistory(createStorage())
+    expect(rememberFuturesSymbol(history, 'not a symbol')).toBe(history)
+    expect(rememberFuturesSymbol(history, 'BTC/USDT')).toBe(history)
+    expect(rememberFuturesSymbol(history, 'X')).toBe(history)
+  })
+})

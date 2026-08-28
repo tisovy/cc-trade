@@ -6,6 +6,7 @@ export const FUTURES_READINESS_CODES = Object.freeze({
   TRANSPORT: 'TRANSPORT',
   PAUSED: 'PAUSED',
   CONTRACT: 'CONTRACT',
+  LISTING: 'LISTING',
   METADATA: 'METADATA',
   ACCOUNT_LOADING: 'ACCOUNT_LOADING',
   ACCOUNT_ERROR: 'ACCOUNT_ERROR',
@@ -120,6 +121,7 @@ export const deriveFuturesReadiness = ({
   connected,
   tradingPaused,
   selectedContractTradable,
+  selectedContractUntradableListing = false,
   hasFilters,
   balanceResource,
   availableUsdt,
@@ -152,6 +154,19 @@ export const deriveFuturesReadiness = ({
       'attention',
       'PAUSED',
       'Trading is paused — new orders are blocked until you resume.',
+    )
+  }
+  // A live listing the desk deliberately will not trade — Binance lists
+  // perpetuals whose tickers are outside the execution path's ASCII alphabet
+  // (龙虾USDT and kin). Distinguished from CONTRACT, which reads as "you have
+  // not picked one": the operator is standing on an active contract, watching
+  // its chart, and is owed the real reason the ticket is dark.
+  if (selectedContractUntradableListing) {
+    return result(
+      FUTURES_READINESS_CODES.LISTING,
+      'attention',
+      'LISTING',
+      'Binance lists this contract, but its ticker is outside the desk\'s execution path — orders from the desk are disabled for it.',
     )
   }
   if (!selectedContractTradable) {

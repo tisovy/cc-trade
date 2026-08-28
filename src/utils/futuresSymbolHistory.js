@@ -5,7 +5,16 @@
 export const FUTURES_SYMBOL_HISTORY_STORAGE_KEY = 'cc-trade:futures-symbols:v1'
 export const FUTURES_RECENT_SYMBOL_LIMIT = 9
 
-const SYMBOL_PATTERN = /^[A-Z0-9]{4,20}$/
+// The identity alphabet the workstation protocol reads, not ASCII: Binance
+// lists perpetuals whose tickers are CJK words (龙虾USDT, live 2026-08-28), and
+// a history that could not hold one reopened the previous ASCII pair on every
+// workspace remount — the operator watched the desk leave the contract they
+// were standing on. The dated alternative is the delivery-contract form.
+const SYMBOL_CHARACTERS = '[\\p{Lu}\\p{Lt}\\p{Lo}\\p{N}]'
+const SYMBOL_PATTERN = new RegExp(
+  `^(?:${SYMBOL_CHARACTERS}{4,20}|${SYMBOL_CHARACTERS}{1,13}_[0-9]{6})$`,
+  'u',
+)
 
 const normalizeSymbol = (value) => {
   if (typeof value !== 'string') return null

@@ -33,6 +33,7 @@ describe('deriveFuturesReadiness', () => {
     [{ connected: false }, 'TRANSPORT'],
     [{ tradingPaused: true }, 'PAUSED'],
     [{ selectedContractTradable: false }, 'CONTRACT'],
+    [{ selectedContractTradable: false, selectedContractUntradableListing: true }, 'LISTING'],
     [{ hasFilters: false }, 'METADATA'],
     [{ balanceResource: { status: 'loading' } }, 'ACCOUNT_LOADING'],
     [{ balanceResource: { status: 'error', error: { message: 'permission' } } }, 'ACCOUNT_ERROR'],
@@ -52,6 +53,21 @@ describe('deriveFuturesReadiness', () => {
   // of every read — with a read behind every command, the operator's next order
   // was refused for a number that had not changed and was not in doubt. A first
   // read, which has nothing behind it, still blocks: that is the case above.
+  // Binance lists contracts the desk's execution path does not carry — CJK
+  // tickers like 龙虾USDT, live perpetuals the catalog marks `tradable: false`.
+  // The generic CONTRACT gate told the operator to "select an active contract"
+  // while they were standing on one; the listing gate owes them the real
+  // reason.
+  it('names the execution-path gate on a live listing the desk will not trade', () => {
+    const readiness = deriveFuturesReadiness({
+      ...readyInput,
+      selectedContractTradable: false,
+      selectedContractUntradableListing: true,
+    })
+    expect(readiness).toMatchObject({ code: 'LISTING', label: 'LISTING', ready: false })
+    expect(readiness.reason).toMatch(/execution path/)
+  })
+
   it('stays ready while a balance it already holds is being read again', () => {
     expect(deriveFuturesReadiness({
       ...readyInput,

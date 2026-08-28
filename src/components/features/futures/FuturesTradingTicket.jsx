@@ -361,6 +361,15 @@ const FuturesTradingTicket = ({
 
   const selectedContractTradable = selectedContract?.symbol === selectedSymbol
     && selectedContract?.tradable === true
+  // A contract the catalog carries as live and perpetual, that the desk still
+  // will not trade: the `tradable` gate combines three conditions, and when the
+  // other two hold, what remains is the execution path refusing the ticker
+  // itself — Binance's CJK listings. The readiness gate owes the operator that
+  // reason, not "select an active contract".
+  const selectedContractUntradableListing = selectedContract?.symbol === selectedSymbol
+    && selectedContract?.tradable === false
+    && selectedContract?.status === 'TRADING'
+    && selectedContract?.contractType === 'PERPETUAL'
   const tickSize = selectedContract?.filters?.price?.tickSize
   const stepSize = selectedContract?.filters?.quantity?.stepSize
   const minQuantity = selectedContract?.filters?.quantity?.min
@@ -434,6 +443,7 @@ const FuturesTradingTicket = ({
     startupReady: safeState.startupReady !== false,
     connected: safeState.connected === true,
     selectedContractTradable,
+    selectedContractUntradableListing,
     hasFilters,
     tradingPaused,
     balanceResource,
