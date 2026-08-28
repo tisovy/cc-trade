@@ -31,6 +31,7 @@ import {
 } from './futures-workstation-market-contract.js';
 import {
     FuturesWorkstationOrderBook,
+    FuturesWorkstationOrderBookError,
 } from './futures-workstation-order-book.js';
 import {
     parseFuturesWorkstationDecimal,
@@ -102,8 +103,13 @@ export const FUTURES_PRODUCTION_WORKSTATION_FRAME_REFUSAL = Object.freeze({
 });
 
 // Which stream a frame came from, read without parsing it — the frame that
-// lands here is the one the parser has already refused.
-const DEPTH_STREAM_NAME = /"stream"\s*:\s*"[a-z0-9_]{1,32}@depth/;
+// lands here is one the parser has already refused. The name is read in the
+// exchange's own spelling: a listing's stream carries its ticker as the
+// exchange lists it (龙虾usdt@depth@100ms), raw or as JSON unicode escapes, so
+// the class admits anything up to the quote that ends the name. Read narrower
+// than the exchange, this turned a unicode listing's every book fault into a
+// full session resynchronization (2026-08-28).
+const DEPTH_STREAM_NAME = /"stream"\s*:\s*"(?:[^"\\]|\\u[0-9a-fA-F]{4}){1,96}@depth/;
 const isDepthStreamFrame = raw => (
     typeof raw === 'string' && DEPTH_STREAM_NAME.test(raw.slice(0, 256))
 );
@@ -1670,9 +1676,15 @@ export class FuturesProductionWorkstationService {
         } catch (error) {
             if (!this.isHeld(session)) return;
             this.onInternalError({ phase: 'stream', code: safeCode(error), symbol: session.symbol });
-            // A depth frame the desk could not read is a book problem. Only a
-            // frame from the streams the desk actually trades on — price,
-            // candles, tape — is worth the whole session.
+            // The book's own refusal is a book problem wherever the frame came
+            // from — the throw already names the resource, and needs no reading
+            // of the frame. A depth frame the desk could not read is also only
+            // a book problem. Only a frame from the streams the desk actually
+            // trades on — price, candles, tape — is worth the whole session.
+            if (error instanceof FuturesWorkstationOrderBookError) {
+                void this.recoverBook(session, safeCode(error));
+                return;
+            }
             if (isDepthStreamFrame(raw)) {
                 void this.recoverBook(session, 'MALFORMED_DEPTH_FRAME');
                 return;

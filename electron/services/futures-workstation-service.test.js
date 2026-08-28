@@ -7,6 +7,9 @@ import {
     createFuturesProductionWorkstationFakeTransport,
 } from './futures-production-workstation-fake-transport.js';
 import {
+    createFuturesWorkstationFakeTransport,
+} from './futures-workstation-fake-transport.js';
+import {
     FUTURES_PRODUCTION_WORKSTATION_FIXTURE,
 } from './futures-production-workstation-fixtures.js';
 import {
@@ -1948,6 +1951,181 @@ describe('production Futures workstation service', () => {
         subscriber.onMessage('{"stream":"btcusdt@aggTrade","data":');
         expect(failures.at(-1).phase).toBe('stream');
         expect(events.at(-1)).toMatchObject({ state: 'resynchronizing' });
+    });
+
+    // 2026-08-28, live: the desk's first unicode listing (龙虾USDT) pumped, its
+    // book crossed — a fault the book answers with a quiet rebuild — and the
+    // whole workspace left `live` instead, every 20 to 60 seconds. The catch
+    // routed by the stream's NAME, read in ASCII, so every book fault on a
+    // listing the exchange spells in its own alphabet escalated from the book
+    // to the session. These drive the exact wire the desk saw: raw-unicode
+    // stream names on a live session, from the fixture renamed to the listing.
+    describe('a book fault costs the book, not the session', () => {
+        const LISTING_SYMBOL = '龙虾USDT';
+
+        const renameFixtureValue = (value, rename) => {
+            if (typeof value === 'string') return rename(value);
+            if (typeof value === 'function') {
+                return (...args) => renameFixtureValue(value(...args), rename);
+            }
+            if (Array.isArray(value)) {
+                return value.map(item => renameFixtureValue(item, rename));
+            }
+            if (value && typeof value === 'object') {
+                return Object.fromEntries(Object.entries(value).map(([key, entry]) => [
+                    key,
+                    renameFixtureValue(entry, rename),
+                ]));
+            }
+            return value;
+        };
+
+        const listingFixture = () => {
+            const rename = text => text
+                .replaceAll('BTCUSDT', LISTING_SYMBOL)
+                .replaceAll('btcusdt', LISTING_SYMBOL.toLowerCase());
+            const { BTCUSDT, ...untouched } = FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols;
+            return {
+                ...FUTURES_PRODUCTION_WORKSTATION_FIXTURE,
+                catalog: rename(FUTURES_PRODUCTION_WORKSTATION_FIXTURE.catalog),
+                symbols: { ...untouched, [LISTING_SYMBOL]: renameFixtureValue(BTCUSDT, rename) },
+            };
+        };
+
+        const listingRuntime = () => {
+            const clock = createManualClock();
+            const base = createFuturesWorkstationFakeTransport({
+                fixture: listingFixture(),
+                clock: clock.clock,
+            });
+            let subscriber;
+            const faults = [];
+            const runtime = track(createFuturesProductionWorkstationRuntimeForTest({
+                transport: {
+                    ...base,
+                    connect: (options) => {
+                        subscriber = options;
+                        return base.connect(options);
+                    },
+                },
+                clock: clock.clock,
+                onInternalError: fault => faults.push(fault),
+            }));
+            return { runtime, faults, frame: raw => subscriber.onMessage(raw) };
+        };
+
+        // A diff in sequence with the live book whose bid stands above every
+        // ask: `applyDelta` applies it, reads the cross, and throws the book's
+        // own refusal out of `push`.
+        const crossingDepthFrame = (symbol, lastUpdateId) => {
+            const next = Number(lastUpdateId) + 1;
+            return JSON.stringify({
+                stream: `${symbol.toLowerCase()}@depth@100ms`,
+                data: {
+                    e: 'depthUpdate',
+                    E: 1_784_000_060_200,
+                    T: 1_784_000_060_200,
+                    s: symbol,
+                    U: next,
+                    u: next,
+                    pu: Number(lastUpdateId),
+                    b: [['999999.00', '5.00000000']],
+                    a: [],
+                    ps: symbol,
+                    st: 1,
+                },
+            });
+        };
+
+        it('recovers the book when it crosses on a unicode listing, and keeps the session', async () => {
+            const { runtime, faults, frame } = listingRuntime();
+            const events = [];
+            await runtime.service.handleRequest(productionRequest('listing-cross', LISTING_SYMBOL), {
+                emit: event => events.push(event),
+            });
+            expect(events.at(-1)).toMatchObject({ resource: 'status', state: 'live' });
+            const settled = events.length;
+            const session = runtime.service.shown;
+
+            frame(crossingDepthFrame(LISTING_SYMBOL, session.orderBook.lastUpdateId));
+
+            expect(faults).toContainEqual({
+                phase: 'stream', code: 'CROSSED_ORDER_BOOK', symbol: LISTING_SYMBOL,
+            });
+            expect(faults).toContainEqual({
+                phase: 'book-recovery', code: 'CROSSED_ORDER_BOOK', symbol: LISTING_SYMBOL,
+            });
+            expect(events.slice(settled).map(event => event.state ?? null))
+                .not.toContain('resynchronizing');
+            expect(session.reconnectTimer).toBeNull();
+        });
+
+        it('recovers the book when a depth frame for a unicode listing cannot be read', async () => {
+            const { runtime, faults, frame } = listingRuntime();
+            const events = [];
+            await runtime.service.handleRequest(productionRequest('listing-refused', LISTING_SYMBOL), {
+                emit: event => events.push(event),
+            });
+            expect(events.at(-1)).toMatchObject({ resource: 'status', state: 'live' });
+            const settled = events.length;
+
+            frame(JSON.stringify({
+                stream: `${LISTING_SYMBOL.toLowerCase()}@depth@100ms`,
+                data: {
+                    e: 'depthUpdate',
+                    E: 1_784_000_060_200,
+                    T: 1_784_000_060_200,
+                    s: LISTING_SYMBOL,
+                    U: 9_000,
+                    u: 9_001,
+                    pu: 8_999,
+                    b: 'not-a-ladder',
+                    a: [],
+                    ps: LISTING_SYMBOL,
+                    st: 1,
+                },
+            }));
+
+            expect(faults).toContainEqual({
+                phase: 'book-recovery', code: 'MALFORMED_DEPTH_FRAME', symbol: LISTING_SYMBOL,
+            });
+            expect(events.slice(settled).map(event => event.state ?? null))
+                .not.toContain('resynchronizing');
+            expect(runtime.service.shown.reconnectTimer).toBeNull();
+        });
+
+        // The routing is by the error's identity, not the stream's spelling:
+        // an ASCII major's crossed book now recovers under the fault's own
+        // name rather than the generic malformed-frame one.
+        it('names the cross on an ASCII contract instead of a generic refusal', async () => {
+            const base = createFuturesProductionWorkstationFakeTransport();
+            let subscriber;
+            const clock = createManualClock();
+            const faults = [];
+            const runtime = track(createFuturesProductionWorkstationRuntimeForTest({
+                transport: {
+                    ...base,
+                    connect: (options) => {
+                        subscriber = options;
+                        return base.connect(options);
+                    },
+                },
+                clock: clock.clock,
+                onInternalError: fault => faults.push(fault),
+            }));
+            const events = [];
+            await runtime.service.handleRequest(productionRequest('ascii-cross'), {
+                emit: event => events.push(event),
+            });
+            const session = runtime.service.shown;
+
+            subscriber.onMessage(crossingDepthFrame('BTCUSDT', session.orderBook.lastUpdateId));
+
+            expect(faults).toContainEqual({
+                phase: 'book-recovery', code: 'CROSSED_ORDER_BOOK', symbol: 'BTCUSDT',
+            });
+            expect(events.at(-1)).not.toMatchObject({ state: 'resynchronizing' });
+        });
     });
 
     // A frame the desk refused on its own ceiling is not the market going quiet
