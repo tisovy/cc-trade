@@ -263,6 +263,35 @@ describe('readFuturesTradeHistoryWindow', () => {
         expect(readWindow).toHaveBeenCalledTimes(1);
     });
 
+    // 2026-08-28: the operator's account holds real trades on the exchange's
+    // own unicode listing (龙虾USDT — traded from the Binance app; the desk's
+    // execution path deliberately will not place them). The read side refused
+    // the symbol outright — «A valid expected trade-history symbol is
+    // required» on every request, retried forever — so the history could not
+    // read a contract the account demonstrably traded. Reading is not
+    // executing: evidence reads the exchange's identity alphabet.
+    it('reads a unicode listing the account actually traded', async () => {
+        const result = await readFuturesTradeHistoryWindow({
+            readWindow: async () => [trade(1, 10_000, '龙虾USDT')],
+            startTime: 10_000,
+            endTime: 11_000,
+            expectedSymbol: '龙虾USDT',
+        });
+
+        expect(result.rows).toHaveLength(1);
+        expect(result.rows[0].symbol).toBe('龙虾USDT');
+        expect(result.coverage.complete).toBe(true);
+    });
+
+    it('still rejects a foreign contract against a unicode expectation', async () => {
+        await expect(readFuturesTradeHistoryWindow({
+            readWindow: async () => [trade(1, 10_000, 'VELVETUSDT')],
+            startTime: 10_000,
+            endTime: 11_000,
+            expectedSymbol: '龙虾USDT',
+        })).rejects.toMatchObject({ code: 'FOREIGN_TRADE_SYMBOL' });
+    });
+
     it.each([
         ['numeric trade identity', { id: 2 }, 'INVALID_TRADE_IDENTITY'],
         ['missing order identity', { orderId: null }, 'INVALID_TRADE_IDENTITY'],

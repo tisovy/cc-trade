@@ -33,10 +33,16 @@ const canonicalUpperText = (value, maximum, pattern) => {
   return normalized !== '' && pattern.test(normalized) ? normalized : null
 }
 
+// The exchange's identity alphabet — uppercase, titlecase and caseless
+// letters and numbers, with the delivery-dated underscore — because the
+// account provably holds trades on unicode listings (龙虾USDT) that the
+// desk's own, deliberately ASCII, execution path will never place. Reading
+// is not executing: refusing the symbol here refused the operator's own
+// history (2026-08-28) while still spelling amounts impossible.
 export const normalizeFuturesTradeHistorySymbol = value => canonicalUpperText(
   value,
   FUTURES_TRADE_EVIDENCE_LIMITS.SYMBOL,
-  /^[A-Z0-9_]+$/,
+  /^[\p{Lu}\p{Lt}\p{Lo}\p{N}_]+$/u,
 )
 
 const canonicalAsset = value => canonicalUpperText(
