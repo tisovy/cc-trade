@@ -69,7 +69,6 @@ const EXCHANGE_SYMBOL_PATTERN = new RegExp(
     'u',
 );
 const EXCHANGE_PAIR_PATTERN = new RegExp(`^${EXCHANGE_IDENTITY_CHARACTERS}{1,20}$`, 'u');
-const ASCII_EXECUTION_SYMBOL_PATTERN = /^(?:[A-Z0-9]{1,20}|[A-Z0-9]{1,13}_[0-9]{6})$/;
 const isStatus = value => isBoundedString(value, /^[A-Z0-9_]{1,32}$/, 32);
 const isExchangeIdentity = (value, maximum, allowDeliverySuffix = false) => {
     if (typeof value !== 'string'
@@ -342,8 +341,13 @@ export const normalizeFuturesWorkstationExchangeInfo = (text) => {
             baseAsset: symbol.baseAsset,
             quoteAsset: symbol.quoteAsset,
             marginAsset: symbol.marginAsset,
-            tradable: ASCII_EXECUTION_SYMBOL_PATTERN.test(symbol.symbol)
-                && symbol.status === 'TRADING'
+            // Admission above has already spelled the symbol in the
+            // exchange's identity alphabet; the desk trades what it
+            // catalogues. A second, narrower execution alphabet held the
+            // operator's own listing dark (龙虾USDT, 2026-08-28) while the
+            // account carried working orders and positions beside it —
+            // removed on the operator's word.
+            tradable: symbol.status === 'TRADING'
                 && symbol.contractType === 'PERPETUAL',
             filters,
         }));

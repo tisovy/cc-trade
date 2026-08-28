@@ -208,7 +208,11 @@ describe('official Futures workstation market schemas', () => {
         });
     });
 
-    it('normalizes current metadata and bounded Unicode public symbols without execution authority', () => {
+    // The desk trades what it catalogues: since 2026-08-28 (operator's word,
+    // standing on 龙虾USDT with working orders beside a dark ticket) there is
+    // no second, narrower execution alphabet — a catalogued live perpetual is
+    // tradable however the exchange spells it.
+    it('normalizes current metadata and trades bounded Unicode symbols the exchange lists', () => {
         const source = JSON.parse(FUTURES_PRODUCTION_WORKSTATION_FIXTURE.catalog);
         for (const symbol of source.symbols) {
             symbol.maxMoveOrderLimit = 1_000;
@@ -260,7 +264,7 @@ describe('official Futures workstation market schemas', () => {
         expect(catalog.find(contract => contract.symbol === '测试测试USDT')).toMatchObject({
             pair: '测试测试USDT',
             baseAsset: '测试测试',
-            tradable: false,
+            tradable: true,
         });
     });
 

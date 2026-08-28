@@ -53,11 +53,12 @@ describe('deriveFuturesReadiness', () => {
   // of every read — with a read behind every command, the operator's next order
   // was refused for a number that had not changed and was not in doubt. A first
   // read, which has nothing behind it, still blocks: that is the case above.
-  // Binance lists contracts the desk's execution path does not carry — CJK
-  // tickers like 龙虾USDT, live perpetuals the catalog marks `tradable: false`.
-  // The generic CONTRACT gate told the operator to "select an active contract"
-  // while they were standing on one; the listing gate owes them the real
-  // reason.
+  // Since 2026-08-28 the desk trades every contract it catalogues (龙虾USDT
+  // included), so a live perpetual delivered as `tradable: false` is a
+  // divergence between the catalog's and the execution path's spelling —
+  // expected never to happen again. If it does, the generic CONTRACT gate
+  // would tell the operator to "select an active contract" while they are
+  // standing on one; the listing gate owes them the real reason.
   it('names the execution-path gate on a live listing the desk will not trade', () => {
     const readiness = deriveFuturesReadiness({
       ...readyInput,

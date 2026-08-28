@@ -362,10 +362,11 @@ const FuturesTradingTicket = ({
   const selectedContractTradable = selectedContract?.symbol === selectedSymbol
     && selectedContract?.tradable === true
   // A contract the catalog carries as live and perpetual, that the desk still
-  // will not trade: the `tradable` gate combines three conditions, and when the
-  // other two hold, what remains is the execution path refusing the ticker
-  // itself — Binance's CJK listings. The readiness gate owes the operator that
-  // reason, not "select an active contract".
+  // will not trade. Since 2026-08-28 the desk trades every contract it
+  // catalogues, so this combination is a divergence guard that is expected
+  // never to fire — but if the two spellings ever part ways again, the
+  // readiness gate owes the operator that reason, not "select an active
+  // contract".
   const selectedContractUntradableListing = selectedContract?.symbol === selectedSymbol
     && selectedContract?.tradable === false
     && selectedContract?.status === 'TRADING'

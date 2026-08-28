@@ -699,7 +699,7 @@ describe('production Futures workstation service', () => {
         expect(events.flatMap(event => event.resource === 'catalog'
             ? event.payload.contracts
             : []).find(contract => contract.symbol === '测试测试USDT')).toMatchObject({
-            tradable: false,
+            tradable: true,
         });
         expect(events.at(-1)).toMatchObject({ resource: 'status', state: 'live' });
     });
