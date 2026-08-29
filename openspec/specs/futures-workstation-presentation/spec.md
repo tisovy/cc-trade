@@ -230,7 +230,17 @@ The market switch SHALL render whenever at least one market is configured. A mar
 - **THEN** the blocking configuration screen replaces the selector and switch entirely
 
 ### Requirement: The instrument rail reflects what is actually traded
-The workstation SHALL persist recently selected contracts, favourites, and the last selected contract. It SHALL restore the last selected contract on startup and SHALL order the contract catalogue by recency, then favourites, then alphabetically.
+The workstation SHALL persist recently selected contracts, favourites, and the
+last selected contract. It SHALL restore the last selected contract on startup
+and SHALL order the contract catalogue by recency, then favourites, then
+alphabetically.
+
+The history SHALL read the same identity alphabet the workstation protocol
+selects by — uppercase, titlecase and caseless letters and numbers, with the
+dated delivery-contract form — so any contract the operator can stand on is a
+contract the history can hold. A history narrower than the protocol reopened
+the previous ASCII pair on every remount while the operator worked a CJK
+listing (龙虾USDT, 2026-08-28).
 
 #### Scenario: Operator reopens the workstation
 - **WHEN** the operator restarts the application after trading a contract
@@ -239,6 +249,10 @@ The workstation SHALL persist recently selected contracts, favourites, and the l
 #### Scenario: Catalogue is displayed
 - **WHEN** the contract list is rendered
 - **THEN** recently traded contracts appear first in the single contract list, without a second strip repeating the same entries
+
+#### Scenario: The operator was standing on a CJK listing
+- **WHEN** the workspace remounts — a restart, an activation flap, a reconnect — while a CJK-ticker contract is selected
+- **THEN** the workstation reopens that contract, not the previously selected ASCII pair
 
 ### Requirement: Interface scale is adjustable and persisted
 The workstation SHALL express its type sizes against a persisted interface scale
@@ -3278,3 +3292,80 @@ what the operator opened the panel to see.
 
 - **WHEN** the operator opens the Aggregate trades settings
 - **THEN** the panel states that its throttle and timeout also bound how often open positions are repriced, and that marks keep their own once-a-second cadence
+
+### Requirement: A live listing outside the execution path names itself
+When the selected contract is catalogued, trading and perpetual, and the desk
+still will not trade it — the execution path's alphabet excludes its ticker —
+the order ticket SHALL state that as its own readiness gate, distinct from the
+gate that means no active contract is selected. The refusal is deliberate and
+SHALL read as one: the operator standing on a live chart is owed the reason the
+ticket is dark, not an instruction to select what is already selected.
+
+#### Scenario: The operator opens a CJK-ticker perpetual
+- **WHEN** the catalogue delivers the contract as trading, perpetual and not tradable
+- **THEN** the ticket's readiness gate reads LISTING with a reason naming the execution path, and order entry stays disabled
+
+#### Scenario: No contract is selected at all
+- **WHEN** the selected symbol has no catalogued contract behind it
+- **THEN** the CONTRACT gate reads exactly as before this change
+
+### Requirement: A fault of the book costs the book, not the session
+
+When reading a stream frame raises the order book's own refusal — a crossed
+book, an update the book's rules reject — the workstation SHALL rebuild the
+book and nothing else, under the refusal's own code, whatever stream the frame
+arrived on and however its name is spelled. A depth-stream frame the desk
+cannot read SHALL likewise cost only the book, and the stream's name SHALL be
+read in the exchange's own spelling, so a unicode listing's depth frames are
+depth frames. Only an unreadable frame from the traded streams — price,
+candles, tape — is worth the whole session.
+
+Classified by an ASCII name instead, a unicode listing's every crossed book
+became a full resynchronization: on 2026-08-28 the workspace on 龙虾USDT left
+`live` every 20 to 60 seconds while the pair pumped, ~90 weight a round, for a
+fault the book had already contained.
+
+#### Scenario: The book crosses on a unicode listing
+
+- **WHEN** a depth diff leaves the book crossed on a contract whose ticker the exchange spells outside ASCII
+- **THEN** the book recovers under `CROSSED_ORDER_BOOK`, and the session neither resynchronizes nor leaves `live`
+
+#### Scenario: A depth frame for a unicode listing cannot be read
+
+- **WHEN** a frame from the listing's depth stream is refused by the parser
+- **THEN** the book recovers under `MALFORMED_DEPTH_FRAME`, exactly as it would for an ASCII contract
+
+#### Scenario: A traded stream's frame cannot be read
+
+- **WHEN** a frame that is not from the depth stream cannot be read
+- **THEN** the session resynchronizes under `MALFORMED_STREAM_FRAME`, exactly as before this change
+
+### Requirement: The desk trades every contract it catalogues
+
+A contract the catalogue admits — its symbol spelled in the exchange's
+identity alphabet — that is `TRADING` and `PERPETUAL` SHALL be tradable from
+the desk: the order ticket's readiness SHALL treat it exactly as any ASCII
+major, with no separate execution alphabet. The desk maintains one spelling of
+what a contract is; a second, narrower spelling held the operator's own
+listing dark on 2026-08-28 while the account already carried 23 working
+orders and two positions beside it.
+
+The LISTING readiness gate remains defined for a contract delivered
+catalogued, trading and perpetual yet not tradable — after this change a
+divergence guard that is expected never to fire, and owed its honest reason
+if it ever does.
+
+#### Scenario: The operator opens a unicode perpetual
+
+- **WHEN** the catalogue delivers a CJK-ticker contract as `TRADING` and `PERPETUAL`
+- **THEN** the contract is tradable, the ticket shows no LISTING gate, and order entry follows the same readiness ladder as any contract
+
+#### Scenario: A delivery-dated or non-trading contract
+
+- **WHEN** the catalogue delivers a contract that is not `TRADING` or not `PERPETUAL`
+- **THEN** it is not tradable, exactly as before this change
+
+#### Scenario: Client order ids stay in the exchange's id charset
+
+- **WHEN** an order on a unicode listing is placed, modified, or cancelled
+- **THEN** every client order id the desk sends satisfies the exchange's ASCII id rule, because ids are never derived from the symbol
