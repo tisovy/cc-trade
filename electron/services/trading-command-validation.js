@@ -18,6 +18,7 @@ import {
     normalizeFuturesFeeValuationMinutes,
     normalizeFuturesFeeValuationPair,
 } from './futures-fee-valuation.js';
+import { normalizeFuturesTradeHistorySymbol } from '../../src/utils/futuresTradeHistoryEvidence.js';
 
 const SUPPORTED_MARKET_TYPES = new Set([SPOT_MARKET_TYPE, FUTURES_MARKET_TYPE]);
 const FUTURES_ORDER_TYPES = new Set(['LIMIT', 'MARKET']);
@@ -116,8 +117,11 @@ const normalizeFuturesHistoryCoverage = (value) => {
     const entries = [];
     for (const [rawSymbol, rawCoverage] of Object.entries(value)) {
         if (entries.length >= FUTURES_HISTORY_COVERAGE_LIMIT) break;
-        const symbol = normalizeTextField(rawSymbol)?.toUpperCase();
-        if (!symbol || !/^[A-Z0-9]{2,24}$/.test(symbol)) continue;
+        // The coverage the renderer already holds is keyed by the exchange's
+        // own spelling — a narrower alphabet here silently discarded 龙虾USDT's
+        // entry and made every history command re-read the pair from scratch.
+        const symbol = normalizeFuturesTradeHistorySymbol(rawSymbol);
+        if (!symbol) continue;
         if (!isCommandPayloadObject(rawCoverage)) continue;
         if (!Number.isSafeInteger(rawCoverage.readAt) || rawCoverage.readAt < 0) continue;
         const tradeCoverage = normalizeFuturesTradeCoverage(rawCoverage.tradeCoverage);

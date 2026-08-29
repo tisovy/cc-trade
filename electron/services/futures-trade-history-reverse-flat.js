@@ -6,16 +6,18 @@
 // answers the only safe early-stop question: was every key exactly flat at the
 // same left boundary?
 
+import { normalizeFuturesTradeHistorySymbol } from '../../src/utils/futuresTradeHistoryEvidence.js';
+
 const POSITION_LEGS = new Set(['BOTH', 'LONG', 'SHORT'])
 const MAX_QUANTITY_TEXT_LENGTH = 64
 const QUANTITY_ATOM_DIGITS = 8
 const QUANTITY_SCALE = 10n ** BigInt(QUANTITY_ATOM_DIGITS)
 
-const canonicalSymbol = value => {
-    if (typeof value !== 'string' || value.length === 0 || value.length > 32) return null;
-    const symbol = value.trim().toUpperCase();
-    return /^[A-Z0-9_]+$/.test(symbol) ? symbol : null;
-};
+// One spelling rule with the evidence this proof reconciles — the exchange's
+// identity alphabet, not ASCII. A private alphabet here disqualified 龙虾USDT
+// before its rows were even looked at, so the pair's flat boundary was
+// unprovable and its history could never stop early.
+const canonicalSymbol = normalizeFuturesTradeHistorySymbol;
 
 const canonicalLeg = value => {
     if (typeof value !== 'string') return null;

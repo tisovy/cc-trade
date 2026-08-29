@@ -156,11 +156,12 @@ export const deriveFuturesReadiness = ({
       'Trading is paused — new orders are blocked until you resume.',
     )
   }
-  // A live listing the desk deliberately will not trade — Binance lists
-  // perpetuals whose tickers are outside the execution path's ASCII alphabet
-  // (龙虾USDT and kin). Distinguished from CONTRACT, which reads as "you have
-  // not picked one": the operator is standing on an active contract, watching
-  // its chart, and is owed the real reason the ticket is dark.
+  // Since 2026-08-28 the desk trades every contract it catalogues (龙虾USDT
+  // included), so a live perpetual delivered as untradable is a divergence
+  // between the catalog's and the execution path's spelling — expected never
+  // to fire. Distinguished from CONTRACT, which reads as "you have not picked
+  // one": the operator is standing on an active contract, watching its chart,
+  // and is owed the real reason the ticket is dark.
   if (selectedContractUntradableListing) {
     return result(
       FUTURES_READINESS_CODES.LISTING,

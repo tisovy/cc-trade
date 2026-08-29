@@ -90,6 +90,31 @@ describe('proveFuturesTradeHistoryReverseFlat', () => {
         });
     });
 
+    // The proof reconciles evidence spelled by the exchange. A private ASCII
+    // alphabet disqualified 龙虾USDT before its rows were even looked at, so
+    // the pair's flat boundary was unprovable and its history never stopped
+    // early.
+    it('proves a flat boundary for a unicode listing', () => {
+        expect(proveFuturesTradeHistoryReverseFlat({
+            symbol: '龙虾USDT',
+            positions: [{ symbol: '龙虾USDT', positionSide: 'BOTH', quantity: '3' }],
+            rows: [{
+                id: '1',
+                symbol: '龙虾USDT',
+                side: 'BUY',
+                positionSide: 'BOTH',
+                quantity: '3',
+                time: 2_000,
+            }],
+            coverage: coverage(),
+        })).toEqual({
+            proven: true,
+            boundary: 1_000,
+            positionKeys: ['龙虾USDT:BOTH'],
+            reason: null,
+        });
+    });
+
     it('does not mistake a forward-only zero for an unknown left flat edge', () => {
         const result = proveFuturesTradeHistoryReverseFlat({
             symbol: 'BTCUSDT',

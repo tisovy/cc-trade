@@ -27,7 +27,13 @@ const LANE_STATUSES = new Set(['idle', 'loading', 'ready', 'stale', 'error']);
 const INTEGER_TEXT = /^-?\d+$/;
 const DECIMAL_TEXT = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/;
 const CANONICAL_INCOME_TYPE_TEXT = /^[A-Z0-9_]+$/;
-const CANONICAL_SYMBOL_TEXT = /^[A-Z0-9_]+$/;
+// The exchange's identity alphabet, not ASCII: Binance lists perpetuals whose
+// tickers are CJK words (龙虾USDT), and their funding and insurance entries
+// name that spelling — under an ASCII rule the ledger silently dropped the
+// operator's own money. Types and assets stay the exchange's ASCII enums, and
+// the alphabet holds no lowercase class, so a case-foldable token (ſ, ı, ﬁ)
+// is still rejected in its original form.
+const CANONICAL_SYMBOL_TEXT = /^[\p{Lu}\p{Lt}\p{Lo}\p{N}_]+$/u;
 const CANONICAL_ASSET_TEXT = /^[A-Z0-9]+$/;
 const SAFE_ERROR_CODE_TEXT = /^(?:-?\d{1,10}|[A-Z][A-Z0-9_]{0,63})$/;
 const MAX_IDENTIFIER_TEXT_LENGTH = 64;

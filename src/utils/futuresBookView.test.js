@@ -26,6 +26,14 @@ describe('futures book view store', () => {
     expect(readStoredBookView('ETHUSDT')).toEqual(FUTURES_BOOK_VIEW_DEFAULT)
   })
 
+  // The exchange lists perpetuals whose tickers are CJK words; an ASCII key
+  // silently refused to remember how the operator reads their books.
+  it('remembers how a unicode listing is read', () => {
+    writeStoredBookView('龙虾USDT', { sideMode: 'asks', stepMultiplier: 100 })
+
+    expect(readStoredBookView('龙虾USDT')).toEqual({ sideMode: 'asks', stepMultiplier: 100 })
+  })
+
   // Restored entries are operator input that outlived a restart, so they are
   // validated exactly like fresh input.
   it('refuses an entry it cannot honour instead of applying it', () => {

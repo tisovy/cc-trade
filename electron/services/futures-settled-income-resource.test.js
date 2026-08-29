@@ -501,6 +501,35 @@ describe('the canonical settled-income v2 resource', () => {
         });
     });
 
+    // Binance lists perpetuals whose tickers are CJK words, and their funding
+    // entries name that spelling. Under an ASCII symbol alphabet the whole row
+    // was silently dropped — no error, no lane failure, the ledger just
+    // missed the operator's money.
+    it('canonicalizes a funding entry naming a unicode listing', () => {
+        const row = canonicalFuturesIncomeRow(incomeRow({
+            id: '406',
+            symbol: '龙虾USDT',
+        }));
+        expect(row).toMatchObject({
+            incomeType: 'FUNDING_FEE',
+            symbol: '龙虾USDT',
+            asset: 'USDT',
+            income: '-1',
+        });
+        // A row without a transaction id falls back to the content-derived
+        // identity, which must spell the listing exactly.
+        expect(canonicalFuturesIncomeRow(incomeRow({
+            id: null,
+            symbol: '龙虾USDT',
+        })).identity).toContain('龙虾USDT');
+
+        // The wider alphabet still never trims a padded spelling into money.
+        expect(canonicalFuturesIncomeRow(incomeRow({
+            id: '407',
+            symbol: ' 龙虾USDT',
+        }))).toBeNull();
+    });
+
     it.each([
         ['income type', { incomeType: 'FUNDING FEE' }],
         ['symbol', { symbol: 'BTC/USDT' }],

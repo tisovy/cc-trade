@@ -18,7 +18,9 @@ export const FUTURES_BOOK_VIEW_DEFAULT = Object.freeze({ sideMode: 'both', stepM
 // year of browsing from growing one unbounded key.
 export const FUTURES_BOOK_VIEW_MAX_CONTRACTS = 64
 
-const SYMBOL_PATTERN = /^[A-Z0-9_]{1,32}$/
+// The exchange's identity alphabet, not ASCII — the operator zooms 龙虾USDT's
+// book too, and an ASCII key silently refused to remember how.
+const SYMBOL_PATTERN = /^[\p{Lu}\p{Lt}\p{Lo}\p{N}_]{1,32}$/u
 const SIDE_MODES = new Set(FUTURES_BOOK_SIDE_MODES)
 const MULTIPLIERS = new Set(GROUPING_MULTIPLIERS)
 

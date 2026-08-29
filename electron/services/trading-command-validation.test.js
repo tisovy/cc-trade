@@ -754,6 +754,30 @@ describe('backend trading command validation', () => {
         expect(result.command.full).toBe(true);
     });
 
+    // The coverage the renderer holds is keyed by the exchange's own spelling.
+    // An ASCII alphabet here silently discarded 龙虾USDT's entry, so every
+    // history command re-read the pair from scratch.
+    it('keeps history coverage keyed by a unicode listing', () => {
+        const result = validateTypedTradingCommand({
+            action: TRADING_COMMAND_ACTIONS.ACCOUNT_HISTORY,
+            version: TRADE_COMMAND_VERSION,
+            marketType: 'futures',
+            accountId: 'default',
+            clientOrderId: 'history-unicode',
+            symbol: '龙虾USDT',
+            coverage: {
+                '龙虾USDT': { readAt: 300, orderCursor: '7', tradeCursor: '8' },
+            },
+        });
+
+        expect(result.ok).toBe(true);
+        expect(result.command.coverage['龙虾USDT']).toEqual({
+            readAt: 300,
+            orderCursor: '7',
+            tradeCursor: '8',
+        });
+    });
+
     // Reading a contract's configuration touches nothing, so it may fall back to
     // the contract on screen — unlike setting leverage, which may not.
     it('accepts a contract configuration read and refuses it for spot', () => {
