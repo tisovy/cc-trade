@@ -933,3 +933,35 @@ two separate changes: (a) coalesce or cheapen the orders/account commit path
 under a fill burst so frames draw inside their budget; (b) keep standing
 headroom for command-class weight under the ceiling and thin the standing
 refresh while the private stream is already carrying the fills.
+
+### The night the fix went live in halves — 2026-08-31
+
+The main-process half of `keep-the-desk-live-through-a-fill-burst` reached
+the operator's desk mid-session: the 40-weight command reserve (`44986d3`,
+21:58Z / 00:58 desk time) and the stream-deferred reconcile beat
+(`b796347`, 22:11Z). Each deploy restarted the live desk — the operator was
+still trading — and the accumulated order book was wiped both times. Rule
+reaffirmed: **the renderer half deploys only on the operator's word that
+the desk may restart.** The reserve was seen working the same night:
+ordinary reads deferring at `spent: 740–777` against the 760 line while
+commands kept the reserve, and the "Cancellation NOT confirmed" popups the
+operator caught at 20:44–20:46Z were traced to cancels waiting 23–35 s
+behind a `spent: 800/800` window — the exchange cancelled everything; the
+renderer's 15 s answer deadline expired first. The reserve closes exactly
+that path.
+
+**Defect observed, pre-existing, unowned — the SKRUSDT book-recovery
+loop.** The operator reported the book "показывает ближайшие числа, а
+должен больше … то появляется, то пропадает". Journal
+(`desk-2026-08-30-002.jsonl`, `fault` lines, phase `book-recovery`):
+`DEPTH_RANGE_SHORT` → `CROSSED_ORDER_BOOK` ×3 → `DEPTH_BOOK_DOWN` cycles
+at 23/31/31/38 per hour across 18–21Z — the same rate before and after the
+night's commits, so the loop is not theirs; it ran through the whole
+trading session (SKRUSDT, once MAGMAUSDT). Each `BOOK_DOWN` resyncs the
+book from the REST snapshot, so the accumulated depth (the book is the
+stream, not the page) never grows past a couple of minutes — that is the
+"nearest numbers only" the operator sees. Depth reads themselves are not
+deferred (394–1355 ms in the console; journal deferrals are account reads).
+Needs its own change: why a fast alt book crosses within seconds of every
+resync, and whether recovery can keep the accumulated far levels instead
+of starting the book from the page.
