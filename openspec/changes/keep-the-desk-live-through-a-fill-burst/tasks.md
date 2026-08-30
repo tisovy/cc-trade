@@ -16,7 +16,7 @@
 
 ## 1. The budget answers the hand (main process)
 
-- [ ] 1.1 `RateLimiter`: `reservationWait()`/booking take the request's
+- [x] 1.1 `RateLimiter`: `reservationWait()`/booking take the request's
       standing; ordinary capacity is checked against
       `maxWeight − FUTURES_COMMAND_WEIGHT_RESERVE` (40, measured basis
       stated at the constant), urgent against `maxWeight`. Exchange

@@ -399,6 +399,22 @@ const waitForPromise = (promise, signal) => {
 const MAX_ADMISSION_PASSES = 8;
 const MAX_BINANCE_RETRY_AFTER_MS = 3 * 24 * 60 * 60 * 1000;
 
+// The slice of the minute window that ordinary work may not book, held back
+// for urgent standing — the operator's commands and the reads they wait on.
+// Urgency alone reorders the queue but confers no capacity, and a window the
+// desk's own reads have filled makes the queue order moot: measured
+// 2026-08-30 (desk-2026-08-30-002.jsonl), ordinary reads pinned the window
+// at 796–800 of 800 for whole minutes and urgent weight-1 cancellations
+// waited 23–35 s behind them, which the renderer's fifteen-second answer
+// deadline turned into false "Cancellation NOT confirmed" warnings. Forty is
+// sized from the same session: a burst's whole urgent traffic — one
+// placement, one replacement, six cancellations at weight 1, a handful of
+// weight-5 reads and one memoized weight-30 position-mode warm — fits inside
+// it, at five percent of the window. Backpressure the exchange itself
+// imposes is not shortened by the reserve; only the desk's own capacity
+// arithmetic consults it.
+export const FUTURES_COMMAND_WEIGHT_RESERVE = 40;
+
 const addBoundedCount = (left, right = 1) => Math.min(
     Number.MAX_SAFE_INTEGER,
     left + right,
@@ -431,12 +447,20 @@ export class RateLimiter {
      *   attempt summary in Futures physical mode. Observational only.
      * @param {boolean} [options.physicalAttempts] - Admit at the low-level
      *   Futures HTTP boundary. Spot deliberately leaves this disabled.
+     * @param {number} [options.commandWeightReserve] - Weight held back from
+     *   ordinary standing so urgent work finds room in a filled window.
+     *   Zero unless stated; Spot deliberately states none.
      */
     constructor(
         maxWeight = 800,
         windowMs = 60000,
         requestDelayMs = 500,
-        { onDeferred = null, onOperation = null, physicalAttempts = false } = {},
+        {
+            onDeferred = null,
+            onOperation = null,
+            physicalAttempts = false,
+            commandWeightReserve = 0,
+        } = {},
     ) {
         this.maxWeight = maxWeight;        // Max weight per window (conservative)
         this.windowMs = windowMs;          // Window size in ms (1 minute)
@@ -444,6 +468,10 @@ export class RateLimiter {
         this.onDeferred = typeof onDeferred === 'function' ? onDeferred : null;
         this.onOperation = typeof onOperation === 'function' ? onOperation : null;
         this.physicalAttempts = physicalAttempts === true;
+        this.commandWeightReserve = Number.isSafeInteger(commandWeightReserve)
+            && commandWeightReserve > 0
+            ? commandWeightReserve
+            : 0;
         this.requests = [];                // Track { timestamp, weight }
         this.lastRequestTime = 0;          // Last request timestamp for spacing
         this.backpressureUntil = 0;        // Conservative 418/429 Retry-After floor
@@ -576,11 +604,17 @@ export class RateLimiter {
         }
     }
 
-    reservationWait(weight) {
+    reservationWait(weight, urgent = false) {
         const now = Date.now();
         const spent = this.getCurrentWeight();
         const backpressureMs = Math.max(0, this.backpressureUntil - now);
-        const capacityMs = spent + weight > this.maxWeight && this.requests.length > 0
+        // Ordinary standing may not book into the command reserve; urgent
+        // standing may spend the window to its true ceiling. The exchange's
+        // own backpressure is taken before this arithmetic either way.
+        const ceiling = urgent === true
+            ? this.maxWeight
+            : this.maxWeight - this.commandWeightReserve;
+        const capacityMs = spent + weight > ceiling && this.requests.length > 0
             ? Math.max(
                 0,
                 this.windowMs - (now - this.requests[0].timestamp) + 100,
@@ -718,7 +752,7 @@ export class RateLimiter {
             let booked = false;
             try {
                 throwIfAborted(signal);
-                let wait = this.reservationWait(weight);
+                let wait = this.reservationWait(weight, urgent);
                 if (wait.sleepFor === 0) {
                     await this.enforceDelay(signal);
                     throwIfAborted(signal);
@@ -726,7 +760,7 @@ export class RateLimiter {
                     // exchange-used-weight sample while this admission is in
                     // its spacing delay. Recheck before booking rather than
                     // admitting against the stale lower reading.
-                    if (this.physicalAttempts) wait = this.reservationWait(weight);
+                    if (this.physicalAttempts) wait = this.reservationWait(weight, urgent);
                     if (!this.physicalAttempts || wait.sleepFor === 0) {
                         if (typeof isCurrent === 'function') {
                             let stillCurrent = false;
@@ -1386,6 +1420,10 @@ export function setupBinanceConnection({
             // them wait, and until now that was the one thing it did silently.
             onDeferred: entry => diagnosticRecord.record('deferred', entry),
             onOperation: entry => diagnosticRecord.record('request', entry),
+            // Held back from ordinary reads so the operator's commands find
+            // room in a minute those reads have filled — the constant states
+            // the measured basis.
+            commandWeightReserve: FUTURES_COMMAND_WEIGHT_RESERVE,
         },
     );
 

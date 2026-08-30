@@ -9115,6 +9115,12 @@ describe('setupBinanceConnection user-data orchestration', () => {
             return Promise.resolve({ symbols: pageSymbols, full: true, lastTime: startTime + 1 });
         });
 
+        // Roll the minute the activation reads spent: ordinary work now books
+        // against the ceiling less the command reserve, and this test's claim
+        // is the fan-out's own arithmetic, not that it shares a window with
+        // the bootstrap.
+        await vi.advanceTimersByTimeAsync(60_100);
+        await flushMicrotasks();
         await runFuturesCommand({
             action: 'account.history',
             clientOrderId: 'history-weight-full',
