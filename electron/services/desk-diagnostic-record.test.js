@@ -246,6 +246,7 @@ describe('describeDeskDiagnosticEvent', () => {
             reason: 'unstated',
             resources: 2,
             weight: 10,
+            heldBeats: null,
         });
         // A reason outside the vocabulary is a read site that never stated one.
         expect(describeDeskDiagnosticEvent('read', {
@@ -257,6 +258,24 @@ describe('describeDeskDiagnosticEvent', () => {
             reason: null,
             resources: 4,
             weight: 90,
+        })).toBeNull();
+    });
+
+    // Beats the desk held while the stream carried, stated on the pass that
+    // ran next. Declared here because the record writes only declared fields:
+    // asserted through the gate itself, a mocked record() proves nothing.
+    it('keeps the held-beat count a read pass hands over', () => {
+        expect(describeDeskDiagnosticEvent('read', {
+            reason: 'refresh', resources: 4, weight: 90, heldBeats: 3,
+        })).toEqual({
+            kind: 'read', reason: 'refresh', resources: 4, weight: 90, heldBeats: 3,
+        });
+        // Present but malformed refuses the whole line, as any field does.
+        expect(describeDeskDiagnosticEvent('read', {
+            reason: 'refresh', resources: 4, weight: 90, heldBeats: -1,
+        })).toBeNull();
+        expect(describeDeskDiagnosticEvent('read', {
+            reason: 'refresh', resources: 4, weight: 90, heldBeats: 2.5,
         })).toBeNull();
     });
 

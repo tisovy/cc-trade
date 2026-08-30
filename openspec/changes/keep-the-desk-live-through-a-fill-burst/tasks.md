@@ -22,7 +22,7 @@
       stated at the constant), urgent against `maxWeight`. Exchange
       backpressure (`429`/`Retry-After`) is not subject to the reserve.
       The `deferred` journal line is unchanged in shape.
-- [ ] 1.2 The `account.refresh` handler holds a `periodic: true` pass while
+- [x] 1.2 The `account.refresh` handler holds a `periodic: true` pass while
       (a) the private stream delivered a frame within the beat interval and
       (b) the last completed pass is younger than
       `FUTURES_RECONCILE_MAX_QUIET_MS` (300 000). Held beats are counted;
@@ -31,7 +31,7 @@
       `describeDeskDiagnosticEvent` (the record writes only declared
       fields; a mocked `record()` proves nothing). Manual refresh,
       bootstrap, reconnect, command-driven reads untouched.
-- [ ] 1.3 Correct the false narrowing comment at the refresh handler
+- [x] 1.3 Correct the false narrowing comment at the refresh handler
       (`binance-connection.js:7573`) and grep for the same claim stated
       anywhere else — headings, canon, comments (a rule lives in more than
       one place; grep by meaning, not name).

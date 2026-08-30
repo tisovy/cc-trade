@@ -1826,6 +1826,122 @@ describe('setupBinanceConnection user-data orchestration', () => {
         }
     });
 
+    // The thirty-second beat and the stream carry the same facts. While the
+    // stream is delivering, a beat that read the account back would restate
+    // them at ninety weight — fifteen such passes in seven minutes on
+    // 2026-08-30, in the desk's own journal, while the operator's commands
+    // waited behind them. The beat defers to the stream, the deference is
+    // counted onto the next pass's read line, and the operator's own refresh
+    // is a person and is never held.
+    const startFuturesDeskWithRecord = async () => {
+        const diagnostics = [];
+        setupBinanceConnection({
+            localWebSocketAccess: { host: '127.0.0.1' },
+            diagnosticRecord: {
+                ...DESK_DIAGNOSTICS_UNRECORDED,
+                record: (kind, payload) => {
+                    diagnostics.push({ kind, ...payload });
+                    return true;
+                },
+            },
+        });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        await moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({ action: 'activate_market', marketMode: 'futures-live' }),
+        });
+        await vi.advanceTimersByTimeAsync(2_000);
+        await flushMicrotasks();
+        const socket = moduleMocks.futuresUserDataSockets[0];
+        socket.handlers.open();
+        await vi.advanceTimersByTimeAsync(2_000);
+        await flushMicrotasks();
+        return { diagnostics, socket };
+    };
+
+    const sendPeriodicBeat = clientOrderId => runFuturesCommand({
+        action: 'account.refresh', clientOrderId, symbol: 'TUTUSDT', periodic: true,
+    });
+
+    const accountReadLines = diagnostics => diagnostics
+        .filter(entry => entry.kind === 'read');
+
+    it('holds the periodic beat while the stream carries and counts it on the next pass', async () => {
+        const loads = futuresAccountLoads();
+        const { diagnostics, socket } = await startFuturesDeskWithRecord();
+        const afterSetup = loads.regularOrders.mock.calls.length;
+        diagnostics.length = 0;
+
+        await vi.advanceTimersByTimeAsync(10_000);
+        // The exchange's own ping proves the route carries — no account event
+        // needed, exactly as the silence watchdog reads it.
+        socket.handlers.ping();
+        await sendPeriodicBeat('beat-held-1');
+        await vi.advanceTimersByTimeAsync(10_000);
+        socket.handlers.ping();
+        await sendPeriodicBeat('beat-held-2');
+
+        // Neither beat read the account back, and neither wrote a read line.
+        expect(loads.regularOrders).toHaveBeenCalledTimes(afterSetup);
+        expect(accountReadLines(diagnostics)).toEqual([]);
+
+        // The operator's own refresh is never held — stream lively, pass
+        // young, it still runs — and its line carries the held count through
+        // the record's own gate, not through a mock.
+        await runFuturesCommand({
+            action: 'account.refresh', clientOrderId: 'manual-after-held', symbol: 'TUTUSDT',
+        });
+        expect(loads.regularOrders.mock.calls.length).toBeGreaterThan(afterSetup);
+        const line = accountReadLines(diagnostics).find(entry => entry.reason === 'refresh');
+        expect(line).toMatchObject({ heldBeats: 2 });
+        const { kind, ...payload } = line;
+        expect(describeDeskDiagnosticEvent(kind, payload)).toMatchObject({ heldBeats: 2 });
+
+        // The count was handed over, not kept: the next pass states zero.
+        await runFuturesCommand({
+            action: 'account.refresh', clientOrderId: 'manual-after-flush', symbol: 'TUTUSDT',
+        });
+        expect(accountReadLines(diagnostics)
+            .filter(entry => entry.reason === 'refresh').at(-1))
+            .toMatchObject({ heldBeats: 0 });
+    });
+
+    it('runs the beat at the quiet ceiling however lively the stream is', async () => {
+        const loads = futuresAccountLoads();
+        const { diagnostics, socket } = await startFuturesDeskWithRecord();
+        const afterSetup = loads.regularOrders.mock.calls.length;
+        diagnostics.length = 0;
+
+        await vi.advanceTimersByTimeAsync(150_000);
+        socket.handlers.ping();
+        await sendPeriodicBeat('beat-ceiling-early');
+        expect(loads.regularOrders).toHaveBeenCalledTimes(afterSetup);
+        expect(accountReadLines(diagnostics)).toEqual([]);
+
+        await vi.advanceTimersByTimeAsync(160_000);
+        socket.handlers.ping();
+        await sendPeriodicBeat('beat-ceiling-due');
+        expect(loads.regularOrders.mock.calls.length).toBeGreaterThan(afterSetup);
+        expect(accountReadLines(diagnostics).at(-1))
+            .toMatchObject({ reason: 'refresh', heldBeats: 1 });
+    });
+
+    it('runs the beat when the stream has been silent for the beat interval', async () => {
+        const loads = futuresAccountLoads();
+        const { diagnostics } = await startFuturesDeskWithRecord();
+        const afterSetup = loads.regularOrders.mock.calls.length;
+        diagnostics.length = 0;
+
+        await vi.advanceTimersByTimeAsync(31_000);
+        await sendPeriodicBeat('beat-silent');
+        expect(loads.regularOrders.mock.calls.length).toBeGreaterThan(afterSetup);
+        expect(accountReadLines(diagnostics).at(-1))
+            .toMatchObject({ reason: 'refresh', heldBeats: 0 });
+    });
+
     const heldPositions = () => moduleMocks.rendererConnection.sendUTF.mock.calls
         .map(([message]) => JSON.parse(message))
         .filter(payload => payload.type === 'futures_account_state')

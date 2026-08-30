@@ -2404,7 +2404,11 @@ export function setupBinanceConnection({
             reason,
             resources: operations.length,
             weight: operations.reduce((total, operation) => total + operation.weight, 0),
+            // Periodic beats held since the last pass that ran: the pass in
+            // hand states the deference, whatever its own reason is.
+            heldBeats: futuresHeldPeriodicBeats,
         });
+        futuresHeldPeriodicBeats = 0;
 
         for (const operation of operations) {
             futuresAccountResources = markFuturesResourceLoading(
@@ -2494,6 +2498,13 @@ export function setupBinanceConnection({
             }
         }));
         const receipt = Object.freeze(Object.fromEntries(outcomes));
+        if (resources === null
+            && outcomes.every(([, outcome]) => outcome === 'ready')) {
+            // A full pass, every resource ready: the reconciliation the
+            // periodic beat exists to guarantee has just happened, whoever
+            // asked for it. The beat's quiet ceiling is aged from here.
+            futuresLastFullAccountPassAt = Date.now();
+        }
 
         // Every contract the account has something riding on, so the dock can
         // state what each is carried at and the free-margin estimate can price
@@ -4056,6 +4067,40 @@ export function setupBinanceConnection({
         futuresAccountResources?.userDataStream?.status === 'ready'
         && futuresUserDataLastHeardAt !== null
         && Date.now() - futuresUserDataLastHeardAt < FUTURES_USER_DATA_SILENCE_MS
+    );
+
+    // The renderer's reconcile timer beats at thirty seconds while orders are
+    // working (ACCOUNT_RECONCILE_INTERVAL_MS, useFuturesTrading.js) — the beat
+    // interval here is that timer's, and the two state one number on purpose:
+    // a stream frame younger than one beat means the stream is restating the
+    // very orders and balances the pass would read back at ninety weight.
+    const FUTURES_RECONCILE_BEAT_MS = 30_000;
+    // How stale the last completed full pass may grow before a beat runs even
+    // over a lively stream. A frame proves the transport carries; it does not
+    // prove nothing was missed, so the deference is bounded: a missed frame
+    // goes uncorrected for five minutes at most, well inside the 420 s the
+    // silence watchdog tolerates on the socket itself.
+    const FUTURES_RECONCILE_MAX_QUIET_MS = 300_000;
+    // Stamped when a full four-resource pass completes with every resource
+    // ready; narrowed reads reconcile only what they name and stamp nothing.
+    let futuresLastFullAccountPassAt = null;
+    // Periodic beats held while the stream carried, handed to the next read
+    // pass's journal line so the deference is stated rather than left as an
+    // absent line to be read as an absent check.
+    let futuresHeldPeriodicBeats = 0;
+
+    /**
+     * Whether this periodic beat has nothing to correct: the stream delivered
+     * within one beat and a completed full pass is younger than the quiet
+     * ceiling. The operator's refresh, the bootstrap, a reconnect and a
+     * command with no stream to report it never come this way — the cause is
+     * named by the caller, and only the beat defers.
+     */
+    const futuresPeriodicBeatIsHeld = () => (
+        futuresStreamCarriesOrders()
+        && Date.now() - futuresUserDataLastHeardAt < FUTURES_RECONCILE_BEAT_MS
+        && futuresLastFullAccountPassAt !== null
+        && Date.now() - futuresLastFullAccountPassAt < FUTURES_RECONCILE_MAX_QUIET_MS
     );
 
     const clearFuturesUserDataSilenceWatch = () => {
@@ -7599,6 +7644,19 @@ export function setupBinanceConnection({
                         break;
                     case TRADING_COMMAND_ACTIONS.ACCOUNT_REFRESH:
                         ensureFuturesUserDataStream();
+                        // The thirty-second beat exists to correct a frame the
+                        // desk never saw. While the stream is delivering and a
+                        // completed pass is young there is nothing to correct
+                        // yet: the beat is held and counted, and the count
+                        // travels on the next pass that runs. The income tick
+                        // still goes — it has its own due-check, and a funding
+                        // charge is announced on the socket but recorded in
+                        // the income history later, where only a read finds it.
+                        if (command.periodic === true && futuresPeriodicBeatIsHeld()) {
+                            futuresHeldPeriodicBeats = addBoundedCount(futuresHeldPeriodicBeats);
+                            scheduleFuturesSettledRead('tick');
+                            break;
+                        }
                         // Warm the cached position mode (and the server-time
                         // offset its signed request syncs) so the first order
                         // pays no extra round-trips.
@@ -7609,13 +7667,14 @@ export function setupBinanceConnection({
                             { urgent: true },
                         ).catch(() => {});
                         // The operator asking for the account is asking for all
-                        // of it. This is the one read they can reach directly.
-                        // A person asking gets everything the desk can find
-                        // out; the thirty-second reconcile beside them gets the
-                        // orders and positions it polls for and no more. Read on
-                        // both and the reconcile is six requests every thirty
-                        // seconds — which is exactly what this desk did between
-                        // 20:20 and 20:23 on 2026-08-20, in its own journal.
+                        // of it, and a beat that reached here found something
+                        // to check — both run the same full pass. What divides
+                        // the two callers is the income schedule: a person's
+                        // ask reads every lane, the beat's tick spends nothing
+                        // unless a lane is due. Read every lane on the beat too
+                        // and it is six requests every thirty seconds — which
+                        // is exactly what this desk did between 20:20 and
+                        // 20:23 on 2026-08-20, in its own journal.
                         scheduleFuturesSettledRead(command.periodic === true ? 'tick' : 'refresh');
                         // Start the independent income resource before waiting
                         // for balances/positions/orders. Otherwise those four

@@ -1022,8 +1022,9 @@ describe('backend trading command validation', () => {
                 clientOrderId: 'refresh-1',
                 symbol: 'BTCUSDT',
                 // Unmarked means a person asked. The desk reads everything it
-                // can find out for one of those, and only the orders and
-                // positions a timer polls for when the timer says so.
+                // can find out for one of those; the timer's beat is held
+                // while the stream already carries the same facts, and spends
+                // nothing on income lanes that are not due.
                 periodic: false,
             },
         });

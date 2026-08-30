@@ -335,6 +335,10 @@ const RECORDED_FIELDS = Object.freeze({
         ['reason', text(READ_REASON)],
         ['resources', count],
         ['weight', count],
+        // Periodic beats held, while the stream carried, since the last pass
+        // that ran — stated on the pass so the deference is a line, not an
+        // absence. Optional: the fee-valuation read has no beat to answer for.
+        ['heldBeats', optional(count)],
     ]),
     // One line each time the desk's own read budget, and not the exchange, made
     // a request wait — what was waiting, how long, and how full the minute was
