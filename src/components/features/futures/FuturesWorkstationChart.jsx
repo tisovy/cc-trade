@@ -204,6 +204,19 @@ const futuresPositionIdentity = position => (
   `${position?.symbol}:${position?.positionSide}`
 )
 
+// The plate's face spends as little width as it can — one letter for the leg,
+// a bare number for the notional — because every pixel of plate is a pixel of
+// candles covered, and colliding plates pay for their widest column twice
+// over. The full words stay where they are read deliberately: the accessible
+// names, and the title under the cursor.
+const orderLegLetter = label => (
+  label === 'LONG' ? 'L' : label === 'SHORT' ? 'S' : label
+)
+
+const orderNotionalTitle = notional => (
+  notional === null || notional === undefined ? undefined : `${notional} USDT`
+)
+
 // A handle is read against the line it prices, so it is drawn at that line —
 // never nudged down the chart to clear a neighbour. The old vertical
 // anti-overlap spread the plates apart, and the displacement compounded down
@@ -1563,9 +1576,11 @@ export const FuturesWorkstationChart = ({
                 body size inside a 16px plate and broke out of it, which is what
                 a dragged order looked like on screen. */}
             <span className="futures-workstation-owned-order-plate">
-              <b>{liftedMark.label}</b>
+              <b title={liftedMark.label}>{orderLegLetter(liftedMark.label)}</b>
               <span>{liftedMark.price}</span>
-              <em>{liftedMark.placing ? 'placing…' : `${liftedMark.notional ?? '—'} USDT`}</em>
+              <em title={liftedMark.placing ? undefined : orderNotionalTitle(liftedMark.notional)}>
+                {liftedMark.placing ? 'placing…' : liftedMark.notional ?? '—'}
+              </em>
             </span>
           </div>
         ))}
@@ -1604,8 +1619,8 @@ export const FuturesWorkstationChart = ({
           const exits = intent.positionEffect === 'EXIT'
           const content = (
             <>
-              <b>
-                {order.orderKind === 'ALGO' ? 'ALGO ' : ''}{intent.label}
+              <b title={intent.label}>
+                {order.orderKind === 'ALGO' ? 'ALGO ' : ''}{orderLegLetter(intent.label)}
                 {exits ? (
                   <em
                     className="futures-workstation-owned-order-exit"
@@ -1615,14 +1630,14 @@ export const FuturesWorkstationChart = ({
                   </em>
                 ) : null}
               </b>
-              <span>
+              <span title={!lifting && !trigger.triggered ? orderNotionalTitle(notional) : undefined}>
                 {lifting ? 'lifting…' : null}
                 {/* A fired stop is not resting here for the operator to reach
                     for. It is drawn at the price it fired at because that is
                     where it happened, and it says so instead of pricing itself
                     like something still on the book. */}
                 {!lifting && trigger.triggered ? 'triggered' : null}
-                {!lifting && !trigger.triggered ? `${notional ?? '—'} USDT` : null}
+                {!lifting && !trigger.triggered ? notional ?? '—' : null}
               </span>
             </>
           )

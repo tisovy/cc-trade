@@ -874,7 +874,7 @@ describe('FuturesWorkstationChart viewport ownership', () => {
     const grip = await screen.findByRole('button', {
       name: 'Move SELL LONG order at 59900 with Ctrl or Alt drag',
     })
-    expect(grip).toHaveTextContent('29950 USDT')
+    expect(grip).toHaveTextContent('29950')
 
     // A partial fill: 0.2 executed of 0.5, price and viewport unmoved.
     rerender(<FuturesWorkstationChart
@@ -885,7 +885,7 @@ describe('FuturesWorkstationChart viewport ownership', () => {
     await waitFor(() => {
       expect(screen.getByRole('button', {
         name: 'Move SELL LONG order at 59900 with Ctrl or Alt drag',
-      })).toHaveTextContent('17970 USDT')
+      })).toHaveTextContent('17970')
     })
   })
 
@@ -1223,7 +1223,7 @@ describe('FuturesWorkstationChart viewport ownership', () => {
     // Still listed, still drawn, still worth what it was.
     expect(screen.getByRole('button', {
       name: 'Move SELL LONG order at 59900 with Ctrl or Alt drag',
-    })).toHaveTextContent('29950 USDT')
+    })).toHaveTextContent('29950')
     expect(screen.queryByRole('status', { name: /lifted off the book/ })).not.toBeInTheDocument()
     // Nor the mark the gesture followed while the answer was outstanding.
     expect(screen.queryByRole('status', { name: /heading for/ })).not.toBeInTheDocument()
@@ -1447,7 +1447,7 @@ describe('FuturesWorkstationChart viewport ownership', () => {
     expect(screen.getAllByRole('status', { name: /lifted off the book/ })).toHaveLength(1)
     expect(screen.getByRole('button', {
       name: 'Move SELL SHORT order at 59900 with Ctrl or Alt drag',
-    })).toHaveTextContent('29950 USDT')
+    })).toHaveTextContent('29950')
 
     fireEvent.pointerUp(dragSurface(), { pointerId: 11, clientY: 80, ctrlKey: true })
     await settle()
@@ -1715,9 +1715,9 @@ describe('FuturesWorkstationChart viewport ownership', () => {
     expect(plate).not.toBeNull()
     // Nothing is drawn outside it: the handle is a positioning box only.
     expect(lifted.children).toHaveLength(1)
-    expect(plate).toHaveTextContent('LONG')
+    expect(within(plate).getByTitle('LONG')).toHaveTextContent(/^L$/)
     expect(plate).toHaveTextContent('59920')
-    expect(plate).toHaveTextContent('29950 USDT')
+    expect(within(plate).getByTitle('29950 USDT')).toHaveTextContent(/^29950$/)
   })
 
   // The order is gone from the book the moment the drag starts, so the level it
@@ -1838,7 +1838,7 @@ describe('FuturesWorkstationChart viewport ownership', () => {
     // The lifted one is drawn once, at the pointer; the ALGO row is untouched.
     expect(screen.getByRole('status', { name: /lifted off the book/ }))
       .toHaveTextContent('59920')
-    expect(algoOrder).toHaveTextContent('ALGO SHORT')
+    expect(algoOrder).toHaveTextContent('ALGO S')
     expect(algoOrder).not.toHaveTextContent('59920')
 
     fireEvent.pointerUp(dragSurface(), { pointerId: 9, clientY: 80, ctrlKey: true })
@@ -1849,7 +1849,7 @@ describe('FuturesWorkstationChart viewport ownership', () => {
     }))
   })
 
-  it('shows an order as notional in USDT with a cancel control and an editor on double-click', async () => {
+  it('shows an order as a one-letter leg and a bare notional, words on the titles, with a cancel control and an editor on double-click', async () => {
     const onOrderCancel = vi.fn()
     const onOrderEdit = vi.fn()
     const props = {
@@ -1871,7 +1871,13 @@ describe('FuturesWorkstationChart viewport ownership', () => {
     const grip = await screen.findByRole('button', {
       name: 'Move BUY LONG order at 59900 with Ctrl or Alt drag',
     })
-    expect(grip).toHaveTextContent('LONG240 USDT')
+    // The plate's face spends one letter on the leg and no unit on the value —
+    // width is candles covered — while the full words wait on the titles.
+    expect(grip).toHaveTextContent('L240')
+    expect(grip).not.toHaveTextContent('LONG')
+    expect(grip).not.toHaveTextContent('USDT')
+    expect(within(grip).getByTitle('LONG')).toHaveTextContent(/^L$/)
+    expect(within(grip).getByTitle('240 USDT')).toHaveTextContent(/^240$/)
 
     fireEvent.doubleClick(grip, { clientX: 140, clientY: 220 })
     expect(onOrderEdit).toHaveBeenCalledExactlyOnceWith(
@@ -1908,7 +1914,7 @@ describe('FuturesWorkstationChart viewport ownership', () => {
 
     // The leg says which position it belongs to; the badge beside it says what
     // it does to that position, which the side colour alone left to be inferred.
-    expect(algoOrder).toHaveTextContent('ALGO LONGexit— USDT')
+    expect(algoOrder).toHaveTextContent('ALGO Lexit—')
     expect(within(algoOrder).getByTitle(/^Exit —/)).toHaveTextContent('exit')
     expect(props.onOrderLift).not.toHaveBeenCalled()
     expect(screen.queryByRole('button')).not.toBeInTheDocument()
@@ -1940,7 +1946,7 @@ describe('FuturesWorkstationChart viewport ownership', () => {
     })
     // The plate still states what the order is worth — valued at its trigger,
     // the way the order-values change reads a stop-market: 0.5 × 57000.
-    expect(note).toHaveTextContent('28500 USDT')
+    expect(within(note).getByTitle('28500 USDT')).toHaveTextContent(/^28500$/)
   })
 
   it('begins no drag and draws no pending mark for an order resting at no price', async () => {
@@ -2000,7 +2006,7 @@ describe('FuturesWorkstationChart viewport ownership', () => {
     // no mark of a drag survives.
     expect(screen.getByRole('button', {
       name: 'Move SELL LONG order at 59900 with Ctrl or Alt drag',
-    })).toHaveTextContent('29950 USDT')
+    })).toHaveTextContent('29950')
     expect(screen.queryByRole('status', { name: /heading for|lifted off the book/ }))
       .not.toBeInTheDocument()
   })

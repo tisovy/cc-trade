@@ -39,6 +39,12 @@ Measured before writing, two defects compounding each other:
 - The CSS gutter rule carries the per-handle offset:
   `left: calc(8px + var(--handle-column-offset, 0px))`, shortened by the same
   amount, and the viewport suite's canon of that rule is restated to match.
+- Follow-up, operator 2026-08-30 after seeing the columns live («убрать
+  LONG/SHORT — оставить L/S и убрать слово USDT»): the plate's face shrinks
+  to a one-letter leg and a bare notional, so a column of plates spends half
+  the width it did (~129px → ~77–88px in the Chromium fixture). The full
+  words stay on the titles and in the accessible names; `ALGO`, `exit` and
+  the transient states keep theirs.
 
 ## Impact
 

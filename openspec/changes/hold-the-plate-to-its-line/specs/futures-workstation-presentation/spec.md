@@ -47,3 +47,27 @@ no line coordinate is known MAY fall back to reading the pointer's position.
   bottom edge
 - **THEN** the handle is clamped only far enough to stay whole and reachable,
   and this is the one vertical displacement the chart may draw
+
+### Requirement: The plate's face spends one letter on the leg and no unit on the value
+
+An order handle's face SHALL name the position leg by a single letter — `L`
+for LONG, `S` for SHORT — and SHALL state the order's notional as a bare
+number with no unit word, because every character of plate is a candle
+covered and colliding plates pay for their widest column in full. The full
+leg word and the unit-qualified value SHALL stay readable under the cursor on
+the elements' titles, and the accessible names SHALL keep their full wording.
+The `ALGO` marker, the `exit` badge and the transient states (`lifting…`,
+`triggered`, `placing…`) keep their words. The dragged mark SHALL wear the
+same face as the resting plate it lifts.
+
+#### Scenario: A resting order's plate
+
+- **WHEN** the chart draws a working SELL SHORT order worth 22967 USDT
+- **THEN** the plate reads `S` and `22967`, its titles carry `SHORT` and
+  `22967 USDT`, and the accessible name still says the full
+  `SELL SHORT … order at …`
+
+#### Scenario: The unit survives where it is asked for
+
+- **WHEN** the operator hovers a plate's value
+- **THEN** the title states the exact notional with its unit
