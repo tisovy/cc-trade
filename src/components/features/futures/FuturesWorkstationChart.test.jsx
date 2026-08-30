@@ -267,6 +267,29 @@ describe('FuturesWorkstationChart viewport ownership', () => {
     expect(declaration(ruleOf('.futures-workstation-owned-order'), 'justify-content'))
       .toBe('flex-start')
 
+    // The operator, 2026-08-30: the digits are what a plate is read for, so
+    // the value burns in the side's bright pair — the same pair the book and
+    // the tape write their numbers in. Read from the book rather than
+    // restated, so the two pairs cannot drift apart.
+    const bidDigits = declaration(
+      ruleOf('.futures-workstation-book-side.is-bid button span:first-child'),
+      'color',
+    )
+    const askDigits = declaration(
+      ruleOf('.futures-workstation-book-side.is-ask button span:first-child'),
+      'color',
+    )
+    expect(bidDigits).toMatch(/^#[0-9a-f]{6}$/)
+    expect(askDigits).toMatch(/^#[0-9a-f]{6}$/)
+    expect(declaration(ruleOf('.futures-workstation-owned-order.is-buy'), '--handle-value-color'))
+      .toBe(bidDigits)
+    expect(declaration(ruleOf('.futures-workstation-owned-order.is-sell'), '--handle-value-color'))
+      .toBe(askDigits)
+    expect(declaration(
+      ruleOf('.futures-workstation-owned-order-plate em:not(.futures-workstation-owned-order-exit)'),
+      'color',
+    )).toBe('var(--handle-value-color, currentColor)')
+
     // A handle the operator drags and cancels is never hidden behind a box the
     // desk writes in the same corner — and the left corners are where all of
     // them live.

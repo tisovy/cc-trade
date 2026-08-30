@@ -45,6 +45,13 @@ Measured before writing, two defects compounding each other:
   the width it did (~129px → ~77–88px in the Chromium fixture). The full
   words stay on the titles and in the accessible names; `ALGO`, `exit` and
   the transient states keep theirs.
+- Second follow-up, same day («цифры на плашке яркого цвета… чтобы лучше
+  видно было»): the digits burn in the side's bright pair — the `#3dd69c` /
+  `#ff7380` the book and the tape already write their numbers in — carried
+  as `--handle-value-color` on the handle's side rules, while the frame, the
+  leg letter and the cancel keep the dimmer plate colour and the `exit`
+  badge its grey. The canon reads the pair out of the book's rules, not a
+  restated hex.
 
 ## Impact
 

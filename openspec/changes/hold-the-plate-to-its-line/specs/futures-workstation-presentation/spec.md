@@ -71,3 +71,27 @@ same face as the resting plate it lifts.
 
 - **WHEN** the operator hovers a plate's value
 - **THEN** the title states the exact notional with its unit
+
+### Requirement: The plate's digits burn in the side's bright pair
+
+The value on an order handle — and the price and value on the dragged mark —
+SHALL be coloured by the order's side in the desk's bright digit pair: the
+bright green the book's bids and the tape's buys write their numbers in for
+BUY, the bright red of the asks and sells for SELL, taken from those rules
+rather than restated so the two pairs cannot drift apart. The plate's frame,
+leg letter and cancel control SHALL keep the plate's own dimmer side colour,
+and the `exit` badge its quiet grey, so the digits outshine everything else
+on the plate.
+
+#### Scenario: A wall of plates at a glance
+
+- **WHEN** several buy and sell orders rest on the chart
+- **THEN** each plate's value reads as a bright green or bright red number
+  against its dimmer frame, the same colours the book and the tape give
+  those sides' numbers
+
+#### Scenario: The book's digit pair is retuned
+
+- **WHEN** the desk changes the colour the book writes bid or ask numbers in
+- **THEN** the plates' digits follow, because they are declared as that pair,
+  not as a copy of it

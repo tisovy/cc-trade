@@ -1004,12 +1004,17 @@
 }
 
 /* Colour follows the side, never positionSide: one-way accounts report BOTH for
-   every order, so a BUY has to stay green and a SELL red regardless. */
+   every order, so a BUY has to stay green and a SELL red regardless. The value
+   colour is the bright digit pair the book and the tape already write their
+   numbers in: the digits are what a plate is read for, and they outshine the
+   frame, the leg letter and the cancel around them. */
 .futures-workstation-owned-order.is-buy {
+  --handle-value-color: #3dd69c;
   color: #2bc48a;
 }
 
 .futures-workstation-owned-order.is-sell {
+  --handle-value-color: #ff7380;
   color: #ef5b69;
 }
 
@@ -2704,6 +2709,15 @@
   padding: 0 1px;
   color: #93a6b7;
   font-style: normal;
+}
+
+/* The digits carry the decision, so they burn in the side's bright pair while
+   the frame, the leg letter and the cancel keep the plate's own colour. The
+   exit badge is a qualifier, not a reading: it keeps its quiet grey. */
+.futures-workstation-owned-order-grip span,
+.futures-workstation-owned-order-plate span,
+.futures-workstation-owned-order-plate em:not(.futures-workstation-owned-order-exit) {
+  color: var(--handle-value-color, currentColor);
 }
 
 .futures-workstation-owned-order-cancel {
