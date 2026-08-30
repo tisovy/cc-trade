@@ -897,8 +897,9 @@ same day in `6b6f703`; the funding rows below are this sitting's.
 | `the-ledger-reads-the-exchanges-alphabet` | 2.1–2.3 | `CONFIRMED` | Operator, 2026-08-30, after a day trading 龙虾USDT (515 frames, commands and positions in the journal) through the day's funding boundaries: "да все ок" — the pair's funding reaches the settled ledger and agrees with the app, its closed rounds anchor without a standing "reading", and its book grouping survived the day's desk restart (18:47:24Z in the journal). Change archived on this confirmation. |
 
 **Defect the sitting surfaced — the desk stalls while an order is partially
-filling. Measured, unowned as of 2026-08-30; the operator asked whether it is
-worth fixing.** Two distinct mechanisms in the same evening session
+filling. Measured 2026-08-30; the operator ruled the same day to fix it, and
+it is owned by `keep-the-desk-live-through-a-fill-burst` (`f808183`).** Two
+distinct mechanisms in the same evening session
 (`desk-2026-08-30-002.jsonl`, 17:10–20:10Z, fill bursts of 25–59
 `PARTIALLY_FILLED` frames a minute on SKRUSDT):
 
