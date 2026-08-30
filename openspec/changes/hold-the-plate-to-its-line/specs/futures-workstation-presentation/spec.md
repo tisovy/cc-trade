@@ -83,6 +83,12 @@ leg letter and cancel control SHALL keep the plate's own dimmer side colour,
 and the `exit` badge its quiet grey, so the digits outshine everything else
 on the plate.
 
+The digits SHALL carry enough stroke for the pair to reach full strength on
+the screen: at a hairline size the antialiasing caps every pixel short of the
+declared colour and the brightness never arrives — the operator's screenshot
+sampled grey where the rule said bright red. Bold, at a size near the book's
+own rows, is the floor.
+
 #### Scenario: A wall of plates at a glance
 
 - **WHEN** several buy and sell orders rest on the chart
@@ -95,3 +101,10 @@ on the plate.
 - **WHEN** the desk changes the colour the book writes bid or ask numbers in
 - **THEN** the plates' digits follow, because they are declared as that pair,
   not as a copy of it
+
+#### Scenario: The declared colour reaches the screen
+
+- **WHEN** a plate's digits are rendered at the plate's own size
+- **THEN** the brightest pixels of the digits carry the pair's full colour,
+  not an antialiased fraction of it — judged on the rendered frame, because
+  the computed style states the declaration either way

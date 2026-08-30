@@ -52,6 +52,16 @@ Measured before writing, two defects compounding each other:
   leg letter and the cancel keep the dimmer plate colour and the `exit`
   badge its grey. The canon reads the pair out of the book's rules, not a
   restated hex.
+- Third follow-up, operator's screenshot after restarting the desk
+  («яркостью тут даже не пахнет, цифры плохо видны и сливаются»): the pair
+  was applied but never reached the screen. At the hairline 8.75px the
+  antialiasing capped every digit pixel near 60% of the colour — the
+  screenshot sampled (163, 77, 88) where the rule said `#ff7380`, while the
+  800-weight leg letter hit its *dim* colour in full and outshone the
+  "bright" digits. The stroke was the cause, not the hue: the digits go bold
+  at 10px (the book affords the same pair 12px rows), and the fixture's
+  verdicts now sample rendered pixels, because the computed style passed
+  while the screen showed grey.
 
 ## Impact
 

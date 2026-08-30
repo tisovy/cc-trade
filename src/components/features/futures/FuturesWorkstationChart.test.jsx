@@ -285,10 +285,16 @@ describe('FuturesWorkstationChart viewport ownership', () => {
       .toBe(bidDigits)
     expect(declaration(ruleOf('.futures-workstation-owned-order.is-sell'), '--handle-value-color'))
       .toBe(askDigits)
-    expect(declaration(
-      ruleOf('.futures-workstation-owned-order-plate em:not(.futures-workstation-owned-order-exit)'),
-      'color',
-    )).toBe('var(--handle-value-color, currentColor)')
+    const digitsRule = ruleOf(
+      '.futures-workstation-owned-order-plate em:not(.futures-workstation-owned-order-exit)',
+    )
+    expect(declaration(digitsRule, 'color')).toBe('var(--handle-value-color, currentColor)')
+    // The pair needs stroke to burn. At a hairline 8.75px the antialiasing
+    // capped every digit pixel near 60% of the colour — the operator's
+    // screenshot sampled grey where this rule said bright red. Bold at 10px is
+    // the least stroke that lets the hue reach full strength on screen.
+    expect(declaration(digitsRule, 'font-weight')).toBe('700')
+    expect(declaration(digitsRule, 'font-size')).toBe('calc(var(--fx-ui-scale, 1) * 10px)')
 
     // A handle the operator drags and cancels is never hidden behind a box the
     // desk writes in the same corner — and the left corners are where all of

@@ -2713,11 +2713,18 @@
 
 /* The digits carry the decision, so they burn in the side's bright pair while
    the frame, the leg letter and the cancel keep the plate's own colour. The
-   exit badge is a qualifier, not a reading: it keeps its quiet grey. */
+   exit badge is a qualifier, not a reading: it keeps its quiet grey.
+   The pair needs stroke to burn: at a hairline 8.75px the antialiasing caps
+   every pixel of a digit near 60% of the colour — the operator's screenshot
+   sampled grey where the rule said bright red, while the 800-weight leg letter
+   hit its dim colour in full. Bold at 10px is the least stroke that lets the
+   hue reach full strength; the book affords the same pair its 12px rows. */
 .futures-workstation-owned-order-grip span,
 .futures-workstation-owned-order-plate span,
 .futures-workstation-owned-order-plate em:not(.futures-workstation-owned-order-exit) {
   color: var(--handle-value-color, currentColor);
+  font-size: calc(var(--fx-ui-scale, 1) * 10px);
+  font-weight: 700;
 }
 
 .futures-workstation-owned-order-cancel {
