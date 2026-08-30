@@ -879,3 +879,55 @@ diagnostic journal, so raising the publication rate did not inflate it.
 | Change | Task | Status | Evidence |
 |---|---:|---|---|
 | `price-every-open-position-at-the-last-print` | audit | `IMPLEMENTED` | `87543ae`. Three defects above fixed, each with a test verified failing against the pre-fix file. Full suite 2941/2941 across 128 files, eslint clean across the whole repo, four guards pass, build passes. |
+
+## The 2026-08-30 Operator Sitting
+
+The operator traded through the day on desk revision `913582b` (the plate
+series). Journal: `desk-2026-08-30-000/001/002.jsonl`. Verdict in their own
+words: plates and orders — "все ордера нормально двигаются, все нормально
+отображаются, все видно как нужно"; funding — "дождался фандинга, фандинг
+был". The plate change's live gates (2.1–2.5) were closed and archived the
+same day in `6b6f703`; the funding rows below are this sitting's.
+
+| Change | Task | Status | Evidence |
+|---|---:|---|---|
+| `state-what-an-open-position-has-already-paid` | 5.8 | `CONFIRMED` | Operator held positions across a funding boundary and reported the funding present and displaying correctly. Journal countersigns: three boundaries in the day (00:00Z, 16:00Z, 20:00Z), each a `reason: funding` settled pass ~2 s after the boundary arming the confirmation debt (`partialKind: debt-only, awaitingLanes: 1`) and one `reason: confirm` pass at +2:00 clearing it (`awaitingLanes: 0`). `fundingRows` stepped 66 → 67 across the 16:00Z boundary. |
+| `close-a-round-at-what-reached-the-wallet` | 4.6 | `CONFIRMED` | Same observation and journal evidence. 1.4 (which app screen was compared) remains the one open item on this change. |
+| `verify-final-futures-pnl-live-data` | 1.3 | `CONFIRMED` | Posting latency: debt armed within ~2.5 s of each boundary; single confirming pass at +2:00, no duplicate confirm requests; two-minute horizon sufficient on all three boundaries; no `Wallet-adjustment refresh failed` popup reported. |
+
+**Defect the sitting surfaced — the desk stalls while an order is partially
+filling. Measured, unowned as of 2026-08-30; the operator asked whether it is
+worth fixing.** Two distinct mechanisms in the same evening session
+(`desk-2026-08-30-002.jsonl`, 17:10–20:10Z, fill bursts of 25–59
+`PARTIALLY_FILLED` frames a minute on SKRUSDT):
+
+1. **The orders surface stops drawing during a fill burst.** 286 of 409
+   order-frame journal lines that session are `NOT_DRAWN` (84 `DELIVERED`,
+   39 `UNCHANGED`), concentrated exactly in the burst minutes (17:25–26: 107,
+   18:56: 47, 19:17: 49). The renderer commit leg runs 300–500 ms per frame
+   against the 9–11 ms baseline of 2026-08-18 — at several frames a second
+   the renderer thread saturates, which is the visible freeze while dragging.
+   `NOT_DRAWN` is the instrument's own fault verdict, not an interpretation.
+2. **Trading commands queue behind the desk's own read spend.** At 18:47:00
+   the weight window stood at `spent: 799–800` of 800 and `deferred` lines
+   show waits of 9.2–14.5 s — including an **urgent weight-1** ask waiting
+   9 229 ms, so urgent standing does not preempt a fully spent window (at
+   17:27:59 an urgent weight-5 waited 33 574 ms). Answers in the episode:
+   `trade.placeOrder` 9 573 ms, `trade.replaceOrder` 11 532 ms, six
+   `trade.cancelOrder` at 4 230–5 356 ms, `account.feeValuation` 30 192 ms —
+   all `ok`; the exchange refused nothing. What spent the window: fifteen
+   90-weight `refresh` reads over 18:40–18:46 (the 30-second reconcile
+   cadence while orders rest — `one-command-two-callers`), the burst's
+   credit-confirm income passes, and — after the desk restart at
+   18:47:24–27Z that fell inside the episode — the bootstrap volley
+   (`reason: bootstrap` 18:48:00, `complete`), which pinned the next window
+   too. Same family as `a-wait-bounded-by-a-window-is-self-inflicted`: the
+   budget is the desk's own, not the exchange's.
+
+Neither mechanism misprices anything — frames that did not draw were
+superseded, commands all landed — but both put seconds between the operator's
+hand and the book during exactly the moments a scalper acts. Recommended as
+two separate changes: (a) coalesce or cheapen the orders/account commit path
+under a fill burst so frames draw inside their budget; (b) keep standing
+headroom for command-class weight under the ceiling and thin the standing
+refresh while the private stream is already carrying the fills.

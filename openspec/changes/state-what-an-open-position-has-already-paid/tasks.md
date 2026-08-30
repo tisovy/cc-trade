@@ -156,9 +156,16 @@
   two independent roundings of the same figure, the same class the ledger's
   four-rows table already settled as not-a-defect — and uPnL matched the app
   exactly. Recorded in `openspec/live-verification-ledger.md`.
-- [ ] 5.8 Operator confirms the funding component appears after a funding
+- [x] 5.8 Operator confirms the funding component appears after a funding
   boundary passes with a position open — the read is triggered by the
   `FUNDING_FEE` cause, and that path cannot be exercised from this tree.
+  Confirmed 2026-08-30: the operator held positions across a funding boundary
+  and reported the funding present ("дождался фандинга, фандинг был",
+  "все нормально отображаются"); the journal countersigns with three
+  boundary passes that day (00:00Z, 16:00Z, 20:00Z), each `reason: funding`
+  ~2 s after the boundary and its confirming pass at +2:00 clearing the
+  debt. Recorded in `openspec/live-verification-ledger.md`, The 2026-08-30
+  Operator Sitting.
 
 ## 5b. Defect found after the first commit
 

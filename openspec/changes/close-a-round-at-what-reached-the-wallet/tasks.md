@@ -97,9 +97,13 @@
   finding: the app's headline is the NET (matches the desk's net on the
   element), so the desk's gross PnL column is a different quantity by design —
   ledger, The 2026-08-25 Operator Runbook Pass. Screen name still owed to 1.4.
-- [ ] 4.6 Operator confirms a round held across a funding boundary now shows the
+- [x] 4.6 Operator confirms a round held across a funding boundary now shows the
   funding component. The `FUNDING_FEE` read path cannot be exercised from this
-  tree.
+  tree. Confirmed 2026-08-30: funding crossed with positions open, the
+  operator reported the funding present and everything displaying as needed;
+  journal holds the `funding` → `confirm` pass pair at each of the day's
+  three boundaries. Recorded in `openspec/live-verification-ledger.md`,
+  The 2026-08-30 Operator Sitting.
 
 ## 5. Guards, not regressions
 
