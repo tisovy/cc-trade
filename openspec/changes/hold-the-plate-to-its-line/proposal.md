@@ -62,6 +62,11 @@ Measured before writing, two defects compounding each other:
   at 10px (the book affords the same pair 12px rows), and the fixture's
   verdicts now sample rendered pixels, because the computed style passed
   while the screen showed grey.
+- Fourth follow-up, operator after seeing the stroke fix live («теперь вижу
+  изменение, сделай шрифт еще чуть светлей»): the pair lightens one step
+  toward white on the plates — `color-mix(in srgb, <book hex> 80%, #fff)` —
+  declared as a mix over the book's own colour so the base still cannot
+  drift, and the canon asserts exactly that shape.
 
 ## Impact
 

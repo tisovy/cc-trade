@@ -1006,15 +1006,18 @@
 /* Colour follows the side, never positionSide: one-way accounts report BOTH for
    every order, so a BUY has to stay green and a SELL red regardless. The value
    colour is the bright digit pair the book and the tape already write their
-   numbers in: the digits are what a plate is read for, and they outshine the
-   frame, the leg letter and the cancel around them. */
+   numbers in — lightened a step toward white, because the operator read the
+   pair at the plate's 10px and asked for lighter still (2026-08-30). Declared
+   as a mix over the book's own hex, so the base cannot drift from the book:
+   the digits are what a plate is read for, and they outshine the frame, the
+   leg letter and the cancel around them. */
 .futures-workstation-owned-order.is-buy {
-  --handle-value-color: #3dd69c;
+  --handle-value-color: color-mix(in srgb, #3dd69c 80%, #fff);
   color: #2bc48a;
 }
 
 .futures-workstation-owned-order.is-sell {
-  --handle-value-color: #ff7380;
+  --handle-value-color: color-mix(in srgb, #ff7380 80%, #fff);
   color: #ef5b69;
 }
 

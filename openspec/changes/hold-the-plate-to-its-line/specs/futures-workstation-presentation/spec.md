@@ -77,8 +77,11 @@ same face as the resting plate it lifts.
 The value on an order handle — and the price and value on the dragged mark —
 SHALL be coloured by the order's side in the desk's bright digit pair: the
 bright green the book's bids and the tape's buys write their numbers in for
-BUY, the bright red of the asks and sells for SELL, taken from those rules
-rather than restated so the two pairs cannot drift apart. The plate's frame,
+BUY, the bright red of the asks and sells for SELL — lightened one step
+toward white for the plate's small face, the step the operator asked for
+after reading the pair at the plate's own size. The lightening SHALL be
+declared as a mix over the book's own colour, taken from those rules rather
+than restated, so the base cannot drift apart. The plate's frame,
 leg letter and cancel control SHALL keep the plate's own dimmer side colour,
 and the `exit` badge its quiet grey, so the digits outshine everything else
 on the plate.
@@ -93,8 +96,8 @@ own rows, is the floor.
 
 - **WHEN** several buy and sell orders rest on the chart
 - **THEN** each plate's value reads as a bright green or bright red number
-  against its dimmer frame, the same colours the book and the tape give
-  those sides' numbers
+  against its dimmer frame, a step lighter than the colours the book and the
+  tape give those sides' numbers and unmistakably of the same tone
 
 #### Scenario: The book's digit pair is retuned
 

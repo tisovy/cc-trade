@@ -281,10 +281,13 @@ describe('FuturesWorkstationChart viewport ownership', () => {
     )
     expect(bidDigits).toMatch(/^#[0-9a-f]{6}$/)
     expect(askDigits).toMatch(/^#[0-9a-f]{6}$/)
+    // Lightened a step toward white — the operator read the pair at the
+    // plate's own size and asked for lighter still — but declared as a mix
+    // over the book's hex, so the base is still the book's and cannot drift.
     expect(declaration(ruleOf('.futures-workstation-owned-order.is-buy'), '--handle-value-color'))
-      .toBe(bidDigits)
+      .toBe(`color-mix(in srgb, ${bidDigits} 80%, #fff)`)
     expect(declaration(ruleOf('.futures-workstation-owned-order.is-sell'), '--handle-value-color'))
-      .toBe(askDigits)
+      .toBe(`color-mix(in srgb, ${askDigits} 80%, #fff)`)
     const digitsRule = ruleOf(
       '.futures-workstation-owned-order-plate em:not(.futures-workstation-owned-order-exit)',
     )
