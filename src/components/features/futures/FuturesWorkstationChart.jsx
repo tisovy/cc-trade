@@ -134,7 +134,12 @@ const toDraftString = (value) => (
 
 const CANONICAL_NONNEGATIVE_DECIMAL = /^(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$/
 const ORDER_HANDLE_HALF_HEIGHT = 11
-const ORDER_HANDLE_GAP = 24
+// The vertical span a plate occupies on screen — the 16px plate, its borders
+// and a breath of air. Two handles whose lines sit closer than this cannot
+// both be read at their own line, so the later one steps sideways instead of
+// down: the collision spends the one axis that does not mean price.
+const ORDER_HANDLE_STACK_HEIGHT = 18
+const ORDER_HANDLE_COLUMN_GAP = 6
 const NOOP_ORDER_COORDINATE_REFRESH = () => {}
 // Ask for the next page a few bars before the edge, so the candles are there by
 // the time the operator scrolls onto them.
@@ -199,33 +204,51 @@ const futuresPositionIdentity = position => (
   `${position?.symbol}:${position?.positionSide}`
 )
 
+// A handle is read against the line it prices, so it is drawn at that line —
+// never nudged down the chart to clear a neighbour. The old vertical
+// anti-overlap spread the plates apart, and the displacement compounded down
+// the stack: the operator grabbed a plate that was no longer on its price,
+// and the drag honoured the pointer, not the order. Only the plot's own edges
+// may displace a handle now, and only by the half-plate that keeps it
+// reachable. Handles whose lines genuinely collide step into columns; the
+// pixel offsets for those columns are written by the measurement pass below,
+// which is the only place that knows how wide a plate turned out to be.
 const layoutOrderCoordinates = (entries, height) => {
   if (entries.length === 0 || height <= 0) return []
   const top = Math.min(ORDER_HANDLE_HALF_HEIGHT, height / 2)
   const bottom = Math.max(top, height - ORDER_HANDLE_HALF_HEIGHT)
-  const gap = entries.length <= 1
-    ? 0
-    : Math.min(ORDER_HANDLE_GAP, (bottom - top) / (entries.length - 1))
   const placed = entries
     .map((entry, originalIndex) => ({
       ...entry,
       anchorY: entry.y,
       originalIndex,
       y: Math.max(top, Math.min(bottom, entry.y)),
+      column: 0,
+      collisionGroup: 0,
     }))
     .sort((left, right) => (
       left.y - right.y
       || futuresOrderIdentity(left.order).localeCompare(futuresOrderIdentity(right.order))
     ))
 
+  let group = 0
   for (let index = 1; index < placed.length; index += 1) {
-    placed[index].y = Math.max(placed[index].y, placed[index - 1].y + gap)
-  }
-  if (placed.at(-1).y > bottom) {
-    placed[placed.length - 1].y = bottom
-    for (let index = placed.length - 2; index >= 0; index -= 1) {
-      placed[index].y = Math.min(placed[index].y, placed[index + 1].y - gap)
+    const current = placed[index]
+    if (current.y - placed[index - 1].y >= ORDER_HANDLE_STACK_HEIGHT) group += 1
+    current.collisionGroup = group
+    // Sorted by y, so everything that can overlap this plate is directly
+    // behind it; the first free column among those is this plate's. A chain
+    // can weave back to column zero once it has climbed clear of the plate
+    // that held it.
+    const taken = new Set()
+    for (let back = index - 1;
+      back >= 0 && current.y - placed[back].y < ORDER_HANDLE_STACK_HEIGHT;
+      back -= 1) {
+      taken.add(placed[back].column)
     }
+    let column = 0
+    while (taken.has(column)) column += 1
+    current.column = column
   }
 
   return placed
@@ -289,6 +312,10 @@ export const FuturesWorkstationChart = ({
   const [containerSize, setContainerSize] = useState({ width: 0, height: 0 })
   const [measurement, setMeasurement] = useState(null)
   const [orderCoordinates, setOrderCoordinates] = useState([])
+  // The drawn handle elements by order identity, for the sideways-offset
+  // measurement pass: a column must clear the widest plate in the column
+  // before it, and only the DOM knows how wide a plate turned out to be.
+  const orderHandleElementsRef = useRef(new Map())
   const [positionAnnotationCoordinates, setPositionAnnotationCoordinates] = useState([])
   // The order the drag holds: `lifting` while the exchange is being asked to
   // cancel it, `moving` once it has, `placing` while its replacement is in
@@ -984,6 +1011,7 @@ export const FuturesWorkstationChart = ({
           && entry.displayPrice === next[index].displayPrice
           && entry.anchorY === next[index].anchorY
           && entry.y === next[index].y
+          && entry.column === next[index].column
         ))
         return unchanged ? previous : next
       })
@@ -1042,6 +1070,50 @@ export const FuturesWorkstationChart = ({
       pending = null
     }
   }, [candles, containerSize.height, positionAnnotations, restingOrders])
+
+  // The sideways offsets for colliding handles, measured and written before
+  // paint so a collision never flashes as a pile. Written imperatively onto
+  // the elements rather than through state: the offsets are derived from what
+  // is already rendered, and a measure-then-set-state pass would buy the same
+  // pixels with an extra render. Every handle gets the property written —
+  // including the zero of column nought — so an offset from a dissolved
+  // collision cannot outlive the collision.
+  useLayoutEffect(() => {
+    const elements = orderHandleElementsRef.current
+    const groups = new Map()
+    for (const entry of orderCoordinates) {
+      const members = groups.get(entry.collisionGroup)
+      if (members === undefined) groups.set(entry.collisionGroup, [entry])
+      else members.push(entry)
+    }
+    for (const members of groups.values()) {
+      const widths = []
+      for (const entry of members) {
+        const element = elements.get(futuresOrderIdentity(entry.order))
+        if (!element) continue
+        // Ceiled from the fractional box, not `offsetWidth`: that rounds a
+        // 129.3px plate down to 129 and quietly spends a third of the column
+        // gap — measured in Chromium against the desk's own stylesheet.
+        widths[entry.column] = Math.max(
+          widths[entry.column] ?? 0,
+          Math.ceil(element.getBoundingClientRect().width),
+        )
+      }
+      const offsets = [0]
+      for (let column = 1; column < widths.length; column += 1) {
+        offsets[column] = offsets[column - 1]
+          + (widths[column - 1] ?? 0)
+          + ORDER_HANDLE_COLUMN_GAP
+      }
+      for (const entry of members) {
+        const element = elements.get(futuresOrderIdentity(entry.order))
+        element?.style.setProperty(
+          '--handle-column-offset',
+          `${offsets[entry.column] ?? 0}px`,
+        )
+      }
+    }
+  }, [orderCoordinates])
 
   // A dragged order is shown as its own price line so the move is read on the
   // chart and on the price axis, not only on the handle badge.
@@ -1243,13 +1315,20 @@ export const FuturesWorkstationChart = ({
     const originY = typeof series?.priceToCoordinate === 'function'
       ? series.priceToCoordinate(toNumber(order.price))
       : null
+    const anchoredY = typeof originY === 'number' && Number.isFinite(originY) ? originY : null
     const drag = {
       pointerId: event.pointerId,
       order,
       orderIdentity: futuresOrderIdentity(order),
       originPrice: order.price,
       price: order.price,
-      y: typeof originY === 'number' && Number.isFinite(originY) ? originY : null,
+      y: anchoredY,
+      // The grab holds a point, not a position on the price scale: the pointer
+      // lands somewhere on the plate, and the order must not jump by that
+      // landing offset. Moves are read as travel from here, applied to the
+      // line the order actually rested on.
+      grabClientY: event.clientY,
+      grabY: anchoredY,
       status: 'lifting',
       abandoned: false,
       releasedEarly: false,
@@ -1320,7 +1399,14 @@ export const FuturesWorkstationChart = ({
     // to the page would let a drag select text across the desk.
     event.preventDefault()
     event.stopPropagation()
-    const y = Math.max(0, Math.min(rect.height, event.clientY - rect.top))
+    // Travel, not position: the price follows how far the pointer has moved
+    // since the grab, from the line the order rested on — never a jump to
+    // wherever on the plate the pointer happened to land. The absolute read
+    // remains only for a drag that began with no line to measure from.
+    const aimedY = drag.grabY !== null && typeof drag.grabClientY === 'number'
+      ? drag.grabY + (event.clientY - drag.grabClientY)
+      : event.clientY - rect.top
+    const y = Math.max(0, Math.min(rect.height, aimedY))
     // Sideways, or less than the row the mark already occupies. Redrawing the
     // line and republishing the drag would repaint the chart to put both back
     // exactly where they are.
@@ -1489,8 +1575,12 @@ export const FuturesWorkstationChart = ({
             longer rests. */}
         {orderCoordinates.filter(({ order }) => (
           !liftedOrderIdentities.has(futuresOrderIdentity(order))
-        )).map(({ order, displayPrice, y, anchorY }) => {
+        )).map(({ order, displayPrice, y, anchorY, column }) => {
           const orderIdentity = futuresOrderIdentity(order)
+          const holdHandleElement = (element) => {
+            if (element === null) orderHandleElementsRef.current.delete(orderIdentity)
+            else orderHandleElementsRef.current.set(orderIdentity, element)
+          }
           // The cancellation that lifts this order is in flight: it is still
           // working on the exchange, so it stays drawn where it rests and says
           // what is being done to it.
@@ -1541,8 +1631,10 @@ export const FuturesWorkstationChart = ({
               <div
                 className={`futures-workstation-owned-order is-${intent.tone} is-algo${trigger.triggered ? ' is-triggered' : ''}${displaced ? ' is-displaced' : ''}`}
                 key={orderIdentity}
+                ref={holdHandleElement}
                 style={{ top: `${top}px` }}
                 data-anchor-y={anchorY}
+                data-collision-column={column}
                 role="note"
                 aria-label={trigger.triggered
                   ? `ALGO ${intent.side} ${intent.label} order triggered at ${displayPrice}; it fired into order ${trigger.spawnedOrderId} and is awaiting confirmation, so it is no longer working and cannot be moved or cancelled`
@@ -1563,8 +1655,10 @@ export const FuturesWorkstationChart = ({
             <div
               className={`futures-workstation-owned-order is-${intent.tone}${displaced ? ' is-displaced' : ''}${lifting ? ' is-lifting' : ''}`}
               key={orderIdentity}
+              ref={holdHandleElement}
               style={{ top: `${top}px` }}
               data-anchor-y={anchorY}
+              data-collision-column={column}
             >
               {draggable ? (
                 <button

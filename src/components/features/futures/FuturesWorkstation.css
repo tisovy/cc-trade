@@ -976,16 +976,21 @@
    border rather than as something resting on the chart. The position
    annotations stay flush — they are labels, and nothing is ever aimed at
    them. */
+/* The 8px gutter is the CSS's; the collision offset is written per handle by
+   the chart's measurement pass, and moves a plate sideways — never off its
+   line — when another plate's line sits within the same few pixels. It stays
+   out of this rule's body: the stylesheet is read as data by the viewport
+   suite, whose declaration reader does not cross comments. */
 .futures-workstation-owned-order {
   position: absolute;
   right: auto;
-  left: 8px;
+  left: calc(8px + var(--handle-column-offset, 0px));
   display: flex;
   align-items: center;
   justify-content: flex-start;
   gap: 8px;
   height: 16px;
-  max-width: calc(100% - 8px);
+  max-width: calc(100% - 8px - var(--handle-column-offset, 0px));
   padding: 0 6px;
   transform: translateY(-50%);
   border: 1px solid currentColor;

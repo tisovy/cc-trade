@@ -233,7 +233,10 @@ describe('FuturesWorkstationChart viewport ownership', () => {
       '.futures-workstation-owned-order',
     ]) {
       const rule = ruleOf(selector)
-      expect(declaration(rule, 'left'), selector).toMatch(/^(?:0|\d+px)$/)
+      // A plain distance, or that distance plus the zero-defaulted sideways
+      // offset a colliding handle is dealt by the measurement pass.
+      expect(declaration(rule, 'left'), selector)
+        .toMatch(/^(?:0|\d+px|calc\(\d+px \+ var\(--handle-column-offset, 0px\)\))$/)
       expect(declaration(rule, 'right') ?? 'auto', selector).toBe('auto')
     }
 
@@ -243,13 +246,15 @@ describe('FuturesWorkstationChart viewport ownership', () => {
     // rather than restated, so the two cannot drift apart.
     const gutter = declaration(ruleOf('.futures-workstation-reading-notice'), 'left')
     expect(gutter).toMatch(/^\d+px$/)
-    expect(declaration(ruleOf('.futures-workstation-owned-order'), 'left')).toBe(gutter)
+    expect(declaration(ruleOf('.futures-workstation-owned-order'), 'left'))
+      .toBe(`calc(${gutter} + var(--handle-column-offset, 0px))`)
     expect(declaration(ruleOf('.futures-workstation-position-annotation'), 'left')).toBe('0')
 
     // Inset from the left without shortening, the plate would reach that same
-    // distance past the plot's right edge — into the price scale.
+    // distance past the plot's right edge — into the price scale. The sideways
+    // collision offset shortens it again by exactly what it inset.
     expect(declaration(ruleOf('.futures-workstation-owned-order'), 'max-width'))
-      .toBe(`calc(100% - ${gutter})`)
+      .toBe(`calc(100% - ${gutter} - var(--handle-column-offset, 0px))`)
 
     // The coloured edge faces the line the plate names, so a mirrored plate is
     // still read as belonging to its price rather than as loose text.
@@ -953,7 +958,7 @@ describe('FuturesWorkstationChart viewport ownership', () => {
       name: 'Move SELL LONG order at 59900 with Ctrl or Alt drag',
     })
 
-    fireEvent.pointerDown(order, { pointerId: 7, button: 0, ctrlKey: true })
+    fireEvent.pointerDown(order, { pointerId: 7, button: 0, ctrlKey: true, clientY: 100 })
     expect(props.onOrderLift).toHaveBeenCalledExactlyOnceWith(
       expect.objectContaining({ orderId: '71' }),
     )
@@ -995,7 +1000,7 @@ describe('FuturesWorkstationChart viewport ownership', () => {
     const first = await screen.findByRole('button', {
       name: 'Move SELL LONG order at 59900 with Ctrl or Alt drag',
     })
-    fireEvent.pointerDown(first, { pointerId: 7, button: 0, ctrlKey: true })
+    fireEvent.pointerDown(first, { pointerId: 7, button: 0, ctrlKey: true, clientY: 100 })
     await settle()
     const surface = dragSurface()
     fireEvent.pointerMove(surface, { pointerId: 7, clientY: 80, ctrlKey: true })
@@ -1010,7 +1015,7 @@ describe('FuturesWorkstationChart viewport ownership', () => {
     const second = await screen.findByRole('button', {
       name: 'Move SELL LONG order at 59700 with Ctrl or Alt drag',
     })
-    fireEvent.pointerDown(second, { pointerId: 8, button: 0, ctrlKey: true })
+    fireEvent.pointerDown(second, { pointerId: 8, button: 0, ctrlKey: true, clientY: 300 })
     await settle()
 
     expect(props.onOrderLift).toHaveBeenCalledTimes(2)
@@ -1047,7 +1052,7 @@ describe('FuturesWorkstationChart viewport ownership', () => {
     })
     // One pointer id throughout: a mouse reports the same one for every gesture,
     // and giving each drag its own would test a desk nobody is sitting at.
-    fireEvent.pointerDown(first, { pointerId: 1, button: 0, ctrlKey: true })
+    fireEvent.pointerDown(first, { pointerId: 1, button: 0, ctrlKey: true, clientY: 100 })
     const surface = dragSurface()
     fireEvent.pointerMove(surface, { pointerId: 1, clientY: 80, ctrlKey: true })
     // Let go while the cancellation is still travelling.
@@ -1058,7 +1063,7 @@ describe('FuturesWorkstationChart viewport ownership', () => {
     const second = await screen.findByRole('button', {
       name: 'Move SELL LONG order at 59700 with Ctrl or Alt drag',
     })
-    fireEvent.pointerDown(second, { pointerId: 1, button: 0, ctrlKey: true })
+    fireEvent.pointerDown(second, { pointerId: 1, button: 0, ctrlKey: true, clientY: 300 })
     await settle()
 
     expect(props.onOrderLift).toHaveBeenCalledTimes(2)
@@ -1101,7 +1106,7 @@ describe('FuturesWorkstationChart viewport ownership', () => {
     const first = await screen.findByRole('button', {
       name: 'Move SELL LONG order at 59900 with Ctrl or Alt drag',
     })
-    fireEvent.pointerDown(first, { pointerId: 1, button: 0, ctrlKey: true })
+    fireEvent.pointerDown(first, { pointerId: 1, button: 0, ctrlKey: true, clientY: 100 })
     fireEvent.pointerMove(surface, { pointerId: 1, clientY: 80, ctrlKey: true })
     fireEvent.pointerUp(surface, { pointerId: 1, clientY: 80, ctrlKey: true })
     await settle()
@@ -1110,7 +1115,7 @@ describe('FuturesWorkstationChart viewport ownership', () => {
     const second = await screen.findByRole('button', {
       name: 'Move SELL LONG order at 59700 with Ctrl or Alt drag',
     })
-    fireEvent.pointerDown(second, { pointerId: 1, button: 0, ctrlKey: true })
+    fireEvent.pointerDown(second, { pointerId: 1, button: 0, ctrlKey: true, clientY: 300 })
     await settle()
     expect(surface.setPointerCapture).toHaveBeenLastCalledWith(1)
     surface.releasePointerCapture.mockClear()
@@ -1138,7 +1143,7 @@ describe('FuturesWorkstationChart viewport ownership', () => {
       name: 'Move SELL LONG order at 59900 with Ctrl or Alt drag',
     })
 
-    fireEvent.pointerDown(order, { pointerId: 8, button: 0, altKey: true })
+    fireEvent.pointerDown(order, { pointerId: 8, button: 0, altKey: true, clientY: 100 })
     await settle()
     const surface = dragSurface()
     fireEvent.pointerMove(surface, { pointerId: 8, clientY: 80, altKey: true })
@@ -1173,7 +1178,7 @@ describe('FuturesWorkstationChart viewport ownership', () => {
       name: 'Move SELL LONG order at 59900 with Ctrl or Alt drag',
     })
 
-    fireEvent.pointerDown(order, { pointerId: 8, button: 0, altKey: true })
+    fireEvent.pointerDown(order, { pointerId: 8, button: 0, altKey: true, clientY: 100 })
     await settle()
     const surface = dragSurface()
     fireEvent.pointerMove(surface, { pointerId: 8, clientY: 80, altKey: true })
@@ -1207,7 +1212,7 @@ describe('FuturesWorkstationChart viewport ownership', () => {
       name: 'Move SELL LONG order at 59900 with Ctrl or Alt drag',
     })
 
-    fireEvent.pointerDown(order, { pointerId: 9, button: 0, ctrlKey: true })
+    fireEvent.pointerDown(order, { pointerId: 9, button: 0, ctrlKey: true, clientY: 100 })
     await settle()
     const surface = dragSurface()
     fireEvent.pointerMove(surface, { pointerId: 9, clientY: 80, ctrlKey: true })
@@ -1244,7 +1249,7 @@ describe('FuturesWorkstationChart viewport ownership', () => {
     })
     const series = chartMock.charts[0].series[0]
 
-    fireEvent.pointerDown(order, { pointerId: 21, button: 0, ctrlKey: true })
+    fireEvent.pointerDown(order, { pointerId: 21, button: 0, ctrlKey: true, clientY: 100 })
     await settle()
     // Drawn as a destination: no axis label, because no order is there.
     const pendingLine = priceLinesOf(series).find(line => line.lineStyle === 'Dotted')
@@ -1302,7 +1307,7 @@ describe('FuturesWorkstationChart viewport ownership', () => {
       name: 'Move SELL LONG order at 59900 with Ctrl or Alt drag',
     })
 
-    fireEvent.pointerDown(order, { pointerId: 22, button: 0, ctrlKey: true })
+    fireEvent.pointerDown(order, { pointerId: 22, button: 0, ctrlKey: true, clientY: 100 })
     await settle()
     const surface = dragSurface()
     fireEvent.pointerMove(surface, { pointerId: 22, clientY: 80, ctrlKey: true })
@@ -1338,7 +1343,7 @@ describe('FuturesWorkstationChart viewport ownership', () => {
       name: 'Move SELL LONG order at 59900 with Ctrl or Alt drag',
     })
 
-    fireEvent.pointerDown(order, { pointerId: 24, button: 0, ctrlKey: true })
+    fireEvent.pointerDown(order, { pointerId: 24, button: 0, ctrlKey: true, clientY: 100 })
     await settle()
     const surface = dragSurface()
     fireEvent.pointerMove(surface, { pointerId: 24, clientY: 80, ctrlKey: true })
@@ -1382,7 +1387,7 @@ describe('FuturesWorkstationChart viewport ownership', () => {
       name: 'Move SELL LONG order at 59900 with Ctrl or Alt drag',
     })
 
-    fireEvent.pointerDown(order, { pointerId: 23, button: 0, ctrlKey: true })
+    fireEvent.pointerDown(order, { pointerId: 23, button: 0, ctrlKey: true, clientY: 100 })
     await settle()
     const surface = dragSurface()
     fireEvent.pointerMove(surface, { pointerId: 23, clientY: 80, ctrlKey: true })
@@ -1425,9 +1430,16 @@ describe('FuturesWorkstationChart viewport ownership', () => {
     const second = await screen.findByRole('button', {
       name: 'Move SELL SHORT order at 59900 with Ctrl or Alt drag',
     })
-    await waitFor(() => expect(handleOf(first).style.top).not.toBe(handleOf(second).style.top))
+    // Both at their shared line — a collision steps sideways, never off the
+    // price — told apart by the column each was dealt.
+    await waitFor(() => expect(handleOf(first)).toHaveStyle({ top: '100px' }))
+    expect(handleOf(second)).toHaveStyle({ top: '100px' })
+    expect(handleOf(first).dataset.collisionColumn).toBe('0')
+    expect(handleOf(second).dataset.collisionColumn).toBe('1')
+    expect(handleOf(first).style.getPropertyValue('--handle-column-offset')).toBe('0px')
+    expect(handleOf(second).style.getPropertyValue('--handle-column-offset')).not.toBe('0px')
 
-    fireEvent.pointerDown(first, { pointerId: 11, button: 0, ctrlKey: true })
+    fireEvent.pointerDown(first, { pointerId: 11, button: 0, ctrlKey: true, clientY: 100 })
     await settle()
     fireEvent.pointerMove(dragSurface(), { pointerId: 11, clientY: 80, ctrlKey: true })
 
@@ -1444,6 +1456,73 @@ describe('FuturesWorkstationChart viewport ownership', () => {
       price: '59920',
       restored: false,
     }))
+  })
+
+  // The plate is read against the line it prices, so it is drawn at that line.
+  // The old vertical anti-overlap nudged neighbours apart, the displacement
+  // compounded down a dense stack, and the operator grabbed plates that were
+  // no longer at their price. A neighbour within a plate's height steps
+  // sideways instead — never off its line — and a plate clear of the pile
+  // comes home to column nought.
+  it('keeps every plate at its own line and resolves collisions sideways', async () => {
+    const props = {
+      ...properties([candle(1_784_000_000_000)]),
+      ownedOrders: [
+        workingOrder({ orderId: '111', clientOrderId: 'stack-order-a' }),
+        workingOrder({ orderId: '112', clientOrderId: 'stack-order-b', price: '59890' }),
+        workingOrder({ orderId: '113', clientOrderId: 'stack-order-c', price: '59860' }),
+      ],
+    }
+    render(<FuturesWorkstationChart {...props} />)
+    const a = await screen.findByRole('button', {
+      name: 'Move SELL LONG order at 59900 with Ctrl or Alt drag',
+    })
+    const b = screen.getByRole('button', {
+      name: 'Move SELL LONG order at 59890 with Ctrl or Alt drag',
+    })
+    const c = screen.getByRole('button', {
+      name: 'Move SELL LONG order at 59860 with Ctrl or Alt drag',
+    })
+
+    await waitFor(() => expect(handleOf(a)).toHaveStyle({ top: '100px' }))
+    expect(handleOf(b)).toHaveStyle({ top: '110px' })
+    expect(handleOf(c)).toHaveStyle({ top: '140px' })
+    // 100 and 110 collide, so the later plate steps aside; 140 is clear of
+    // both and owes nothing to the pile above it.
+    expect(handleOf(a).dataset.collisionColumn).toBe('0')
+    expect(handleOf(b).dataset.collisionColumn).toBe('1')
+    expect(handleOf(c).dataset.collisionColumn).toBe('0')
+  })
+
+  // The grab holds a point on the plate, not a position on the price scale:
+  // the pointer lands a few pixels off the plate's centre, and the order must
+  // not jump by that landing offset — it moves exactly as far as the pointer
+  // has travelled since the grab.
+  it('moves the order by pointer travel, not to where on the plate it was grabbed', async () => {
+    const props = { ...properties([candle(1_784_000_000_000)]), ownedOrders: [workingOrder()] }
+    render(<FuturesWorkstationChart {...props} />)
+    const canvas = screen.getByTestId('futures-workstation-chart')
+    canvas.getBoundingClientRect = () => ({
+      left: 0, top: 0, width: 320, height: 320, right: 320, bottom: 320,
+    })
+    const order = await screen.findByRole('button', {
+      name: 'Move SELL LONG order at 59900 with Ctrl or Alt drag',
+    })
+
+    // Grabbed 7px below the line the order rests on (y 100), moved 5px down.
+    fireEvent.pointerDown(order, { pointerId: 14, button: 0, ctrlKey: true, clientY: 107 })
+    await settle()
+    fireEvent.pointerMove(dragSurface(), { pointerId: 14, clientY: 112, ctrlKey: true })
+    fireEvent.pointerUp(dragSurface(), { pointerId: 14, clientY: 112, ctrlKey: true })
+    await settle()
+
+    // Five pixels of travel from 59900 — not 59888, the price that happened
+    // to sit under the pointer's absolute position.
+    expect(props.onOrderDrop).toHaveBeenCalledExactlyOnceWith({
+      order: expect.objectContaining({ orderId: '71' }),
+      price: '59895',
+      restored: false,
+    })
   })
 
   it('refreshes order handle coordinates when the visible chart range changes', async () => {
@@ -1490,7 +1569,7 @@ describe('FuturesWorkstationChart viewport ownership', () => {
     })
     const series = chartMock.charts[0].series[0]
 
-    fireEvent.pointerDown(handle, { pointerId: 4, button: 0, altKey: true })
+    fireEvent.pointerDown(handle, { pointerId: 4, button: 0, altKey: true, clientY: 100 })
     await settle()
     const movingLine = priceLinesOf(series).find(line => line.lineStyle === 'Dashed')
     expect(movingLine).toMatchObject({ price: 59900, axisLabelVisible: true })
@@ -1531,7 +1610,7 @@ describe('FuturesWorkstationChart viewport ownership', () => {
       name: 'Move BUY LONG order at 59900 with Ctrl or Alt drag',
     })
 
-    fireEvent.pointerDown(handle, { pointerId: 11, button: 0, altKey: true })
+    fireEvent.pointerDown(handle, { pointerId: 11, button: 0, altKey: true, clientY: 100 })
     await settle()
     const measuredForTheLift = measure.mock.calls.length
     expect(measuredForTheLift).toBeGreaterThan(0)
@@ -1568,7 +1647,7 @@ describe('FuturesWorkstationChart viewport ownership', () => {
       name: 'Move BUY LONG order at 59900 with Ctrl or Alt drag',
     })
 
-    fireEvent.pointerDown(handle, { pointerId: 12, button: 0, altKey: true })
+    fireEvent.pointerDown(handle, { pointerId: 12, button: 0, altKey: true, clientY: 100 })
     await settle()
     fireEvent.pointerMove(dragSurface(), { pointerId: 12, clientY: 80, altKey: true })
 
@@ -1595,7 +1674,7 @@ describe('FuturesWorkstationChart viewport ownership', () => {
     })
     const series = chartMock.charts[0].series[0]
 
-    fireEvent.pointerDown(handle, { pointerId: 13, button: 0, altKey: true })
+    fireEvent.pointerDown(handle, { pointerId: 13, button: 0, altKey: true, clientY: 100 })
     await settle()
     const movingLine = priceLinesOf(series).find(line => line.lineStyle === 'Dashed')
 
@@ -1627,7 +1706,7 @@ describe('FuturesWorkstationChart viewport ownership', () => {
       name: 'Move BUY LONG order at 59900 with Ctrl or Alt drag',
     })
 
-    fireEvent.pointerDown(handle, { pointerId: 5, button: 0, altKey: true })
+    fireEvent.pointerDown(handle, { pointerId: 5, button: 0, altKey: true, clientY: 100 })
     await settle()
     fireEvent.pointerMove(dragSurface(), { pointerId: 5, clientY: 80, altKey: true })
 
@@ -1655,7 +1734,7 @@ describe('FuturesWorkstationChart viewport ownership', () => {
     })
     const series = chartMock.charts[0].series[0]
 
-    fireEvent.pointerDown(handle, { pointerId: 9, button: 0, altKey: true })
+    fireEvent.pointerDown(handle, { pointerId: 9, button: 0, altKey: true, clientY: 100 })
     await settle()
     const originLine = priceLinesOf(series).find(line => line.lineStyle === 'Dotted')
     expect(originLine).toMatchObject({
@@ -1752,7 +1831,7 @@ describe('FuturesWorkstationChart viewport ownership', () => {
       name: 'ALGO SELL SHORT order at 59850; price is managed by Binance and is not draggable',
     })
 
-    fireEvent.pointerDown(regularOrder, { pointerId: 9, button: 0, ctrlKey: true })
+    fireEvent.pointerDown(regularOrder, { pointerId: 9, button: 0, ctrlKey: true, clientY: 100 })
     await settle()
     fireEvent.pointerMove(dragSurface(), { pointerId: 9, clientY: 80, ctrlKey: true })
 
@@ -1907,7 +1986,7 @@ describe('FuturesWorkstationChart viewport ownership', () => {
       name: 'Move SELL LONG order at 59900 with Ctrl or Alt drag',
     })
 
-    fireEvent.pointerDown(grip, { pointerId: 6, button: 0, ctrlKey: true })
+    fireEvent.pointerDown(grip, { pointerId: 6, button: 0, ctrlKey: true, clientY: 100 })
     await settle()
 
     // Nothing left the desk: the refusal came before the cancellation.
