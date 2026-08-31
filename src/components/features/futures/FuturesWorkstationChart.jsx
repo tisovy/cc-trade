@@ -269,6 +269,15 @@ const layoutOrderCoordinates = (entries, height) => {
     .map(({ originalIndex: _originalIndex, ...entry }) => entry)
 }
 
+// Two overlay line specs that would draw the same line. Shallow: the options
+// are flat (price, color, style, title), and a nested value would mean a new
+// line anyway.
+const sameOverlaySpec = (left, right) => {
+  const leftKeys = Object.keys(left)
+  if (leftKeys.length !== Object.keys(right).length) return false
+  return leftKeys.every(key => left[key] === right[key])
+}
+
 export const FuturesWorkstationChart = ({
   symbol,
   interval,
@@ -301,7 +310,7 @@ export const FuturesWorkstationChart = ({
   const shellRef = useRef(null)
   const chartRef = useRef(null)
   const seriesRef = useRef(null)
-  const overlayLinesRef = useRef([])
+  const overlayLinesRef = useRef(new Map())
   const onPricePickRef = useRef(onPricePick)
   const onTradingGestureRef = useRef(onTradingGesture)
   const onOrderLiftRef = useRef(onOrderLift)
@@ -742,7 +751,7 @@ export const FuturesWorkstationChart = ({
       chart.remove()
       chartRef.current = null
       seriesRef.current = null
-      overlayLinesRef.current = []
+      overlayLinesRef.current = new Map()
       rowStateRef.current = { contract: null }
       setPositionAnnotationCoordinates([])
     }
@@ -913,21 +922,58 @@ export const FuturesWorkstationChart = ({
   useEffect(() => {
     const series = seriesRef.current?.contractSeries
     if (!series) return
-    for (const line of overlayLinesRef.current) series.removePriceLine(line)
-    const nextLines = []
-    const addLine = (priceValue, options) => {
+    // Keyed and diffed, not torn down and rebuilt. Every commit of a fill
+    // burst used to recreate every overlay line on the chart — one order's
+    // report repainted every other order, both position bands and every
+    // alert. Only the lines whose price or options actually changed touch
+    // createPriceLine/removePriceLine; an unchanged line is not the chart's
+    // business this commit.
+    const specs = []
+    const addLine = (key, priceValue, options) => {
       const price = toNumber(priceValue)
       if (price === null || price <= 0) return
-      nextLines.push(series.createPriceLine({ price, ...options }))
+      specs.push({ key, options: { price, ...options } })
     }
-    drawings.forEach((drawing, index) => addLine(drawing.price, {
+    buildOverlaySpecs(addLine)
+    const held = overlayLinesRef.current instanceof Map
+      ? overlayLinesRef.current
+      : new Map()
+    const next = new Map()
+    let touched = false
+    for (const { key, options } of specs) {
+      const existing = next.has(key) ? null : held.get(key) ?? null
+      if (existing !== null && sameOverlaySpec(existing.options, options)) {
+        held.delete(key)
+        next.set(key, existing)
+        continue
+      }
+      if (existing !== null) {
+        held.delete(key)
+        series.removePriceLine(existing.line)
+      }
+      next.set(key, { options, line: series.createPriceLine(options) })
+      touched = true
+    }
+    for (const entry of held.values()) {
+      series.removePriceLine(entry.line)
+      touched = true
+    }
+    overlayLinesRef.current = next
+    // The handle plates measure themselves against the DOM; a commit that
+    // moved no line owes them no reflow.
+    if (touched) requestOrderCoordinateRefreshRef.current()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [alerts, drawings, positions, restingOrders])
+
+  const buildOverlaySpecs = (addLine) => {
+    drawings.forEach((drawing, index) => addLine(`drawing:${index}`, drawing.price, {
       color: '#8b5cf6',
       lineWidth: 1,
       lineStyle: LineStyle.Solid,
       axisLabelVisible: false,
       title: `D${index + 1}`,
     }))
-    alerts.forEach((alert, index) => addLine(alert.price, {
+    alerts.forEach((alert, index) => addLine(`alert:${index}`, alert.price, {
       color: '#ff8a3d',
       lineWidth: 1,
       lineStyle: LineStyle.Dashed,
@@ -952,7 +998,7 @@ export const FuturesWorkstationChart = ({
       const entryTone = presentation.tone === 'buy'
         ? { band: 'rgba(43, 196, 138, 0.5)', plate: '#196a51' }
         : { band: 'rgba(239, 91, 105, 0.5)', plate: '#7b3541' }
-      addLine(position.entryPrice, {
+      addLine(`position:${futuresPositionIdentity(position)}:entry`, position.entryPrice, {
         color: entryTone.band,
         axisLabelColor: entryTone.plate,
         lineWidth: 1,
@@ -960,7 +1006,7 @@ export const FuturesWorkstationChart = ({
         axisLabelVisible: true,
         title: '',
       })
-      addLine(position.liquidationPrice, {
+      addLine(`position:${futuresPositionIdentity(position)}:liquidation`, position.liquidationPrice, {
         color: '#f0b90b',
         lineWidth: 1,
         lineStyle: LineStyle.LargeDashed,
@@ -972,7 +1018,7 @@ export const FuturesWorkstationChart = ({
     // test painted every order — including plain buys — red. Colour by side.
     restingOrders.forEach((order) => {
       const intent = describeFuturesOrderIntent(order)
-      addLine(chartOrderPresentationPrice(order), {
+      addLine(`order:${futuresOrderIdentity(order)}`, chartOrderPresentationPrice(order), {
         // One pixel, like every other line on this chart. A resting order was
         // the only overlay drawn at two, and against candles a few pixels wide
         // it read as a band rather than as a price — it hid the bars sitting at
@@ -986,9 +1032,7 @@ export const FuturesWorkstationChart = ({
         title: '',
       })
     })
-    overlayLinesRef.current = nextLines
-    requestOrderCoordinateRefreshRef.current()
-  }, [alerts, drawings, positions, restingOrders])
+  }
 
   useEffect(() => {
     let pending = null

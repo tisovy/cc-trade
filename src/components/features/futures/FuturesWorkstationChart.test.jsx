@@ -2333,3 +2333,71 @@ describe('FuturesWorkstationChart series writes', () => {
     expect(order).toEqual(['volume', 'candles'])
   })
 })
+
+// One order's fill used to repaint the whole overlay: every resting order,
+// both position bands and every alert were torn down and recreated on every
+// commit of a burst. The lines are keyed and diffed now — an unchanged line
+// is not the chart's business, and the reflow the handles pay for follows
+// only an actual change.
+describe('the overlay lines a fill burst leaves alone', () => {
+  it('touches no unrelated line when one order changes', async () => {
+    const props = properties([candle(1_784_000_000_000)])
+    const orderA = workingOrder()
+    const orderB = workingOrder({
+      orderId: '72',
+      clientOrderId: 'cc7-fedcba9876543210fedcba9876543210',
+      side: 'BUY',
+      positionEffect: 'ENTER',
+      price: '59800',
+    })
+    const position = {
+      symbol: 'BTCUSDT',
+      positionSide: 'LONG',
+      quantity: '0.5',
+      entryPrice: '59000',
+      liquidationPrice: '58000',
+    }
+    const { rerender } = render(
+      <FuturesWorkstationChart
+        {...props}
+        ownedOrders={[orderA, orderB]}
+        positions={[position]}
+      />,
+    )
+    const series = chartMock.charts[0].series[0]
+    await waitFor(() => expect(series.createPriceLine).toHaveBeenCalledWith(
+      expect.objectContaining({ price: 59900 }),
+    ))
+    series.createPriceLine.mockClear()
+    series.removePriceLine.mockClear()
+
+    // A partial fill restates the list — new array, new objects, one order's
+    // executed quantity moved — and moves no line's price or colour.
+    rerender(
+      <FuturesWorkstationChart
+        {...props}
+        ownedOrders={[{ ...orderA }, { ...orderB, executedQty: '0.2' }]}
+        positions={[{ ...position }]}
+      />,
+    )
+    await settle()
+    expect(series.createPriceLine).not.toHaveBeenCalled()
+    expect(series.removePriceLine).not.toHaveBeenCalled()
+
+    // The order that actually moved touches exactly its own line, and no
+    // other order pays for it.
+    rerender(
+      <FuturesWorkstationChart
+        {...props}
+        ownedOrders={[{ ...orderA }, { ...orderB, price: '59750' }]}
+        positions={[{ ...position }]}
+      />,
+    )
+    await settle()
+    expect(series.removePriceLine).toHaveBeenCalledTimes(1)
+    expect(series.createPriceLine).toHaveBeenCalledTimes(1)
+    expect(series.createPriceLine).toHaveBeenCalledWith(
+      expect.objectContaining({ price: 59750 }),
+    )
+  })
+})
