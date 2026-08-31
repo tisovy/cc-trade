@@ -965,3 +965,37 @@ deferred (394–1355 ms in the console; journal deferrals are account reads).
 Needs its own change: why a fast alt book crosses within seconds of every
 resync, and whether recovery can keep the accumulated far levels instead
 of starting the book from the page.
+
+## The morning the other half landed — 2026-08-31
+
+- `/tmp` did not survive the night: the verified scratch copy and the patch
+  were gone by 10:17. The renderer half was reconstructed from the session
+  transcript — every scripted replacement replayed against a fresh HEAD
+  archive, each one asserting its anchor before touching the file, the test
+  agent's 49 edits replayed the same way. Integrity held three ways: the
+  live-vs-copy file set matched the pre-loss listing exactly, the full suite
+  came back green, and the bites were re-run against a fresh HEAD copy
+  (8 of 9 new tests fail there; the ninth is a labeled guard).
+- The replay caught one honest hole in the night's claim: the first replay
+  run died before the `cp` of the two new test files, and vitest silently
+  skipped the missing paths — «430/430» had not included them. Re-run with
+  the files present: green, and the full suite counts them.
+- Self-audit before deploy, two adversarial readers over the reconstructed
+  code plus a hand pass over the live half. The live half read clean. One
+  drain finding was confirmed by reading and then *disproved by running*: a
+  report queued ahead of the account's first-naming envelope defers its
+  fold past the reset, but the fold no-ops on unheld history and a held
+  history under a null fingerprint is unreachable — the test written to
+  bite it passed on the unfixed code, so the condition stays as it is and
+  the test stays as a guard. The remaining findings are recorded in the
+  change's design.md (spawned-parent match window widened to the commit
+  window, healed by the backend's own fold) and were left unfixed on
+  purpose: unreachable corners do not buy a verified tree's perturbation.
+- Deployed while the desk was down — no restart stolen from a trading
+  session this time. All ten files byte-identical to the verified copy;
+  suite, eslint, the four guards and the build re-run in the live tree
+  before the commits.
+
+§5 of the change stays open: the operator's next burst session by hand, my
+journal read after it (SUPERSEDED carrying the burst, `NOT_DRAWN` near zero,
+`heldBeats` counting while the stream carries), and the quiet-side control.

@@ -38,28 +38,28 @@
 
 ## 2. One commit per cluster (renderer)
 
-- [ ] 2.1 `useFuturesTrading.handleMessage` queues account-lane frames and
+- [x] 2.1 `useFuturesTrading.handleMessage` queues account-lane frames and
       drains in one state update: first frame after quiet applies
       immediately; frames within `FUTURES_EXECUTION_COMMIT_WINDOW_MS`
       (100, measured basis at the constant) fold into one trailing drain,
       in arrival order, none dropped.
-- [ ] 2.2 `futuresHeldHistory`: batch fold of N execution reports with one
+- [x] 2.2 `futuresHeldHistory`: batch fold of N execution reports with one
       filter+sort+bound pass; result byte-identical to N sequential
       upserts (assert equality against the sequential fold).
-- [ ] 2.3 The review chain (`roundTradeHistory` → round index → wallet
+- [x] 2.3 The review chain (`roundTradeHistory` → round index → wallet
       ledger → settled money) follows a `reviewGeneration` trailing
       `tradeGeneration` by `FUTURES_REVIEW_FOLD_TRAIL_MS` (1000): at most
       one fold per second during a burst, immediate catch-up when the
       burst ends, immediate outside one. Working orders, positions,
       plates, lastExecution stay on the immediate path.
-- [ ] 2.4 `FuturesWorkstationChart`: price lines keyed by order identity,
+- [x] 2.4 `FuturesWorkstationChart`: price lines keyed by order identity,
       diffed — only changed/added/removed orders touch
       `createPriceLine`/`removePriceLine`; unrelated orders' lines and
       handles are not recreated by another order's fill.
 
 ## 3. The instrument tells the truth in a burst
 
-- [ ] 3.1 The drain judges each pending frame at its own commit; an entry
+- [x] 3.1 The drain judges each pending frame at its own commit; an entry
       behind a newer report of the same order in the same drain reads
       `SUPERSEDED` (new code in `FRAME_DELIVERY_CODES`, declared in the
       record, added to the canon's readings-kept-apart). `NOT_DRAWN`
@@ -67,7 +67,7 @@
 
 ## 4. Tests that bite, then the suite
 
-- [ ] 4.1 Each new test verified failing against the pre-change tree
+- [x] 4.1 Each new test verified failing against the pre-change tree
       (`git archive` → scratch copy — an edit is a deployment; never run
       mutation tests in the live tree). At minimum: limiter — ordinary
       refused above `ceiling − reserve` while urgent weight-1 admits at
@@ -81,12 +81,12 @@
       create/remove price line counts under one order's fill; instrument —
       older same-order report in a drain reads `SUPERSEDED`, newest judged
       against the screen (HEAD: `NOT_DRAWN`).
-- [ ] 4.2 Extend `App.futures-burst.test.jsx`: under the recorded burst
+- [x] 4.2 Extend `App.futures-burst.test.jsx`: under the recorded burst
       shape (clusters of 5–7 frames per 200 ms), commits per second are
       bounded by the window and the execution-apply bound
       (`EXECUTION_APPLY_BOUND_MS`) still holds; count commits, not
       wall-clock, where determinism needs it.
-- [ ] 4.3 Full suite, eslint on touched files, the four repository guards,
+- [x] 4.3 Full suite, eslint on touched files, the four repository guards,
       build. Scope check by grep (GitNexus impact returns 0/LOW even for
       plain ESM imports into .jsx — grep is authoritative).
 

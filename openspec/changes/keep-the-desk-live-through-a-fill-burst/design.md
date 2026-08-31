@@ -175,3 +175,22 @@ misjudgment; the operator-verification step separates what remains.
   capacity, the queue-order half stands as recorded.
 - Any change to `serialize`/per-contract command lanes — measured clean in
   this episode (the lanes held only because the limiter did).
+
+### Audited 2026-08-31, recorded
+
+- The spawned-parent match (`parentIdentity`/`parentSettled`) is computed at
+  arrival from the *committed* `openOrders` mirror. When the envelope that
+  first lists a fired algo parent and its spawned order's report share one
+  commit window, the lookup reads the pre-envelope map and the parent is not
+  settled by this path. Sequentially the same miss existed only when both
+  frames shared one JS tick; the drain widens it to the 100 ms window. The
+  backend's own ALGO_UPDATE fold still removes the parent, so the miss heals
+  on the next frame; recorded rather than fixed — recomputing the match
+  inside the drain loop would put a per-report `readSpawnedParents` back on
+  the commit path this change exists to thin.
+- The drain defers a queued report's history fold past a first-naming
+  envelope's reset (the flush guard asks for a non-null prior fingerprint).
+  Audited equivalent to the sequential path: the fold no-ops on unheld
+  history on both sides of the reset, and a held history under a null
+  fingerprint is unreachable because readings apply only to the account they
+  name. Pinned by a labeled guard in `useFuturesTrading.burst-drain.test.js`.
