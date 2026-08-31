@@ -61,7 +61,7 @@ import {
   applyFuturesHistoryReading,
   beginFuturesHistoryRead,
   createHeldFuturesHistory,
-  foldExecutionIntoFuturesHistory,
+  foldExecutionsIntoFuturesHistory,
   futuresHistoryTradeKey,
 } from '../utils/futuresHeldHistory.js'
 import {
@@ -82,6 +82,21 @@ const ACCOUNT_RECONCILE_INTERVAL_MS = 30_000
 // caller that waited forever would hold a drag open on a dead connection.
 const COMMAND_ANSWER_TIMEOUT_MS = 15_000
 const HISTORY_GAP_READ_DELAY_MS = 1_200
+
+// One commit per cluster of account-lane frames. Measured 2026-08-30
+// (desk-2026-08-30-002.jsonl): execution traffic arrives as clusters of five
+// to seven frames every ~200 ms during a partial-fill burst, and one React
+// commit per frame put the commit leg at 400 ms against a quiet 17 ms while
+// the pointer starved. The first frame after a quiet moment applies at once;
+// what lands within this window of the last commit folds into one trailing
+// commit, in arrival order, nothing dropped — 100 ms folds a cluster's
+// remainder into one commit while adding no latency to the first report.
+const FUTURES_EXECUTION_COMMIT_WINDOW_MS = 100
+
+// The review arithmetic — rounds, wallet ledger, settled money — trails the
+// execution state by at most this bound during a burst and catches up when
+// the burst ends. Working orders, positions and the plates stay immediate.
+const FUTURES_REVIEW_FOLD_TRAIL_MS = 1_000
 
 const ACCOUNT_RESOURCE_NAMES = [
   'balances',
@@ -560,8 +575,11 @@ const resetFuturesAccountState = (
   historyReconcileGeneration: 0,
 })
 
-// What one drawn frame is recorded as. Kept beside the marks rather than in the
-// effect, so the three readings can be read in one place.
+// What one drawn frame is recorded as — three of the four readings; the
+// fourth, SUPERSEDED, is decided where the commit's entries are read
+// together, because it is a relation between two frames of one order in one
+// commit, not a property of a frame alone. Kept beside the marks rather
+// than in the effect, so the readings can be read in one place.
 const readingOf = (entry, drawnMark, drawnOrders) => {
   const shows = orderReportDrawn(drawnOrders, entry.report)
   if (shows === false) return 'NOT_DRAWN'
@@ -910,6 +928,11 @@ const useFuturesTrading = ({
   const pendingFrameMarksRef = useRef([])
   const frameMarkSeqRef = useRef(0)
   const screenMarkRef = useRef(screenMark())
+  // The cluster waiting for its one commit, and the clock that decides
+  // whether the next frame starts a commit or joins this one.
+  const executionQueueRef = useRef([])
+  const executionDrainTimerRef = useRef(null)
+  const executionLastCommitAtRef = useRef(0)
 
   // Assigned rather than closed over: the stream handler is installed once per
   // connection, and `sendCommand` is rebuilt whenever the market activation
@@ -1059,6 +1082,101 @@ const useFuturesTrading = ({
       historyGapReadTimers.set(symbol, timer)
     }
 
+    // One state update per cluster: the first frame after quiet applies at
+    // once, frames that follow within the commit window fold into one
+    // trailing commit, in arrival order, none dropped or superseded — the
+    // account lane's lossless delivery holds from the exchange to the
+    // applied state, because every report carries a fill the history fold
+    // must see.
+    const drainExecutionQueue = () => {
+      const entries = executionQueueRef.current
+      if (entries.length === 0) return
+      executionQueueRef.current = []
+      executionLastCommitAtRef.current = Date.now()
+      setState((previous) => {
+        let next = previous
+        let frameRevision = 0
+        // The heavy filter+sort+bound of the held history runs once for the
+        // cluster; the order list and settled set fold per report, in
+        // arrival order, because the envelopes between reports read them.
+        let reports = []
+        const foldReports = () => {
+          if (reports.length === 0) return
+          next = { ...next, history: foldExecutionsIntoFuturesHistory(next.history, reports) }
+          reports = []
+        }
+        for (const entry of entries) {
+          if (entry.revision !== 0) frameRevision = entry.revision
+          if (entry.kind === 'account') {
+            // A frame that re-keys the account wipes the held history; the
+            // reports before it belong to the account before it, exactly as
+            // they would applied one at a time. The first naming from null
+            // needs no flush: the fold no-ops on unheld history either side
+            // of the reset, and a held history under a null fingerprint is
+            // unreachable — readings apply only to the account they name.
+            const fingerprint = futuresAccountFingerprint(entry.payload?.accountFingerprint)
+            if (fingerprint !== null && fingerprint !== (next.accountFingerprint ?? null)
+              && next.accountFingerprint !== null) foldReports()
+            next = applyAccountEnvelope(next, entry.payload, {
+              historyStoreReady: historyStoreUnavailable,
+            })
+            continue
+          }
+          const report = entry.report
+          const settled = settledReportIdentity(report)
+          const withReport = settled === null
+            ? next.settledOrders
+            : rememberSettledOrder(next.settledOrders, settled)
+          // A spawned order that filled or was cancelled has finished what
+          // its parent was placed to do. The parent is remembered as settled
+          // for the same reason any other settled order is: the algo
+          // snapshot is read from a different Binance service than the
+          // stream and can still describe it as resting.
+          const settledOrders = entry.parentSettled
+            ? rememberSettledOrder(withReport, entry.parentIdentity)
+            : withReport
+          const merged = mergeOrderUpdate(next.openOrders, report, settledOrders)
+          next = {
+            ...next,
+            connected: true,
+            lastExecution: report,
+            lastError: null,
+            // An execution report answers an unresolved command only when it
+            // is that command's report. Another order's update says nothing
+            // about the one whose fate is unknown.
+            unresolvedCommand: answersUnresolvedCommand(next.unresolvedCommand, {
+              symbol: report?.symbol,
+              orderId: report?.orderId ?? report?.i,
+              clientOrderId: report?.clientOrderId ?? report?.c,
+            })
+              ? null
+              : next.unresolvedCommand,
+            settledOrders,
+            openOrders: entry.parentSettled
+              ? merged.filter(order => orderIdentity(order) !== entry.parentIdentity)
+              : merged,
+          }
+          reports.push(report)
+        }
+        foldReports()
+        return frameRevision === 0 ? next : { ...next, frameRevision }
+      })
+    }
+
+    const queueExecutionEntry = (entry) => {
+      executionQueueRef.current = [...executionQueueRef.current, entry]
+      if (executionDrainTimerRef.current !== null) return
+      const sinceCommit = Date.now() - executionLastCommitAtRef.current
+      if (sinceCommit >= FUTURES_EXECUTION_COMMIT_WINDOW_MS) {
+        drainExecutionQueue()
+        return
+      }
+      executionDrainTimerRef.current = globalThis.setTimeout(() => {
+        executionDrainTimerRef.current = null
+        drainExecutionQueue()
+      }, FUTURES_EXECUTION_COMMIT_WINDOW_MS - sinceCommit)
+    }
+
     // Account frames only. This used to read every frame the desk delivered —
     // parsing a hundred-and-eighteen-kilobyte book ten times a second in order
     // to find out it was not an account envelope, on the path whose job is to
@@ -1111,12 +1229,7 @@ const useFuturesTrading = ({
         const fingerprint = futuresAccountFingerprint(payload.accountFingerprint)
         if (fingerprint !== null) accountFingerprintRef.current = fingerprint
         const revision = armFrameMarks({ resource: 'account' })
-        setState((previous) => {
-          const next = applyAccountEnvelope(previous, payload, {
-            historyStoreReady: historyStoreUnavailable,
-          })
-          return revision === 0 ? next : { ...next, frameRevision: revision }
-        })
+        queueExecutionEntry({ kind: 'account', payload, revision })
       }
       if (payload.type === 'futures_manual_refresh_outcome') {
         const receipt = readFuturesManualRefreshReceipt(payload)
@@ -1243,47 +1356,15 @@ const useFuturesTrading = ({
         )
         const parentSettled = parentIdentity !== null
           && TERMINAL_FUTURES_ORDER_STATUSES.has(String(report?.status ?? '').toUpperCase())
-        setState((previous) => {
-          const settled = settledReportIdentity(report)
-          const withReport = settled === null
-            ? previous.settledOrders
-            : rememberSettledOrder(previous.settledOrders, settled)
-          // A spawned order that filled or was cancelled has finished what its
-          // parent was placed to do. The parent is remembered as settled for
-          // the same reason any other settled order is: the algo snapshot is
-          // read from a different Binance service than the stream and can still
-          // describe it as resting.
-          const settledOrders = parentSettled
-            ? rememberSettledOrder(withReport, parentIdentity)
-            : withReport
-          const merged = mergeOrderUpdate(previous.openOrders, report, settledOrders)
-          return {
-            ...previous,
-            connected: true,
-            lastExecution: report,
-            lastError: null,
-            // An execution report answers an unresolved command only when it is
-            // that command's report. Another order's update says nothing about
-            // the one whose fate is unknown.
-            unresolvedCommand: answersUnresolvedCommand(previous.unresolvedCommand, {
-              symbol: report?.symbol,
-              orderId: report?.orderId ?? report?.i,
-              clientOrderId: report?.clientOrderId ?? report?.c,
-            })
-              ? null
-              : previous.unresolvedCommand,
-            settledOrders,
-            openOrders: parentSettled
-              ? merged.filter(order => orderIdentity(order) !== parentIdentity)
-              : merged,
-            // The review of the past is maintained by the same stream the live
-            // panels are: an order that settles or a fill that closes a position
-            // belongs in it without asking Binance for the account again.
-            history: foldExecutionIntoFuturesHistory(previous.history, report),
-            ...(frameRevisionForReport === 0
-              ? {}
-              : { frameRevision: frameRevisionForReport }),
-          }
+        // The state application joins the cluster's one commit; what waits on
+        // the report does not wait on the commit — a drag's cancellation is
+        // answered from the report itself, at arrival.
+        queueExecutionEntry({
+          kind: 'execution',
+          report,
+          revision: frameRevisionForReport,
+          parentIdentity,
+          parentSettled,
         })
         answerCommandWatchers({ kind: 'execution', report })
         // The stream updates the visible fill immediately. One delayed REST gap
@@ -1447,6 +1528,13 @@ const useFuturesTrading = ({
 
     return () => {
       active = false
+      // Nothing queued may be lost to a teardown: the cluster in hand is
+      // committed now, however short of the window it is.
+      if (executionDrainTimerRef.current !== null) {
+        globalThis.clearTimeout(executionDrainTimerRef.current)
+        executionDrainTimerRef.current = null
+      }
+      drainExecutionQueue()
       for (const timer of historyGapReadTimers.values()) {
         globalThis.clearTimeout(timer)
       }
@@ -1497,6 +1585,21 @@ const useFuturesTrading = ({
     pendingFrameMarksRef.current = pending.filter(entry => entry.revision > frameRevision)
     const committedAt = Date.now()
     if (!isOpenSocket(wsConnection) || typeof wsConnection?.send !== 'function') return
+    // One commit may fold several reports of one filling order, of which
+    // only the newest can be on the screen. The older ones were folded, not
+    // lost — their fills are in the held history — and judging them against
+    // a screen that has rightly moved past them is how an ordinary burst
+    // used to read as 286 undelivered frames. Each entry is judged at its
+    // own commit: the newest report of each order against the screen, the
+    // ones behind it as superseded within this commit.
+    const newestReportOf = new Map()
+    for (const entry of drawn) {
+      if (entry.resource !== 'orders' || entry.report === null) continue
+      newestReportOf.set(
+        orderIdentity(normalizeOrderSource(entry.report, 'REGULAR')),
+        entry.revision,
+      )
+    }
     for (const entry of drawn) {
       const measured = measureFrameMarks(entry.marks, {
         receivedAt: entry.receivedAt,
@@ -1512,17 +1615,25 @@ const useFuturesTrading = ({
           symbol: entry.symbol,
           identity: entry.identity,
           status: entry.status,
-          // Three readings, and the third is the one worth having.
+          // Four readings, and the last is the one worth having.
           //
           // `DELIVERED` — the screen shows what this frame said, and drawing it
           // moved something. `UNCHANGED` — the screen already showed it: the
           // sibling frame of the same fill got there first, or the exchange
-          // restated what was drawn. Neither is a fault.
+          // restated what was drawn. `SUPERSEDED` — a newer report of the same
+          // order was folded into the same commit, and its state is what the
+          // screen now shows. None of the three is a fault.
           //
-          // `NOT_DRAWN` — the frame arrived and the screen does not show what
-          // it said. That is the operator's complaint stated exactly, and it is
-          // what the absence of a line used to look like.
-          code: readingOf(entry, screenMarkRef.current, drawnOrdersRef.current),
+          // `NOT_DRAWN` — the newest state of this order is not on the screen.
+          // That is the operator's complaint stated exactly, and it is what
+          // the absence of a line used to look like.
+          code: entry.resource === 'orders'
+            && entry.report !== null
+            && newestReportOf.get(
+              orderIdentity(normalizeOrderSource(entry.report, 'REGULAR')),
+            ) !== entry.revision
+            ? 'SUPERSEDED'
+            : readingOf(entry, screenMarkRef.current, drawnOrdersRef.current),
           ...measured,
         }))
       } catch {
@@ -1850,11 +1961,6 @@ const useFuturesTrading = ({
     () => futuresRoundPositionSignature(positions),
     [positions],
   )
-  const roundPositionBasis = useMemo(
-    () => futuresRoundPositionBasis(roundPositionSignature),
-    [roundPositionSignature],
-  )
-
   const historyReconcileRef = useRef(null)
   useEffect(() => {
     if (!enabled || !isUsableSocket(wsConnection) || !state.historyStoreReady
@@ -1997,28 +2103,6 @@ const useFuturesTrading = ({
     }
   }, [])
 
-  // The held review also contains orders and observation clocks. Snapshot only
-  // its trade-owned fields on the producer's trade revision so an orders-only
-  // answer cannot refold thousands of fills and rebuild every wallet result.
-  const roundTradeHistory = useMemo(
-    () => Object.freeze({
-      trades: state.history.trades,
-      coverage: state.history.coverage,
-      foldedTrades: state.history.foldedTrades,
-      generation: Number.isSafeInteger(state.history.tradeGeneration)
-        ? state.history.tradeGeneration
-        : 0,
-    }),
-    // The revision is the explicit content authority for all captured fields.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [state.accountFingerprint, state.history.tradeGeneration],
-  )
-
-  // One fold of the fills, read twice: it says when each open position began,
-  // and for the same rounds what they have realized and been charged. Both
-  // answers must come from one walk — a position whose start is taken from one
-  // fold and whose costs are taken from another can be charged for what happened
-  // before it opened.
   // Whether the position basis is the account's complete open-position set. A
   // key absent from a delivered snapshot proves that position flat, which is
   // what lets the fold anchor a chain's left boundary backward from its
@@ -2027,6 +2111,67 @@ const useFuturesTrading = ({
   // lost transport to move the account away from it.
   const positionSnapshotComplete = state.accountResources.positions?.status === 'ready'
     || state.accountResources.positions?.status === 'stale'
+
+  // What the review would refold for. Only the burst-driven inputs trail —
+  // every fill advances the trade generation and moves the position
+  // signature; income, fee prices and snapshot completeness move at human
+  // cadence and keep their immediate path below.
+  const reviewSourceStamp = [
+    state.accountFingerprint ?? '',
+    Number.isSafeInteger(state.history.tradeGeneration)
+      ? state.history.tradeGeneration
+      : 0,
+    roundPositionSignature,
+    positionSnapshotComplete ? 'y' : 'n',
+  ].join('~')
+  const [reviewStamp, setReviewStamp] = useState(reviewSourceStamp)
+  const reviewFoldLastAtRef = useRef(0)
+  useEffect(() => {
+    if (reviewStamp === reviewSourceStamp) return undefined
+    const since = Date.now() - reviewFoldLastAtRef.current
+    // Outside a burst the first change folds at once; inside one, at most
+    // one fold per trailing bound, and the timer left armed at the burst's
+    // end is what catches the review up without an operator action.
+    if (since >= FUTURES_REVIEW_FOLD_TRAIL_MS) {
+      reviewFoldLastAtRef.current = Date.now()
+      setReviewStamp(reviewSourceStamp)
+      return undefined
+    }
+    const timer = globalThis.setTimeout(() => {
+      reviewFoldLastAtRef.current = Date.now()
+      setReviewStamp(reviewSourceStamp)
+    }, FUTURES_REVIEW_FOLD_TRAIL_MS - since)
+    return () => globalThis.clearTimeout(timer)
+  }, [reviewSourceStamp, reviewStamp])
+
+  // The held review also contains orders and observation clocks. Snapshot its
+  // trade-owned fields, the position basis and the snapshot completeness in
+  // one cut on the trailed stamp: one moment defines the whole fold's view of
+  // the account, so a position whose start is taken from one moment cannot be
+  // charged for fills read at another — and an orders-only answer cannot
+  // refold thousands of fills and rebuild every wallet result.
+  const roundTradeHistory = useMemo(
+    () => Object.freeze({
+      trades: state.history.trades,
+      coverage: state.history.coverage,
+      foldedTrades: state.history.foldedTrades,
+      generation: Number.isSafeInteger(state.history.tradeGeneration)
+        ? state.history.tradeGeneration
+        : 0,
+      positionBasis: futuresRoundPositionBasis(roundPositionSignature),
+      snapshotComplete: positionSnapshotComplete,
+    }),
+    // The trailed stamp is the explicit content authority for all captured
+    // fields; the fingerprint keys an account re-key past the trail.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [state.accountFingerprint, reviewStamp],
+  )
+
+  // One fold of the fills, read twice: it says when each open position began,
+  // and for the same rounds what they have realized and been charged. Both
+  // answers must come from one walk — a position whose start is taken from one
+  // fold and whose costs are taken from another can be charged for what happened
+  // before it opened.
   // The minute prices the fold values foreign-asset fees at. Absent minutes
   // answer null, the affected round degrades to "not included", and the ask
   // effect below goes and buys exactly those minutes.
@@ -2042,15 +2187,13 @@ const useFuturesTrading = ({
         roundTradeHistory.generation,
         roundTradeHistory.foldedTrades,
       ),
-      positions: roundPositionBasis,
-      snapshotComplete: positionSnapshotComplete,
+      positions: roundTradeHistory.positionBasis,
+      snapshotComplete: roundTradeHistory.snapshotComplete,
       generation: roundTradeHistory.generation,
       feeValuationPriceAt,
     })
   ), [
     feeValuationPriceAt,
-    positionSnapshotComplete,
-    roundPositionBasis,
     roundTradeHistory,
   ])
   const settledIncomeContentRevision = futuresSettledIncomeContentRevision(

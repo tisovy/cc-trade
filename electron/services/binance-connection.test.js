@@ -11817,6 +11817,25 @@ describe('setupBinanceConnection user-data orchestration', () => {
                 }),
             });
 
+            // A report folded into the same commit as a newer report of the
+            // same order: not a fault, and told apart from the one that is.
+            await moduleMocks.rendererHandlers.message({
+                type: 'utf8',
+                utf8Data: JSON.stringify({
+                    action: 'report_frame_marks',
+                    resource: 'orders',
+                    symbol: 'TUTUSDT',
+                    identity: 41,
+                    status: 'PARTIALLY_FILLED',
+                    code: 'SUPERSEDED',
+                    upstreamMs: null,
+                    queuedMs: 0,
+                    deliveredMs: 1,
+                    committedMs: 2,
+                    totalMs: 3,
+                }),
+            });
+
             // A word this desk does not use for a delivery is recorded as the
             // market lane's own answer rather than believed: the renderer is
             // ours, and this is still the one field on the line whose value a
@@ -11853,6 +11872,11 @@ describe('setupBinanceConnection user-data orchestration', () => {
                     // Arrived, and the screen already showed it. Not a fault,
                     // and told apart from the one that is.
                     code: 'UNCHANGED',
+                }),
+                expect.objectContaining({
+                    identity: 41,
+                    status: 'PARTIALLY_FILLED',
+                    code: 'SUPERSEDED',
                 }),
                 expect.objectContaining({ status: 'NEW', code: 'DELIVERED' }),
             ]);

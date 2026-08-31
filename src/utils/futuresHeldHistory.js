@@ -548,24 +548,48 @@ const tradeRowFromReport = report => Object.freeze({
   time: Number(report.time ?? report.T) || 0,
 })
 
-const upsert = (rows, folded, row, keyOf, limit) => {
-  const key = keyOf(row)
-  const without = rows.filter(existing => keyOf(existing) !== key)
-  const candidates = [row, ...without].sort(newestFirst)
+// One filter+sort+bound pass for the whole batch, with exactly the result of
+// applying the rows one at a time. The equivalences it rests on: a later
+// report of the same key replaces the earlier row and takes the later step's
+// tie position (a prepend into a stable sort puts each newer arrival ahead of
+// its time-equal elders, so the batch goes in latest-first); a row bounded
+// out never comes back, because rows only accumulate (eviction is monotone);
+// and an identity is folded once, at its first retained appearance, in
+// arrival order.
+const upsertMany = (rows, folded, newRows, keyOf, limit) => {
+  const rowByKey = new Map()
+  for (const row of newRows) {
+    const key = keyOf(row)
+    // Delete before set: the replacing report's step decides the tie order.
+    if (rowByKey.has(key)) rowByKey.delete(key)
+    rowByKey.set(key, row)
+  }
+  const replaced = new Set(rowByKey.keys())
+  const without = rows.filter(existing => !replaced.has(keyOf(existing)))
+  const fresh = [...rowByKey.values()].reverse()
+  const candidates = [...fresh, ...without].sort(newestFirst)
   const truncatedContracts = truncatedContractsOf(candidates, keyOf, limit)
   const bounded = boundNewestByContract(candidates, limit)
   const retained = new Set(bounded.map(keyOf))
-  const nextFolded = folded.filter(entry => retained.has(entry))
+  const kept = folded.filter(entry => retained.has(entry))
+  // Recorded once: an identity already folded in stays folded, and a second
+  // report about the same order replaces the row rather than adding one.
+  const alreadyFolded = new Set(kept)
+  const appended = []
+  for (const row of newRows) {
+    const key = keyOf(row)
+    if (!retained.has(key) || alreadyFolded.has(key)) continue
+    alreadyFolded.add(key)
+    appended.push(key)
+  }
   return {
     rows: Object.freeze(bounded),
-    // Recorded once: an identity already folded in stays folded, and a second
-    // report about the same order replaces the row rather than adding one.
-    folded: Object.freeze(!retained.has(key) || nextFolded.includes(key)
-      ? nextFolded
-      : [...nextFolded, key]),
+    folded: Object.freeze(appended.length === 0 ? kept : [...kept, ...appended]),
     truncatedContracts,
   }
 }
+
+const upsert = (rows, folded, row, keyOf, limit) => upsertMany(rows, folded, [row], keyOf, limit)
 
 const isFill = report => (
   (report?.tradeId ?? null) !== null && Number(report?.lastFilledQty ?? report?.l) > 0
@@ -617,6 +641,80 @@ export const foldExecutionIntoFuturesHistory = (history, report) => {
           [symbol]: Object.freeze({ ...previousCoverage, tradeCoverage }),
         }),
       }),
+    })
+  }
+  return next
+}
+
+/**
+ * Fold a cluster of execution reports in one pass.
+ *
+ * Structurally identical to folding the reports one at a time — the burst
+ * suite asserts the equality — at one filter+sort+bound over the held rows
+ * instead of one per fill. A burst of thirty partial fills against an
+ * eight-thousand-row book paid thirty sorts on the commit path; the cluster
+ * pays one.
+ *
+ * The trade generation still advances once per fill: a consumer counting
+ * generations sees the same number of fills either way. Coverage is written
+ * once per truncated contract from the final rows — the last fill of a
+ * contract decides, exactly as it does applied sequentially, because
+ * truncation is monotone and the retention boundary only moves forward.
+ */
+export const foldExecutionsIntoFuturesHistory = (history, reports) => {
+  if (!isHeld(history)) return history
+  const applied = (Array.isArray(reports) ? reports : []).filter(report => Boolean(report))
+  if (applied.length === 0) return history
+  if (applied.length === 1) return foldExecutionIntoFuturesHistory(history, applied[0])
+  let next = history
+  const orderRows = applied
+    .filter(report => (
+      TERMINAL_FUTURES_ORDER_STATUSES.has(String(report.status ?? report.X ?? '').toUpperCase())
+      && (report.orderId ?? report.i ?? null) !== null
+    ))
+    .map(orderRowFromReport)
+  if (orderRows.length > 0) {
+    const merged = upsertMany(
+      next.orders,
+      next.foldedOrders,
+      orderRows,
+      futuresHistoryOrderKey,
+      FUTURES_HELD_HISTORY_MAX_ORDERS_PER_CONTRACT,
+    )
+    next = Object.freeze({ ...next, orders: merged.rows, foldedOrders: merged.folded })
+  }
+  const fills = applied.filter(isFill)
+  if (fills.length > 0) {
+    const merged = upsertMany(
+      next.trades,
+      next.foldedTrades,
+      fills.map(tradeRowFromReport),
+      futuresHistoryTradeKey,
+      FUTURES_HELD_HISTORY_MAX_TRADES_PER_CONTRACT,
+    )
+    let tradeGeneration = next.tradeGeneration
+    for (let fill = 0; fill < fills.length; fill += 1) {
+      tradeGeneration = advanceGeneration(tradeGeneration)
+    }
+    let coverage = next.coverage
+    for (const symbol of new Set(fills.map(contractOf))) {
+      const previousCoverage = coverage?.[symbol]
+      const tradeCoverage = merged.truncatedContracts.has(symbol)
+        && previousCoverage?.tradeCoverage?.version === 2
+        ? retentionLimitedCoverage(previousCoverage.tradeCoverage, merged.rows, symbol)
+        : previousCoverage?.tradeCoverage
+      if (tradeCoverage === undefined) continue
+      coverage = Object.freeze({
+        ...coverage,
+        [symbol]: Object.freeze({ ...previousCoverage, tradeCoverage }),
+      })
+    }
+    next = Object.freeze({
+      ...next,
+      tradeGeneration,
+      trades: merged.rows,
+      foldedTrades: merged.folded,
+      ...(coverage === next.coverage ? {} : { coverage }),
     })
   }
   return next

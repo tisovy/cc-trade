@@ -8,6 +8,7 @@ import {
   waitFor,
 } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { Profiler } from 'react'
 import App from './App.jsx'
 import {
   RENDERER_OUTBOX_LANES,
@@ -159,8 +160,8 @@ const createOutboxConnection = socket => {
   return connection
 }
 
-const openFuturesApp = async () => {
-  const rendered = render(<App />)
+const openFuturesApp = async ({ wrap = element => element } = {}) => {
+  const rendered = render(wrap(<App />))
   const socket = FuturesAppStressSocket.instances[0]
 
   act(() => socket.open())
@@ -456,5 +457,87 @@ describe('Futures exchange-to-screen burst', () => {
     if (cadenceHeld) {
       expect(executionApplyMs).toBeLessThanOrEqual(EXECUTION_APPLY_BOUND_MS)
     }
+  }, 20_000)
+
+  // The recorded burst shape, applied to the account lane itself: clusters of
+  // several execution reports every ~200 ms (desk-2026-08-30-002.jsonl came in
+  // fives to sevens). One React commit per frame is what put the commit leg at
+  // 400 ms; the drain owes the burst one commit per cluster edge — counted as
+  // commits, not wall-clock, because a busy machine stretches time but cannot
+  // add commits.
+  it('folds clusters of partial fills into bounded commits and reports every frame', async () => {
+    const CLUSTERS = 6
+    const FRAMES_PER_CLUSTER = 6
+    const CLUSTER_CADENCE_MS = 200
+    const commits = []
+    const { socket } = await openFuturesApp({
+      wrap: element => (
+        <Profiler id="burst-desk" onRender={(id, phase, duration, base, startTime) => {
+          commits.push(startTime)
+        }}
+        >
+          {element}
+        </Profiler>
+      ),
+    })
+    const connection = createOutboxConnection(socket)
+    const outbox = createRendererOutbox(connection, { onBacklog: vi.fn() })
+    const accountDelivery = Object.freeze({ lane: RENDERER_OUTBOX_LANES.ACCOUNT })
+    const orderMarks = () => socket.sent.filter(message => (
+      message.action === 'report_frame_marks' && message.resource === 'orders'
+    ))
+
+    // Let the mount's own commits settle before counting the burst's.
+    await act(async () => delay(150))
+    const commitsBeforeBurst = commits.length
+    let filled = 0
+    for (let cluster = 0; cluster < CLUSTERS; cluster += 1) {
+      const clusterStartedAt = performance.now()
+      for (let frame = 0; frame < FRAMES_PER_CLUSTER; frame += 1) {
+        filled += 1
+        const at = OBSERVED_AT + (cluster * CLUSTER_CADENCE_MS) + frame
+        // Each report in its own macrotask, as the socket delivers them: the
+        // folding below must be the drain's, not the event loop's.
+        await act(async () => {
+          outbox.send(JSON.stringify({
+            marks: { exchangeAt: at - 30, receivedAt: at - 12, queuedAt: at - 10 },
+            futures_execution_update: {
+              symbol: 'BTCUSDT',
+              orderId: 42,
+              status: 'PARTIALLY_FILLED',
+              side: 'BUY',
+              orderKind: 'REGULAR',
+              price: '899000',
+              origQty: '1',
+              z: `0.${String(filled).padStart(3, '0')}`,
+              T: at,
+            },
+          }), accountDelivery)
+          await delay(4)
+        })
+      }
+      const nextClusterAt = clusterStartedAt + CLUSTER_CADENCE_MS
+      await act(async () => delay(Math.max(0, nextClusterAt - performance.now())))
+    }
+    // The trailing window closes the last cluster's commit.
+    await act(async () => delay(150))
+
+    // Nothing was dropped and nothing read as the fault: every report has a
+    // line, the older siblings of one commit are superseded, and NOT_DRAWN —
+    // the reading the 2026-08-30 journal was full of — does not appear.
+    await waitFor(() => expect(orderMarks()).toHaveLength(CLUSTERS * FRAMES_PER_CLUSTER))
+    const codes = orderMarks().map(mark => mark.code)
+    expect(new Set(codes)).toEqual(new Set(['DELIVERED', 'SUPERSEDED']))
+    expect(codes.filter(code => code === 'SUPERSEDED').length).toBeGreaterThan(0)
+    expect(codes).not.toContain('NOT_DRAWN')
+
+    // The order the burst was about is still on the desk, at its newest state.
+    expect(screen.getByRole('tab', { name: /Orders\s*1/ })).toBeInTheDocument()
+
+    // One commit opens a cluster and one trailing commit folds its remainder:
+    // two per cluster, plus the review trail's own bounded folds — nowhere
+    // near one commit per frame, which is what the un-drained desk paid.
+    const burstCommits = commits.length - commitsBeforeBurst
+    expect(burstCommits).toBeLessThanOrEqual((CLUSTERS * 2) + 8)
   }, 20_000)
 })

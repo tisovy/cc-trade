@@ -61,6 +61,27 @@ const authorizeAccount = (socket, resources = {}, fingerprint = ACCOUNT_FINGERPR
   act(() => socket.receive(accountEnvelope(resources, fingerprint)))
 }
 
+// The account lane commits one cluster per window now: the first frame after
+// quiet applies at once, and what follows within the window folds into one
+// trailing commit. A test that wants each frame in its own commit lets the
+// window pass between them, exactly as a quiet desk would.
+const settleCommitWindow = () => act(async () => {
+  await new Promise(resolve => setTimeout(resolve, 150))
+})
+
+const receiveSettled = async (socket, payload) => {
+  act(() => socket.receive(payload))
+  await settleCommitWindow()
+}
+
+// The round review folds on a stamp that trails its inputs by up to a second
+// (FUTURES_REVIEW_FOLD_TRAIL_MS): the first change after quiet folds at once,
+// the next within that second waits for the trailing timer. A test that moves
+// the round inputs and then reads tradeRoundIndex lets that trail land too.
+const settleReviewFoldTrail = () => act(async () => {
+  await new Promise(resolve => setTimeout(resolve, 1_100))
+})
+
 afterEach(() => {
   vi.restoreAllMocks()
 })
@@ -279,7 +300,7 @@ describe('useFuturesTrading', () => {
     })
   })
 
-  it('merges execution updates into open orders and clears them on terminal states', () => {
+  it('merges execution updates into open orders and clears them on terminal states', async () => {
     const socket = createSocket()
     const { result } = renderHook(() => useFuturesTrading({
       enabled: true,
@@ -287,17 +308,13 @@ describe('useFuturesTrading', () => {
       wsConnection: socket,
     }))
 
-    act(() => {
-      socket.receive({
-        futures_execution_update: { symbol: 'BTCUSDT', orderId: 5, status: 'NEW', side: 'BUY' },
-      })
+    await receiveSettled(socket, {
+      futures_execution_update: { symbol: 'BTCUSDT', orderId: 5, status: 'NEW', side: 'BUY' },
     })
     expect(result.current.openOrders).toHaveLength(1)
 
-    act(() => {
-      socket.receive({
-        futures_execution_update: { symbol: 'BTCUSDT', orderId: 5, status: 'CANCELED', side: 'BUY' },
-      })
+    await receiveSettled(socket, {
+      futures_execution_update: { symbol: 'BTCUSDT', orderId: 5, status: 'CANCELED', side: 'BUY' },
     })
     expect(result.current.openOrders).toHaveLength(0)
     expect(result.current.lastExecution.status).toBe('CANCELED')
@@ -318,7 +335,7 @@ describe('useFuturesTrading', () => {
       message => message.action === 'report_frame_marks',
     )
 
-    it('reports the fill after the commit that drew it, naming the order and its state', () => {
+    it('reports the fill after the commit that drew it, naming the order and its state', async () => {
       const socket = createSocket()
       renderHook(() => useFuturesTrading({
         enabled: true,
@@ -326,24 +343,20 @@ describe('useFuturesTrading', () => {
         wsConnection: socket,
       }))
 
-      act(() => {
-        socket.receive({
-          futures_execution_update: {
-            symbol: 'TUTUSDT', orderId: 41, status: 'NEW', side: 'BUY',
-            price: '1', origQty: '5', z: '0', T: 1_000,
-          },
-        })
+      await receiveSettled(socket, {
+        futures_execution_update: {
+          symbol: 'TUTUSDT', orderId: 41, status: 'NEW', side: 'BUY',
+          price: '1', origQty: '5', z: '0', T: 1_000,
+        },
       })
       expect(reportedMarks(socket)).toHaveLength(0)
 
-      act(() => {
-        socket.receive(stamped({
-          futures_execution_update: {
-            symbol: 'TUTUSDT', orderId: 41, status: 'PARTIALLY_FILLED', side: 'BUY',
-            price: '1', origQty: '5', z: '2', T: 2_000,
-          },
-        }, Date.now()))
-      })
+      await receiveSettled(socket, stamped({
+        futures_execution_update: {
+          symbol: 'TUTUSDT', orderId: 41, status: 'PARTIALLY_FILLED', side: 'BUY',
+          price: '1', origQty: '5', z: '2', T: 2_000,
+        },
+      }, Date.now()))
 
       const [reported] = reportedMarks(socket)
       expect(reported).toMatchObject({
@@ -426,7 +439,7 @@ describe('useFuturesTrading', () => {
     // the report itself. Delivered in one tick they become one React commit, and
     // a single pending slot would report the second and lose the first: the
     // order line, which is the one the operator asked for.
-    it('reports every marked frame of a batch, not only the last', () => {
+    it('reports every marked frame of a batch, not only the last', async () => {
       const socket = createSocket()
       renderHook(() => useFuturesTrading({
         enabled: true,
@@ -457,6 +470,7 @@ describe('useFuturesTrading', () => {
           },
         }, at))
       })
+      await settleCommitWindow()
 
       // Both are reported, and both as delivered: they were drawn in the same
       // commit, so neither can be said to have arrived after the other. What
@@ -474,7 +488,7 @@ describe('useFuturesTrading', () => {
     // socket messages and are drawn in two commits. The second says what the
     // first already drew, and that is not a fault — it is what separates it from
     // a frame the screen never showed.
-    it('reports the second frame of one fill as already drawn, not as missing', () => {
+    it('reports the second frame of one fill as already drawn, not as missing', async () => {
       const socket = createSocket()
       renderHook(() => useFuturesTrading({
         enabled: true,
@@ -482,30 +496,26 @@ describe('useFuturesTrading', () => {
         wsConnection: socket,
       }))
 
-      act(() => {
-        socket.receive(stamped({
-          version: 1,
-          type: 'futures_account_state',
-          resources: {
-            regularOrders: {
-              status: 'ready',
-              data: [{
-                symbol: 'TUTUSDT', orderId: 41, status: 'PARTIALLY_FILLED',
-                side: 'BUY', price: '1', origQty: '5', executedQty: '2',
-              }],
-              lastSuccessfulAt: 100,
-            },
+      await receiveSettled(socket, stamped({
+        version: 1,
+        type: 'futures_account_state',
+        resources: {
+          regularOrders: {
+            status: 'ready',
+            data: [{
+              symbol: 'TUTUSDT', orderId: 41, status: 'PARTIALLY_FILLED',
+              side: 'BUY', price: '1', origQty: '5', executedQty: '2',
+            }],
+            lastSuccessfulAt: 100,
           },
-        }, Date.now()))
-      })
-      act(() => {
-        socket.receive(stamped({
-          futures_execution_update: {
-            symbol: 'TUTUSDT', orderId: 41, status: 'PARTIALLY_FILLED', side: 'BUY',
-            price: '1', origQty: '5', z: '2', T: 2_000,
-          },
-        }, Date.now()))
-      })
+        },
+      }, Date.now()))
+      await receiveSettled(socket, stamped({
+        futures_execution_update: {
+          symbol: 'TUTUSDT', orderId: 41, status: 'PARTIALLY_FILLED', side: 'BUY',
+          price: '1', origQty: '5', z: '2', T: 2_000,
+        },
+      }, Date.now()))
 
       expect(reportedMarks(socket).map(entry => [entry.resource, entry.code])).toEqual([
         ['account', 'DELIVERED'],
@@ -518,7 +528,7 @@ describe('useFuturesTrading', () => {
     // settled memory, which is the desk's own refusal to redraw an order it has
     // already seen finish — a real path, and the only one a test can take
     // without breaking the hook on purpose.
-    it('reports a frame the screen does not show as not drawn', () => {
+    it('reports a frame the screen does not show as not drawn', async () => {
       const socket = createSocket()
       renderHook(() => useFuturesTrading({
         enabled: true,
@@ -526,23 +536,19 @@ describe('useFuturesTrading', () => {
         wsConnection: socket,
       }))
 
-      act(() => {
-        socket.receive({
-          futures_execution_update: {
-            symbol: 'TUTUSDT', orderId: 41, status: 'FILLED', side: 'BUY',
-            price: '1', origQty: '5', z: '5', T: 3_000,
-          },
-        })
+      await receiveSettled(socket, {
+        futures_execution_update: {
+          symbol: 'TUTUSDT', orderId: 41, status: 'FILLED', side: 'BUY',
+          price: '1', origQty: '5', z: '5', T: 3_000,
+        },
       })
 
-      act(() => {
-        socket.receive(stamped({
-          futures_execution_update: {
-            symbol: 'TUTUSDT', orderId: 41, status: 'PARTIALLY_FILLED', side: 'BUY',
-            price: '1', origQty: '5', z: '2', T: 2_000,
-          },
-        }, Date.now()))
-      })
+      await receiveSettled(socket, stamped({
+        futures_execution_update: {
+          symbol: 'TUTUSDT', orderId: 41, status: 'PARTIALLY_FILLED', side: 'BUY',
+          price: '1', origQty: '5', z: '2', T: 2_000,
+        },
+      }, Date.now()))
 
       expect(reportedMarks(socket)).toHaveLength(1)
       expect(reportedMarks(socket)[0]).toMatchObject({
@@ -574,7 +580,7 @@ describe('useFuturesTrading', () => {
     })
   })
 
-  it('keeps a confirmed amendment when the snapshot that follows is older', () => {
+  it('keeps a confirmed amendment when the snapshot that follows is older', async () => {
     const socket = createSocket()
     const { result } = renderHook(() => useFuturesTrading({
       enabled: true,
@@ -582,50 +588,44 @@ describe('useFuturesTrading', () => {
       wsConnection: socket,
     }))
 
-    act(() => {
-      socket.receive({
-        futures_execution_update: {
-          symbol: 'BTCUSDT', orderId: 5, status: 'NEW', side: 'BUY',
-          price: '58500', origQty: '0.008', T: 2_000,
-        },
-      })
+    await receiveSettled(socket, {
+      futures_execution_update: {
+        symbol: 'BTCUSDT', orderId: 5, status: 'NEW', side: 'BUY',
+        price: '58500', origQty: '0.008', T: 2_000,
+      },
     })
 
     // Binance's order snapshot is a separate, eventually consistent service:
     // fetched right after the amendment it can still describe the old size.
-    act(() => {
-      socket.receive({
-        version: 1,
-        type: 'futures_account_state',
-        resources: {
-          regularOrders: {
-            status: 'ready',
-            lastSuccessfulAt: 300,
-            data: [{
-              symbol: 'BTCUSDT', orderId: 5, status: 'NEW', side: 'BUY',
-              price: '58500', origQty: '0.004', T: 1_000,
-            }],
-          },
+    await receiveSettled(socket, {
+      version: 1,
+      type: 'futures_account_state',
+      resources: {
+        regularOrders: {
+          status: 'ready',
+          lastSuccessfulAt: 300,
+          data: [{
+            symbol: 'BTCUSDT', orderId: 5, status: 'NEW', side: 'BUY',
+            price: '58500', origQty: '0.004', T: 1_000,
+          }],
         },
-      })
+      },
     })
     expect(result.current.openOrders[0].origQty).toBe('0.008')
 
-    act(() => {
-      socket.receive({
-        version: 1,
-        type: 'futures_account_state',
-        resources: {
-          regularOrders: {
-            status: 'ready',
-            lastSuccessfulAt: 400,
-            data: [{
-              symbol: 'BTCUSDT', orderId: 5, status: 'NEW', side: 'BUY',
-              price: '58500', origQty: '0.012', T: 3_000,
-            }],
-          },
+    await receiveSettled(socket, {
+      version: 1,
+      type: 'futures_account_state',
+      resources: {
+        regularOrders: {
+          status: 'ready',
+          lastSuccessfulAt: 400,
+          data: [{
+            symbol: 'BTCUSDT', orderId: 5, status: 'NEW', side: 'BUY',
+            price: '58500', origQty: '0.012', T: 3_000,
+          }],
         },
-      })
+      },
     })
     expect(result.current.openOrders[0].origQty).toBe('0.012')
   })
@@ -791,6 +791,7 @@ describe('useFuturesTrading', () => {
       positions: { status: 'ready', data: [], lastSuccessfulAt: 5_000 },
     })
     await waitFor(() => expect(result.current.history.status).toBe('ready'))
+    await settleReviewFoldTrail()
 
     expect(result.current.history.tradeGeneration).toBe(1)
     expect(result.current.tradeRoundIndex.closed).toEqual([
@@ -855,6 +856,7 @@ describe('useFuturesTrading', () => {
       }))
       authorizeAccount(socket, resources)
       await waitFor(() => expect(result.current.history.status).toBe('ready'))
+      await settleReviewFoldTrail()
       return result
     }
 
@@ -1197,13 +1199,13 @@ describe('useFuturesTrading', () => {
     }))
     const historyReads = () => socket.sent.filter(frame => frame.action === 'account.history')
 
-    act(() => socket.receive(accountEnvelope({
+    await receiveSettled(socket, accountEnvelope({
       positions: {
         status: 'loading',
         data: [{ symbol: 'BTCUSDT', positionSide: 'LONG', quantity: '1', entryPrice: '100' }],
         lastAttemptAt: 90,
       },
-    })))
+    }))
     await waitFor(() => expect(result.current.historyStoreReady).toBe(true))
     expect(historyReads()).toEqual([])
 
@@ -1217,7 +1219,7 @@ describe('useFuturesTrading', () => {
           lastSuccessfulAt: 100,
         },
     })
-    act(() => socket.receive(readyPositions))
+    await receiveSettled(socket, readyPositions)
     expect(historyReads()).toHaveLength(1)
     expect(historyReads()[0]).toMatchObject({
       action: 'account.history',
@@ -1227,7 +1229,7 @@ describe('useFuturesTrading', () => {
       views: ['trades'],
     })
 
-    act(() => socket.receive(readyPositions))
+    await receiveSettled(socket, readyPositions)
     expect(historyReads()).toHaveLength(1)
   })
 
@@ -1617,7 +1619,7 @@ describe('useFuturesTrading', () => {
     }
   })
 
-  it('caps one position key before a stream-only fill until REST absorbs it', () => {
+  it('caps one position key before a stream-only fill until REST absorbs it', async () => {
     const fold = vi.spyOn(futuresTradeRounds, 'buildFuturesTradeRoundIndex')
     const socket = createSocket()
     const { result } = renderHook(() => useFuturesTrading({
@@ -1673,6 +1675,7 @@ describe('useFuturesTrading', () => {
     })
 
     act(() => socket.receive(reading(confirmed)))
+    await settleReviewFoldTrail()
     fold.mockClear()
     act(() => socket.receive({
       futures_execution_update: {
@@ -1692,6 +1695,7 @@ describe('useFuturesTrading', () => {
         time: 4_000,
       },
     }))
+    await settleReviewFoldTrail()
 
     expect(fold.mock.calls.at(-1)[1].coverage['BTCUSDT:BOTH']).toMatchObject({
       coveredFrom: 0,
@@ -1705,6 +1709,7 @@ describe('useFuturesTrading', () => {
       ...reading([...confirmed, trade({ id: '5', orderId: '105', price: '140', time: 4_000 })])
         .futures_history,
     }, { readAt: HISTORY_READ_AT + 1 })))
+    await settleReviewFoldTrail()
 
     expect(fold.mock.calls.at(-1)[1].coverage['BTCUSDT:BOTH']).toMatchObject({
       coveredFrom: 0,
@@ -1713,7 +1718,7 @@ describe('useFuturesTrading', () => {
     })
   })
 
-  it('projects retention-limited contract coverage to a snapshot-only leg', () => {
+  it('projects retention-limited contract coverage to a snapshot-only leg', async () => {
     const socket = createSocket()
     const { result } = renderHook(() => useFuturesTrading({
       enabled: true,
@@ -1754,6 +1759,7 @@ describe('useFuturesTrading', () => {
       },
       error: null,
     })))
+    await settleReviewFoldTrail()
 
     expect(result.current.tradeRoundIndex.byPosition['BTCUSDT:LONG'].coverage)
       .toMatchObject({
@@ -1777,7 +1783,7 @@ describe('useFuturesTrading', () => {
     }
   })
 
-  it('preserves a numeric reverse-flat boundary through the per-key fold projection', () => {
+  it('preserves a numeric reverse-flat boundary through the per-key fold projection', async () => {
     const fold = vi.spyOn(futuresTradeRounds, 'buildFuturesTradeRoundIndex')
     const socket = createSocket()
     const { result } = renderHook(() => useFuturesTrading({
@@ -1833,6 +1839,7 @@ describe('useFuturesTrading', () => {
       },
       error: null,
     })))
+    await settleReviewFoldTrail()
 
     expect(fold.mock.calls.at(-1)[1].coverage['BTCUSDT:BOTH'])
       .toMatchObject({ flatBoundary: 1_000, coveredFrom: 1_000 })
@@ -1890,6 +1897,7 @@ describe('useFuturesTrading', () => {
         socket.receive(report)
         socket.receive(report)
       })
+      await act(async () => { await vi.advanceTimersByTimeAsync(150) })
       expect(result.current.history.orders).toHaveLength(1)
       expect(result.current.history.trades).toHaveLength(1)
       expect(result.current.history.trades[0]).toMatchObject({
@@ -1958,7 +1966,7 @@ describe('useFuturesTrading', () => {
     })
   })
 
-  it('keeps manual account completion independent from authoritative income failure', () => {
+  it('keeps manual account completion independent from authoritative income failure', async () => {
     vi.spyOn(Date, 'now').mockReturnValue(100)
     const socket = createSocket()
     const { result } = renderHook(() => useFuturesTrading({
@@ -2002,7 +2010,7 @@ describe('useFuturesTrading', () => {
       account: { terminal: false, status: 'loading' },
     })
 
-    act(() => socket.receive(accountEnvelope(accountResources(110))))
+    await receiveSettled(socket, accountEnvelope(accountResources(110)))
     expect(result.current.manualRefresh.account).toMatchObject({
       terminal: true,
       status: 'ready',
@@ -2061,7 +2069,7 @@ describe('useFuturesTrading', () => {
       account: { terminal: false, status: 'loading' },
       settledIncome: { status: 'stale' },
     })
-    act(() => socket.receive(accountEnvelope(accountResources(200))))
+    await receiveSettled(socket, accountEnvelope(accountResources(200)))
     expect(result.current.manualRefresh).toMatchObject({
       account: { terminal: true, status: 'ready' },
       settledIncome: { status: 'stale' },
@@ -2417,7 +2425,7 @@ describe('useFuturesTrading', () => {
     })
   })
 
-  it('reuses wallet identities for observation-only frames and keeps the window on unrelated state', () => {
+  it('reuses wallet identities for observation-only frames and keeps the window on unrelated state', async () => {
     const baseRound = Object.freeze({
       key: 'stable-open-round',
       symbol: 'BTCUSDT',
@@ -2511,21 +2519,21 @@ describe('useFuturesTrading', () => {
     expect(result.current.settledIncome).toBe(observedIncome)
     expect(result.current.settledIncomeWindow).toBe(observedWindow)
 
-    act(() => socket.receive(accountEnvelope({
+    await receiveSettled(socket, accountEnvelope({
       balances: {
         status: 'ready',
         data: { USDT: { available: '90', total: '100' } },
         lastAttemptAt: 300,
         lastSuccessfulAt: 300,
       },
-    })))
+    }))
     expect(result.current.balances.USDT.available).toBe('90')
     expect(result.current.settledIncomeWindow).toBe(observedWindow)
     expect(result.current.tradeRoundIndex).toBe(firstIndex)
     expect(result.current.settledMoney).toBe(firstSettledMoney)
   })
 
-  it('does not refold fills when an account refresh changes only position valuation', () => {
+  it('does not refold fills when an account refresh changes only position valuation', async () => {
     const fold = vi.spyOn(futuresTradeRounds, 'buildFuturesTradeRoundIndex')
     const socket = createSocket()
     const { result } = renderHook(() => useFuturesTrading({
@@ -2554,11 +2562,11 @@ describe('useFuturesTrading', () => {
     const beforeValuation = result.current.tradeRoundIndex
     fold.mockClear()
 
-    act(() => socket.receive(positionFrame({
+    await receiveSettled(socket, positionFrame({
       markPrice: '102',
       unrealizedPnl: '2',
       isolatedMargin: '11',
-    })))
+    }))
     expect(result.current.positions[0]).toMatchObject({
       markPrice: '102',
       unrealizedPnl: '2',
@@ -2568,14 +2576,16 @@ describe('useFuturesTrading', () => {
     expect(fold).not.toHaveBeenCalled()
 
     act(() => socket.receive(positionFrame({ quantity: '2' })))
+    await settleReviewFoldTrail()
     expect(fold).toHaveBeenCalledTimes(1)
     fold.mockClear()
 
     act(() => socket.receive(positionFrame({ quantity: '2', entryPrice: '101' })))
+    await settleReviewFoldTrail()
     expect(fold).toHaveBeenCalledTimes(1)
   })
 
-  it('keeps round and wallet identities through order-only history', () => {
+  it('keeps round and wallet identities through order-only history', async () => {
     const fold = vi.spyOn(futuresTradeRounds, 'buildFuturesTradeRoundIndex')
     const socket = createSocket()
     const { result } = renderHook(() => useFuturesTrading({
@@ -2608,6 +2618,7 @@ describe('useFuturesTrading', () => {
     }, { readAt })
 
     act(() => socket.receive(tradeReading(HISTORY_READ_AT)))
+    await settleReviewFoldTrail()
     const firstIndex = result.current.tradeRoundIndex
     const firstLedger = firstIndex.walletLedger
     const firstTradeGeneration = result.current.history.tradeGeneration
@@ -2630,6 +2641,7 @@ describe('useFuturesTrading', () => {
     expect(fold).not.toHaveBeenCalled()
 
     act(() => socket.receive(tradeReading(HISTORY_READ_AT + 2)))
+    await settleReviewFoldTrail()
     const afterTradeRead = result.current.tradeRoundIndex
     expect(result.current.history.tradeGeneration).toBe(firstTradeGeneration + 1)
     expect(afterTradeRead).not.toBe(firstIndex)
@@ -2654,6 +2666,7 @@ describe('useFuturesTrading', () => {
         time: HISTORY_READ_AT + 3,
       },
     }))
+    await settleReviewFoldTrail()
     expect(result.current.history.tradeGeneration).toBe(firstTradeGeneration + 2)
     expect(result.current.tradeRoundIndex).not.toBe(afterTradeRead)
     expect(fold).toHaveBeenCalledTimes(1)
@@ -2698,7 +2711,7 @@ describe('useFuturesTrading', () => {
 
   // The exchange sends no event for the risk passing, so what takes a warning
   // back down is the position itself: closed, smaller, or better backed.
-  it('holds a margin call against its position until the position says otherwise', () => {
+  it('holds a margin call against its position until the position says otherwise', async () => {
     const socket = createSocket()
     const { result } = renderHook(() => useFuturesTrading({
       enabled: true,
@@ -2711,11 +2724,9 @@ describe('useFuturesTrading', () => {
       resources: { positions: { status: 'ready', data: rows, lastSuccessfulAt: 100 } },
     })
 
-    act(() => {
-      socket.receive(statePositions([
-        { symbol: 'BTCUSDT', positionSide: 'BOTH', quantity: '0.5', isolatedWallet: '5' },
-      ]))
-    })
+    await receiveSettled(socket, statePositions([
+      { symbol: 'BTCUSDT', positionSide: 'BOTH', quantity: '0.5', isolatedWallet: '5' },
+    ]))
     act(() => socket.receive({
       futures_margin_call: {
         positions: [{
@@ -2731,19 +2742,15 @@ describe('useFuturesTrading', () => {
       .toMatchObject({ symbol: 'BTCUSDT', maintenanceMargin: 1.61 })
 
     // The position is still there, unchanged. So is the warning.
-    act(() => {
-      socket.receive(statePositions([
-        { symbol: 'BTCUSDT', positionSide: 'BOTH', quantity: '0.5', isolatedWallet: '5' },
-      ]))
-    })
+    await receiveSettled(socket, statePositions([
+      { symbol: 'BTCUSDT', positionSide: 'BOTH', quantity: '0.5', isolatedWallet: '5' },
+    ]))
     expect(result.current.marginCalls['BTCUSDT:BOTH']).toBeDefined()
 
     // Margin added behind it. The warning goes.
-    act(() => {
-      socket.receive(statePositions([
-        { symbol: 'BTCUSDT', positionSide: 'BOTH', quantity: '0.5', isolatedWallet: '40' },
-      ]))
-    })
+    await receiveSettled(socket, statePositions([
+      { symbol: 'BTCUSDT', positionSide: 'BOTH', quantity: '0.5', isolatedWallet: '40' },
+    ]))
     expect(result.current.marginCalls).toEqual({})
   })
 
@@ -2893,7 +2900,7 @@ describe('useFuturesTrading', () => {
     expect(socket.sent).toHaveLength(sentBefore)
   })
 
-  it('keeps account-wide regular and ALGO namespaces distinct across terminal updates', () => {
+  it('keeps account-wide regular and ALGO namespaces distinct across terminal updates', async () => {
     const socket = createSocket()
     const { result, rerender } = renderHook(
       ({ symbol }) => useFuturesTrading({ enabled: true, symbol, wsConnection: socket }),
@@ -2928,6 +2935,7 @@ describe('useFuturesTrading', () => {
         },
       })
     })
+    await settleCommitWindow()
 
     expect(result.current.openOrders).toHaveLength(3)
     expect(result.current.openOrders.filter(order => order.orderId === 42)
@@ -2937,15 +2945,13 @@ describe('useFuturesTrading', () => {
     rerender({ symbol: 'BTCUSDT' })
     expect(result.current.openOrders).toHaveLength(3)
 
-    act(() => {
-      socket.receive({
-        futures_execution_update: {
-          symbol: 'TUTUSDT',
-          orderId: 42,
-          status: 'CANCELED',
-          orderKind: 'REGULAR',
-        },
-      })
+    await receiveSettled(socket, {
+      futures_execution_update: {
+        symbol: 'TUTUSDT',
+        orderId: 42,
+        status: 'CANCELED',
+        orderKind: 'REGULAR',
+      },
     })
 
     expect(result.current.openOrders).toHaveLength(2)
@@ -2995,7 +3001,7 @@ describe('useFuturesTrading', () => {
 
     const refreshesIn = socket => socket.sent.filter(frame => frame.action === 'account.refresh')
 
-    it('takes the parent off the desk on the fill, and reads once for the match', () => {
+    it('takes the parent off the desk on the fill, and reads once for the match', async () => {
       const socket = createSocket()
       const { result } = renderHook(() => useFuturesTrading({
         enabled: true,
@@ -3006,15 +3012,13 @@ describe('useFuturesTrading', () => {
       expect(result.current.openOrders).toHaveLength(1)
       const refreshesBefore = refreshesIn(socket).length
 
-      act(() => {
-        socket.receive({
-          futures_execution_update: {
-            symbol: 'TUTUSDT',
-            orderId: 990281234,
-            status: 'FILLED',
-            orderKind: 'REGULAR',
-          },
-        })
+      await receiveSettled(socket, {
+        futures_execution_update: {
+          symbol: 'TUTUSDT',
+          orderId: 990281234,
+          status: 'FILLED',
+          orderKind: 'REGULAR',
+        },
       })
 
       // Resolved from the report, not from the beat.
@@ -3059,7 +3063,7 @@ describe('useFuturesTrading', () => {
       ))).toBe(true)
     })
 
-    it('resolves a parent whose spawned order was cancelled the same way', () => {
+    it('resolves a parent whose spawned order was cancelled the same way', async () => {
       const socket = createSocket()
       const { result } = renderHook(() => useFuturesTrading({
         enabled: true,
@@ -3069,15 +3073,13 @@ describe('useFuturesTrading', () => {
       listAlgoParent(socket, firedParent)
       const refreshesBefore = refreshesIn(socket).length
 
-      act(() => {
-        socket.receive({
-          futures_execution_update: {
-            symbol: 'TUTUSDT',
-            orderId: 990281234,
-            status: 'CANCELED',
-            orderKind: 'REGULAR',
-          },
-        })
+      await receiveSettled(socket, {
+        futures_execution_update: {
+          symbol: 'TUTUSDT',
+          orderId: 990281234,
+          status: 'CANCELED',
+          orderKind: 'REGULAR',
+        },
       })
 
       expect(result.current.openOrders).toHaveLength(0)
@@ -3183,7 +3185,7 @@ describe('useFuturesTrading', () => {
   // overtakes the reply to the placement itself. The reply describes the order
   // as it left — NEW — and put it back in the list, where nothing removed it
   // again because nothing reads the account unless the desk acts.
-  it('refuses to relist an order the exchange has already reported settled', () => {
+  it('refuses to relist an order the exchange has already reported settled', async () => {
     const socket = createSocket()
     const { result } = renderHook(() => useFuturesTrading({
       enabled: true,
@@ -3191,53 +3193,47 @@ describe('useFuturesTrading', () => {
       wsConnection: socket,
     }))
 
-    act(() => {
-      socket.receive({
-        futures_execution_update: {
-          symbol: 'BTCUSDT', orderId: 7, status: 'FILLED', side: 'BUY', orderKind: 'REGULAR',
-        },
-      })
+    await receiveSettled(socket, {
+      futures_execution_update: {
+        symbol: 'BTCUSDT', orderId: 7, status: 'FILLED', side: 'BUY', orderKind: 'REGULAR',
+      },
     })
     expect(result.current.openOrders).toHaveLength(0)
 
     // The placement's own reply, which left the exchange before the fill.
-    act(() => {
-      socket.receive({
-        futures_execution_update: {
-          symbol: 'BTCUSDT', orderId: 7, status: 'NEW', side: 'BUY', orderKind: 'REGULAR',
-        },
-      })
+    await receiveSettled(socket, {
+      futures_execution_update: {
+        symbol: 'BTCUSDT', orderId: 7, status: 'NEW', side: 'BUY', orderKind: 'REGULAR',
+      },
     })
     expect(result.current.openOrders).toHaveLength(0)
 
     // And a snapshot read from the account service, which is eventually
     // consistent with the stream and can still be describing the order.
-    act(() => {
-      socket.receive({
-        version: 1,
-        type: 'futures_account_state',
-        resources: {
-          balances: {
-            status: 'ready', data: { USDT: { available: '25', total: '25' } }, lastSuccessfulAt: 100,
-          },
-          positions: { status: 'ready', data: [], lastSuccessfulAt: 100 },
-          regularOrders: {
-            status: 'ready',
-            data: [
-              { symbol: 'BTCUSDT', orderId: 7, status: 'NEW', orderKind: 'REGULAR' },
-              { symbol: 'BTCUSDT', orderId: 8, status: 'NEW', orderKind: 'REGULAR' },
-            ],
-            lastSuccessfulAt: 100,
-          },
-          algoOrders: { status: 'ready', data: [], lastSuccessfulAt: 100 },
+    await receiveSettled(socket, {
+      version: 1,
+      type: 'futures_account_state',
+      resources: {
+        balances: {
+          status: 'ready', data: { USDT: { available: '25', total: '25' } }, lastSuccessfulAt: 100,
         },
-      })
+        positions: { status: 'ready', data: [], lastSuccessfulAt: 100 },
+        regularOrders: {
+          status: 'ready',
+          data: [
+            { symbol: 'BTCUSDT', orderId: 7, status: 'NEW', orderKind: 'REGULAR' },
+            { symbol: 'BTCUSDT', orderId: 8, status: 'NEW', orderKind: 'REGULAR' },
+          ],
+          lastSuccessfulAt: 100,
+        },
+        algoOrders: { status: 'ready', data: [], lastSuccessfulAt: 100 },
+      },
     })
     // Only the settled one is refused; the order beside it is still resting.
     expect(result.current.openOrders.map(order => order.orderId)).toEqual([8])
   })
 
-  it('settles only the orders the exchange named', () => {
+  it('settles only the orders the exchange named', async () => {
     const socket = createSocket()
     const { result } = renderHook(() => useFuturesTrading({
       enabled: true,
@@ -3247,19 +3243,15 @@ describe('useFuturesTrading', () => {
 
     // No id: the identity would be a prefix every unidentified order on the
     // contract shares, and settling that silences the whole contract.
-    act(() => {
-      socket.receive({
-        futures_execution_update: {
-          symbol: 'BTCUSDT', orderId: null, status: 'FILLED', side: 'BUY',
-        },
-      })
+    await receiveSettled(socket, {
+      futures_execution_update: {
+        symbol: 'BTCUSDT', orderId: null, status: 'FILLED', side: 'BUY',
+      },
     })
-    act(() => {
-      socket.receive({
-        futures_execution_update: {
-          symbol: 'BTCUSDT', orderId: 9, status: 'NEW', side: 'BUY', orderKind: 'REGULAR',
-        },
-      })
+    await receiveSettled(socket, {
+      futures_execution_update: {
+        symbol: 'BTCUSDT', orderId: 9, status: 'NEW', side: 'BUY', orderKind: 'REGULAR',
+      },
     })
 
     expect(result.current.openOrders.map(order => order.orderId)).toEqual([9])
@@ -3639,7 +3631,7 @@ describe('useFuturesTrading', () => {
 
   // An unknown outcome is the one warning that must not be cleared by anything
   // but its own answer: an operator who stops seeing it sends the order again.
-  it('keeps an unresolved outcome standing while another order reports', () => {
+  it('keeps an unresolved outcome standing while another order reports', async () => {
     const socket = createSocket()
     const { result } = renderHook(() => useFuturesTrading({
       enabled: true,
@@ -3664,18 +3656,16 @@ describe('useFuturesTrading', () => {
     })
     expect(result.current.unresolvedCommand?.code).toBe('FUTURES_OUTCOME_PENDING')
 
-    act(() => {
-      socket.receive({
-        futures_execution_update: {
-          symbol: 'ETHUSDT',
-          orderId: 55,
-          clientOrderId: 'desk-eth-9',
-          status: 'NEW',
-          side: 'BUY',
-          price: '3000',
-          origQty: '1',
-        },
-      })
+    await receiveSettled(socket, {
+      futures_execution_update: {
+        symbol: 'ETHUSDT',
+        orderId: 55,
+        clientOrderId: 'desk-eth-9',
+        status: 'NEW',
+        side: 'BUY',
+        price: '3000',
+        origQty: '1',
+      },
     })
     expect(result.current.unresolvedCommand?.code).toBe('FUTURES_OUTCOME_PENDING')
 
@@ -3691,18 +3681,16 @@ describe('useFuturesTrading', () => {
     })
     expect(result.current.unresolvedCommand?.code).toBe('FUTURES_OUTCOME_PENDING')
 
-    act(() => {
-      socket.receive({
-        futures_execution_update: {
-          symbol: 'BTCUSDT',
-          orderId: 77,
-          clientOrderId: 'desk-btc-1',
-          status: 'NEW',
-          side: 'BUY',
-          price: '58000',
-          origQty: '0.01',
-        },
-      })
+    await receiveSettled(socket, {
+      futures_execution_update: {
+        symbol: 'BTCUSDT',
+        orderId: 77,
+        clientOrderId: 'desk-btc-1',
+        status: 'NEW',
+        side: 'BUY',
+        price: '58000',
+        origQty: '0.01',
+      },
     })
     expect(result.current.unresolvedCommand).toBeNull()
   })
@@ -3740,7 +3728,7 @@ describe('useFuturesTrading', () => {
   // A balance held across a transport loss is a reading, not a confirmation.
   // The ticket sizes orders from it, so it may not stay `ready` until a read has
   // answered on the connection that is up now.
-  it('marks the held account unconfirmed when the transport drops', () => {
+  it('marks the held account unconfirmed when the transport drops', async () => {
     const socket = createSocket()
     const { result } = renderHook(() => useFuturesTrading({
       enabled: true,
@@ -3748,18 +3736,16 @@ describe('useFuturesTrading', () => {
       wsConnection: socket,
     }))
 
-    act(() => {
-      socket.receive({
-        version: 1,
-        type: 'futures_account_state',
-        resources: {
-          balances: {
-            status: 'ready',
-            data: { USDT: { available: '90', total: '100' } },
-            lastSuccessfulAt: 100,
-          },
+    await receiveSettled(socket, {
+      version: 1,
+      type: 'futures_account_state',
+      resources: {
+        balances: {
+          status: 'ready',
+          data: { USDT: { available: '90', total: '100' } },
+          lastSuccessfulAt: 100,
         },
-      })
+      },
     })
     expect(result.current.accountResources.balances.status).toBe('ready')
 
@@ -3770,18 +3756,16 @@ describe('useFuturesTrading', () => {
     // The values stay readable — an empty desk on reconnect is worse.
     expect(result.current.balances).toMatchObject({ USDT: { available: '90' } })
 
-    act(() => {
-      socket.receive({
-        version: 1,
-        type: 'futures_account_state',
-        resources: {
-          balances: {
-            status: 'ready',
-            data: { USDT: { available: '95', total: '100' } },
-            lastSuccessfulAt: 200,
-          },
+    await receiveSettled(socket, {
+      version: 1,
+      type: 'futures_account_state',
+      resources: {
+        balances: {
+          status: 'ready',
+          data: { USDT: { available: '95', total: '100' } },
+          lastSuccessfulAt: 200,
         },
-      })
+      },
     })
     expect(result.current.accountResources.balances.status).toBe('ready')
   })
@@ -3996,28 +3980,26 @@ describe('useFuturesTrading held account review', () => {
   // The review is read once and then maintained. An order that settles after it
   // was read belongs in it, and asking Binance for the account again to learn
   // something the desk was already told is what this replaces.
-  it('folds a settled order and its fill into the reading without sending anything', () => {
+  it('folds a settled order and its fill into the reading without sending anything', async () => {
     const socket = createSocket()
     const { result } = subscribe(socket)
     readingArrives(socket)
     const framesAfterReading = socket.sent.length
 
-    act(() => {
-      socket.receive({
-        futures_execution_update: {
-          symbol: 'BTCUSDT',
-          orderId: 2,
-          status: 'FILLED',
-          side: 'SELL',
-          origQty: '0.004',
-          executedQty: '0.004',
-          tradeId: 8,
-          lastFilledQty: '0.004',
-          lastFilledPrice: '58500',
-          realizedPnl: '31.2',
-          time: 9_000,
-        },
-      })
+    await receiveSettled(socket, {
+      futures_execution_update: {
+        symbol: 'BTCUSDT',
+        orderId: 2,
+        status: 'FILLED',
+        side: 'SELL',
+        origQty: '0.004',
+        executedQty: '0.004',
+        tradeId: 8,
+        lastFilledQty: '0.004',
+        lastFilledPrice: '58500',
+        realizedPnl: '31.2',
+        time: 9_000,
+      },
     })
 
     expect(result.current.history.orders).toHaveLength(2)
@@ -4136,7 +4118,7 @@ describe('useFuturesTrading BNB fee valuation', () => {
     error: null,
   })
 
-  it('asks for the unpriced minutes and folds the answered prices into the net', () => {
+  it('asks for the unpriced minutes and folds the answered prices into the net', async () => {
     const socket = createSocket()
     const { result } = renderHook(() => useFuturesTrading({
       enabled: true,
@@ -4145,6 +4127,7 @@ describe('useFuturesTrading BNB fee valuation', () => {
     }))
     authorizeAccount(socket)
     act(() => socket.receive(bnbHistory()))
+    await settleReviewFoldTrail()
 
     // Unpriced: the round states the fee as not included and names its minutes.
     const degraded = result.current.tradeRoundIndex.closed[0]
@@ -4285,7 +4268,7 @@ describe('useFuturesTrading BNB fee valuation', () => {
     expect(gated.complete).toBe(false)
   })
 
-  it('reads the BNB fee reserve from the balances and values it at the answered minute', () => {
+  it('reads the BNB fee reserve from the balances and values it at the answered minute', async () => {
     const socket = createSocket()
     const { result } = renderHook(() => useFuturesTrading({
       enabled: true,
@@ -4334,6 +4317,7 @@ describe('useFuturesTrading BNB fee valuation', () => {
         error: null,
       },
     })
+    await settleCommitWindow()
     expect(result.current.feeReserve).toMatchObject({ state: 'low', low: true })
     expect(result.current.feeReserve.worth).toBeLessThan(50)
   })

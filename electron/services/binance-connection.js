@@ -1269,9 +1269,11 @@ const markOutboundFrame = (text, payload, timing, sampler) => {
  * reached the desk instantly.
  */
 // What a renderer may say a frame did. `DELIVERED` is the market lane's, and
-// the other two belong to the account lane; anything else is recorded as
-// delivered rather than believed.
-const FRAME_DELIVERY_CODES = new Set(['DELIVERED', 'UNCHANGED', 'NOT_DRAWN']);
+// the other three belong to the account lane — `SUPERSEDED` is a frame folded
+// into the same commit as a newer report of the same order, whose state is
+// what the screen now shows; anything else is recorded as delivered rather
+// than believed.
+const FRAME_DELIVERY_CODES = new Set(['DELIVERED', 'UNCHANGED', 'NOT_DRAWN', 'SUPERSEDED']);
 
 const streamFrameEventTime = (payload) => {
     const stated = Number(payload?.E ?? payload?.T);
@@ -8546,11 +8548,13 @@ export function setupBinanceConnection({
                     phase: 'frame',
                     // What the frame did when it landed. `DELIVERED` is the
                     // market lane's only answer — a book that arrives is a book
-                    // that is drawn. An order frame has three: it may show what
-                    // the exchange said, restate what was already drawn, or
-                    // arrive and leave the screen not showing it at all. The
-                    // last is the operator's complaint stated precisely, and it
-                    // is invisible unless the three are told apart.
+                    // that is drawn. An order frame has four: it may show what
+                    // the exchange said, restate what was already drawn, be
+                    // folded into the same commit as a newer report of the
+                    // same order, or arrive and leave the screen not showing
+                    // it at all. Only the last is the operator's complaint
+                    // stated precisely, and it is invisible unless the four
+                    // are told apart.
                     //
                     // Read from a closed set rather than passed through: the
                     // renderer is the desk's own, and this is still the one
