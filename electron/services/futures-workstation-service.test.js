@@ -4259,3 +4259,44 @@ describe('what a stream close leaves behind', () => {
         });
     });
 });
+
+// One crossing, one evidence line. The stream line that raised the crossing
+// carries the identities; the recovery round's own line names only the
+// round — the summary counted a crossing twice while both carried them.
+describe('a crossing leaves its evidence once', () => {
+    it('puts the identities on the stream line and not again on the round', async () => {
+        const base = createFuturesProductionWorkstationFakeTransport();
+        const faults = [];
+        let subscriber;
+        const runtime = track(createFuturesProductionWorkstationRuntimeForTest({
+            transport: {
+                ...base,
+                connect: (options) => {
+                    subscriber = options;
+                    return base.connect(options);
+                },
+            },
+            onInternalError: fault => faults.push(fault),
+        }));
+        await runtime.service.handleRequest(productionRequest('crossing-once'), { emit: () => {} });
+        const session = runtime.service.shown;
+        // A bid posted above every resting ask crosses the book on the stream.
+        const frame = JSON.parse(
+            FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols.BTCUSDT.streams.makeCycle(1)[0],
+        );
+        frame.data.b = [['99999.00', '1.0']];
+        frame.data.a = [];
+        subscriber.onMessage(JSON.stringify(frame));
+
+        const crossings = faults.filter(fault => fault.code === 'CROSSED_ORDER_BOOK');
+        expect(crossings.map(fault => fault.phase)).toEqual(['stream', 'book-recovery']);
+        expect(crossings.filter(fault => fault.crossedLevels !== undefined)).toHaveLength(1);
+        expect(crossings[0]).toMatchObject({
+            phase: 'stream',
+            symbol: 'BTCUSDT',
+            crossedLevels: expect.any(Number),
+            lastUpdateId: expect.any(String),
+        });
+        expect(session.bookRecovering).toBe(true);
+    });
+});

@@ -1537,7 +1537,7 @@ export class FuturesProductionWorkstationService {
             // a book problem. Only a frame from the streams the desk actually
             // trades on — price, candles, tape — is worth the whole session.
             if (error instanceof FuturesWorkstationOrderBookError) {
-                void this.recoverBook(session, safeCode(error), { evidence: bookEvidenceOf(error) });
+                void this.recoverBook(session, safeCode(error));
                 return;
             }
             if (isDepthStreamFrame(raw)) {
@@ -1557,7 +1557,7 @@ export class FuturesProductionWorkstationService {
      * so; the desk stays live around it. A recovery that fails leaves the book
      * stale rather than escalating: nothing else on the desk depends on it.
      */
-    async recoverBook(session, reasonCode, { immediate = false, evidence = null } = {}) {
+    async recoverBook(session, reasonCode, { immediate = false } = {}) {
         if (!this.isHeld(session) || session.reconnectTimer !== null) return;
         if (session.bookRecovering) return;
         const now = this.observedNow(session);
@@ -1588,12 +1588,10 @@ export class FuturesProductionWorkstationService {
             // Inside the guard: anything that raises out here would leave
             // `bookRecovering` set and the book unable to ask again for the rest
             // of the session.
-            this.onInternalError({
-                phase: 'book-recovery',
-                code: reasonCode,
-                symbol: session.symbol,
-                ...(evidence ?? {}),
-            });
+            // The evidence a crossing left rides the stream line that raised
+            // it, once; this line names the round. A crossing inside the
+            // round's own replay carries its evidence on the catch below.
+            this.onInternalError({ phase: 'book-recovery', code: reasonCode, symbol: session.symbol });
             this.markResourceStale(
                 session,
                 FUTURES_WORKSTATION_RESOURCES.DEPTH,
