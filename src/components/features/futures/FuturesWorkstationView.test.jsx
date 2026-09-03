@@ -645,6 +645,24 @@ describe('pure Futures workstation presentation', () => {
     expect(screen.getByLabelText('Futures market header')).toHaveTextContent('58420.25')
   })
 
+  // Once the selection owns the new interval and the new series has not
+  // landed, the last series stays on the chart under a stated non-live state:
+  // the chart never goes blank and a gesture on it stays armed. Every switch
+  // on 2026-09-02 blanked the chart for the two seconds a candle socket took.
+  it('keeps drawing the last series under loading while the new interval is fetched', () => {
+    const state = createState({ interval: '5m', candlesSwitching: true })
+    renderView({ state, selectedInterval: '5m' })
+
+    const lastRender = workstationViewMocks.chartRender.mock.calls.at(-1)[0]
+    expect(lastRender).toMatchObject({ symbol: 'BTCUSDT', interval: '5m' })
+    expect(lastRender.candles.length).toBeGreaterThan(0)
+    expect(lastRender.candles).toEqual(state.resources.candles.contract)
+    // The book and the tape are untouched by the switch.
+    expect(screen.getByLabelText('Futures market header')).toHaveTextContent('58420.25')
+    // The gesture stays armed on the series still drawn.
+    fireEvent.click(screen.getByText('Pick chart price'))
+  })
+
   it('keeps every ordered interval visible in the compact toolbar and selects weekly explicitly', () => {
     const { onIntervalChange } = renderView()
     const group = screen.getByRole('group', { name: 'Chart interval' })
@@ -2888,10 +2906,56 @@ describe('production workstation container', () => {
     expect(screen.queryByPlaceholderText('Type interval (e.g. 15m)')).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: '1w' }))
       .toHaveAttribute('aria-pressed', 'true')
-    expect(sendMessage.mock.calls.at(-1)[0]).toMatchObject({
-      action: FUTURES_PRODUCTION_WORKSTATION_ACTIONS.SELECT_INTERVAL,
-      interval: '1w',
-    })
+    const sent = sendMessage.mock.calls.map(([message]) => message)
+    expect(sent.filter(message => (
+      message.action === FUTURES_PRODUCTION_WORKSTATION_ACTIONS.SELECT_INTERVAL
+    )).at(-1)).toMatchObject({ interval: '1w' })
+    // The record hears the switch as a switch: the interval left, and that
+    // the operator chose it.
+    expect(sent.filter(message => message.event === 'interval-shown')).toEqual([
+      expect.objectContaining({
+        action: 'report_display_event', interval: '15m', fromInterval: null, cause: 'restored',
+      }),
+      expect.objectContaining({
+        action: 'report_display_event', interval: '1w', fromInterval: '15m', cause: 'operator',
+      }),
+    ])
+    expect(window.localStorage.getItem('cc-trade:futures-interval:v1')).toBe('1w')
+  })
+
+  // The interval is the one selection the desk used to forget: the reload of
+  // 2026-09-02 at 21:40:55Z brought the operator back on a fifteen-minute
+  // chart in the middle of a one-minute scalp.
+  it('opens on the interval the operator last chose, and on 15m only when none was stored', () => {
+    window.localStorage.setItem('cc-trade:futures-interval:v1', '1m')
+    const socket = new EventTarget()
+    socket.readyState = 1
+    const sendMessage = vi.fn(() => true)
+    const { unmount } = render(
+      <FuturesProductionWorkstation
+        enabled
+        wsConnection={socket}
+        sendMessage={sendMessage}
+        executionState={productionExecutionState}
+      />,
+    )
+    expect(screen.getByRole('button', { name: '1m' })).toHaveAttribute('aria-pressed', 'true')
+    expect(sendMessage.mock.calls[0][0]).toMatchObject({ interval: '1m' })
+    expect(sendMessage.mock.calls.map(([message]) => message)
+      .find(message => message.event === 'interval-shown'))
+      .toMatchObject({ interval: '1m', fromInterval: null, cause: 'restored' })
+    unmount()
+
+    window.localStorage.removeItem('cc-trade:futures-interval:v1')
+    render(
+      <FuturesProductionWorkstation
+        enabled
+        wsConnection={socket}
+        sendMessage={vi.fn(() => true)}
+        executionState={productionExecutionState}
+      />,
+    )
+    expect(screen.getByRole('button', { name: '15m' })).toHaveAttribute('aria-pressed', 'true')
   })
 
   // Typing into a field is typing, and a modifier is a gesture, not a search.

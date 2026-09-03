@@ -106,7 +106,8 @@ const EVENT = /^(?:started|stopped)$/;
 // What the renderer reports the screen doing, and why it switched. A closed
 // vocabulary on both: the renderer is the desk's own, but these are still
 // fields a caller chooses the value of.
-const DISPLAY_EVENT = /^(?:symbol-shown|workspace-mounted|workspace-unmounted)$/;
+const DISPLAY_EVENT = /^(?:symbol-shown|interval-shown|workspace-mounted|workspace-unmounted)$/;
+const INTERVAL = /^[0-9]{1,3}[mhdwM]$/;
 const DISPLAY_CAUSE = /^(?:operator|restored)$/;
 // A renderer socket arriving or leaving. The count beside it is the sockets
 // open after the event — two where one is expected is a second window or a
@@ -246,6 +247,10 @@ const RECORDED_FIELDS = Object.freeze({
         ['symbol', optional(text(SYMBOL))],
         ['from', optional(text(SYMBOL))],
         ['cause', optional(text(DISPLAY_CAUSE))],
+        // Which chart interval the screen switched to and from. A switch used
+        // to be readable only from the timing phases behind it (2026-09-02).
+        ['interval', optional(text(INTERVAL))],
+        ['fromInterval', optional(text(INTERVAL))],
     ]),
     // A renderer socket arriving or leaving, with the sockets open after it.
     // The local link was the one lifecycle the record never wrote, and a

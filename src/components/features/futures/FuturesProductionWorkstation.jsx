@@ -12,6 +12,7 @@ import {
   describeFuturesOrderAvailability,
   isFuturesBalanceConfirmed,
 } from '../../../utils/futuresReadiness.js'
+import { readFuturesLastInterval, writeFuturesLastInterval } from '../../../utils/futuresIntervalHistory.js'
 import {
   readFuturesSymbolHistory,
   rememberFuturesSymbol,
@@ -88,7 +89,18 @@ export const FuturesProductionWorkstation = ({
   const [symbol, setSymbol] = useState(() => (
     readFuturesSymbolHistory().lastSymbol ?? DEFAULT_FUTURES_SYMBOL
   ))
-  const [interval, setInterval] = useState(DEFAULT_FUTURES_INTERVAL)
+  // The interval the operator last chose, restored like the contract is. Only
+  // when none was ever stored does the desk open on its default.
+  const [interval, setInterval] = useState(() => (
+    readFuturesLastInterval() ?? DEFAULT_FUTURES_INTERVAL
+  ))
+  // `restored` until the operator's first choice; `operator` from then on.
+  const intervalCauseRef = useRef(null)
+  const shownIntervalRef = useRef(null)
+  const selectInterval = useCallback((value) => {
+    intervalCauseRef.current = 'operator'
+    setInterval(value)
+  }, [])
   const [uiScale, setUiScale] = useState(() => readUiScale())
   const [draftPrice, setDraftPrice] = useState(null)
   // Where the working price came from, when it came off a surface rather than a
@@ -322,9 +334,9 @@ export const FuturesProductionWorkstation = ({
   const handleQuickSwitchSelect = useCallback((value) => {
     if (!value) return
     if (quickSwitch.mode === 'pair') handleSymbolChange(value)
-    else setInterval(value)
+    else selectInterval(value)
     closeQuickSwitch()
-  }, [closeQuickSwitch, handleSymbolChange, quickSwitch.mode])
+  }, [closeQuickSwitch, handleSymbolChange, quickSwitch.mode, selectInterval])
 
   // A letter opens the pair list, a digit the interval list — the workstation's
   // own shortcuts are all mouse gestures and modifier keys, so neither is taken.
@@ -359,6 +371,26 @@ export const FuturesProductionWorkstation = ({
   useEffect(() => {
     writeFuturesSymbolHistory(symbolHistory)
   }, [symbolHistory])
+
+  // The interval the operator is looking at, stated whenever it changes and
+  // stored for the next mount. The record used to learn a switch only from
+  // the timing phases behind it.
+  useEffect(() => {
+    writeFuturesLastInterval(interval)
+    const from = shownIntervalRef.current
+    if (from === interval) return
+    shownIntervalRef.current = interval
+    const cause = intervalCauseRef.current ?? 'restored'
+    intervalCauseRef.current = null
+    reportDisplayEventRef.current?.({
+      event: 'interval-shown',
+      symbol,
+      interval,
+      fromInterval: from,
+      cause,
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [interval])
 
   // The leverage of the contract in hand, asked for whenever the contract
   // changes: the position read reports neither the multiple nor the mode any more,
@@ -528,7 +560,6 @@ export const FuturesProductionWorkstation = ({
   useEffect(() => {
     if (!positionsHaveAuthoritativeReading) return
     if (positionCloserTarget && currentClosePosition === null) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
       setPositionCloser(null)
     }
     if (marginEditorTarget && currentMarginPosition === null) {
@@ -653,7 +684,7 @@ export const FuturesProductionWorkstation = ({
         onTapeConfigurationChange={workstationState.configureTape}
         onDepthReadingChange={workstationState.configureDepth}
         onSymbolChange={handleSymbolChange}
-        onIntervalChange={setInterval}
+        onIntervalChange={selectInterval}
       />
       {/* An order the drag lifted and could not put back is the one thing that
           may not wait in a panel: it is stated over the workspace, with the

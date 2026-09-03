@@ -59,3 +59,19 @@ names the contract. Declared and asserted through
 - The new candle socket still costs one handshake through the proxy per
   switch (~1.3 s); a pool of interval sockets is not in scope.
 - Index klines are fetched per switch for the basis overlay; unchanged.
+
+## Implemented 2026-09-03 — what changed against this design
+
+- D1 landed simpler than written: the service publishes no status for a
+  switch at all (the failure path was already candles-scoped). A switch that
+  recovered from a candle-socket failure still clears the reason it left.
+- D2 rides an explicit hook flag, `candlesSwitching`, set on an interval-only
+  change and cleared by the first candles frame at the new interval. The
+  view draws the held series under `loading` while it is set. The flag, not
+  the interval on the series, is the switch: a series delivered at another
+  interval outside a switch is simply not this selection's (the burst
+  harness replays 1m frames under a 15m selection and must read live).
+- D3 lives in its own store, `futuresIntervalHistory.js`, rather than inside
+  the contract history's five pure functions.
+- D4 carries `interval` and `fromInterval` as their own display fields — an
+  interval does not pass the symbol validator that `from` uses.

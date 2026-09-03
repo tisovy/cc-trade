@@ -1675,6 +1675,8 @@ describe('display and link lines', () => {
             symbol: '龙虾USDT',
             from: 'VELVETUSDT',
             cause: 'restored',
+            interval: null,
+            fromInterval: null,
         });
         expect(describeDeskDiagnosticEvent('display', {
             event: 'workspace-mounted',
@@ -1687,7 +1689,35 @@ describe('display and link lines', () => {
             symbol: 'VELVETUSDT',
             from: null,
             cause: null,
+            interval: null,
+            fromInterval: null,
         });
+    });
+
+    // A switch of the chart interval used to be readable only from the timing
+    // phases behind it — forty-five of them on 2026-09-02.
+    it('keeps which interval the screen switched to', () => {
+        expect(describeDeskDiagnosticEvent('display', {
+            event: 'interval-shown',
+            symbol: 'AKEUSDT',
+            interval: '5m',
+            fromInterval: '1m',
+            cause: 'operator',
+        })).toEqual({
+            kind: 'display',
+            event: 'interval-shown',
+            symbol: 'AKEUSDT',
+            from: null,
+            cause: 'operator',
+            interval: '5m',
+            fromInterval: '1m',
+        });
+        expect(describeDeskDiagnosticEvent('display', {
+            event: 'interval-shown',
+            symbol: 'AKEUSDT',
+            interval: 'five minutes',
+            cause: 'restored',
+        })).toBeNull();
     });
 
     it('refuses an event or a cause outside the stated vocabulary', () => {

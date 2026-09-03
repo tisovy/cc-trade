@@ -820,11 +820,11 @@ describe('production Futures workstation service', () => {
         expect(streamSelectInterval).toHaveBeenCalledWith(expect.objectContaining({
             interval: '5m',
         }));
+        // The candles and nothing else: the session never leaves live for a
+        // switch (2026-09-03).
         expect(switched.map(event => event.resource)).toEqual([
-            'status',
             'candles',
             'candles',
-            'status',
         ]);
         expect(switched.filter(event => event.resource === 'candles')
             .map(event => event.payload.series)).toEqual(['contract', 'index']);
@@ -1117,12 +1117,12 @@ describe('production Futures workstation service', () => {
         deferred.get('5m')(candleSnapshot);
         await pendingB;
 
-        expect(bEvents.map(event => event.resource)).toEqual(['status']);
+        // An abandoned switch states nothing: a switch never leaves live, so
+        // there is no status to state for it (2026-09-03).
+        expect(bEvents.map(event => event.resource)).toEqual([]);
         expect(cEvents.map(event => event.resource)).toEqual([
-            'status',
             'candles',
             'candles',
-            'status',
         ]);
         expect(cEvents.filter(event => event.resource === 'candles')
             .every(event => event.payload.interval === '15m')).toBe(true);
@@ -1170,7 +1170,7 @@ describe('production Futures workstation service', () => {
         deferred.get('5m')(candleSnapshot);
         await abandoned;
 
-        expect(abandonedEvents.map(event => event.resource)).toEqual(['status']);
+        expect(abandonedEvents.map(event => event.resource)).toEqual([]);
         expect(weeklyEvents.filter(event => event.resource === 'candles'))
             .toHaveLength(2);
         expect(weeklyEvents.filter(event => event.resource === 'candles')

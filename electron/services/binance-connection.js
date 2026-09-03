@@ -8731,6 +8731,8 @@ export function setupBinanceConnection({
                     symbol: data.symbol ?? null,
                     from: data.from ?? null,
                     cause: data.cause ?? null,
+                    interval: data.interval ?? null,
+                    fromInterval: data.fromInterval ?? null,
                 });
                 return;
             }

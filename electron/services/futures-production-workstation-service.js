@@ -658,7 +658,12 @@ export class FuturesProductionWorkstationService {
         session.indexCandles = Object.freeze([]);
         session.pendingCandleEvents = [];
         session.intervalBootstrapping = true;
-        this.emitStatus(session, FUTURES_WORKSTATION_STATES.LOADING, true, null);
+        // The session stays live: an interval change touches the candles and
+        // nothing else. It used to publish LOADING for the whole session here
+        // — forty-five times in one evening on 2026-09-02, each one two
+        // seconds of a blank chart, a loading book and an unbound gesture.
+        // The renderer knows the interval it asked for and draws the last
+        // series it had until the new one lands.
 
         const isCurrentInterval = () => this.isHeld(session)
             && session.reconnectTimer === null
@@ -694,8 +699,14 @@ export class FuturesProductionWorkstationService {
             for (const event of session.pendingCandleEvents) this.applyStreamEvent(session, event);
             session.pendingCandleEvents = [];
             if (!isCurrentInterval()) return;
+            // A switch that recovered from a candle-socket failure clears the
+            // reason the failure left on the status line — that line holds
+            // its last code until another status replaces it. An ordinary
+            // switch states nothing: the session never left live.
+            if (reconnectAttempt > 0) {
+                this.emitStatus(session, FUTURES_WORKSTATION_STATES.LIVE, true, null);
+            }
             session.intervalReconnectAttempt = 0;
-            this.emitStatus(session, FUTURES_WORKSTATION_STATES.LIVE, true, null);
         } catch (error) {
             if (!isCurrentInterval()) return;
             session.intervalBootstrapping = false;

@@ -299,8 +299,19 @@ export const FuturesWorkstationView = ({
   const candleSelectionOwned = selectionOwned && state.interval === selectedInterval
   const contracts = resources.catalog?.contracts ?? EMPTY_ROWS
   const header = selectionOwned ? resources.header : null
+  // The series held for this contract at the interval being switched away
+  // from. An interval change is a candles-only affair: the last series stays
+  // on the chart under a stated non-live state until the new one lands, so
+  // the chart never goes blank and a gesture on it stays armed, carrying
+  // the reading's age. On 2026-09-02 every switch blanked the chart for the
+  // two seconds a new candle socket took through the proxy.
+  const switchingInterval = candleSelectionOwned
+    && state.candlesSwitching === true
+    && resources.candles !== null
+    && resources.candles !== undefined
+    && resources.candles.interval !== selectedInterval
   const candles = candleSelectionOwned
-    && resources.candles?.interval === selectedInterval
+    && (resources.candles?.interval === selectedInterval || switchingInterval)
     ? resources.candles
     : null
   const depth = selectionOwned ? resources.depth : null
@@ -325,7 +336,7 @@ export const FuturesWorkstationView = ({
   // the contract list, which is why an operator watching a dead chart reloaded
   // the window instead of using the retry sitting two panels away.
   const feedUnavailable = selectionOwned && state.status === 'unavailable'
-  const candlesState = resourceState(candles)
+  const candlesState = switchingInterval ? 'loading' : resourceState(candles)
   const liveCandles = candles?.contract ?? EMPTY_ROWS
   // History is drawn behind the live window, never over it: the streaming rows
   // own the tail, and anything the history read repeats is dropped.

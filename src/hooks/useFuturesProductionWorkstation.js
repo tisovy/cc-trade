@@ -447,17 +447,21 @@ const useFuturesProductionWorkstation = ({
           }),
         })
       }
+      // An interval change touches the candles and nothing else: the session
+      // stays whatever it was, the book and the tape keep their state, and
+      // the series already held is kept until the new interval's series
+      // replaces it — the view draws it under a stated non-live state
+      // meanwhile. It used to blank the candles and mark the whole session
+      // loading, two seconds of a blind desk per switch on 2026-09-02.
       return Object.freeze({
         ...previousState,
-        status: 'loading',
         interval,
         requestId,
-        reasonCode: null,
-        resources: Object.freeze({
-          ...previousState.resources,
-          status: null,
-          candles: null,
-        }),
+        // Until the new interval's series lands, the view draws the one held
+        // under a stated non-live state. The flag, not the interval on the
+        // series, says so: a series delivered at some other interval outside
+        // a switch is simply not this selection's.
+        candlesSwitching: true,
       })
     })
 
@@ -563,6 +567,8 @@ const useFuturesProductionWorkstation = ({
           interval,
           resources,
           ...history,
+          candlesSwitching: previousState.candlesSwitching === true
+            && !(message.resource === 'candles' && message.payload?.interval === interval),
           reasonCode: message.resource === 'status' ? message.payload.reasonCode : next.reasonCode,
         })
       })
