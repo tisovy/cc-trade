@@ -605,6 +605,28 @@ describe('production workstation hook isolation', () => {
     })
   })
 
+  it.each([
+    ['close', 'disconnected', 'LOCAL_CONNECTION_CLOSED'],
+    ['error', 'unavailable', 'LOCAL_CONNECTION_ERROR'],
+  ])('ends an interval-switch wait on a local %s event', (event, status, reasonCode) => {
+    const socket = new LocalSocket()
+    const sendMessage = vi.fn(() => true)
+    const { result, rerender } = renderHook(
+      props => useFuturesProductionWorkstation(props),
+      { initialProps: defaultProps(socket, sendMessage) },
+    )
+
+    rerender(defaultProps(socket, sendMessage, { interval: '5m' }))
+    expect(result.current.candlesSwitching).toBe(true)
+
+    act(() => socket.dispatchEvent(new Event(event)))
+    expect(result.current).toMatchObject({
+      status,
+      reasonCode,
+      candlesSwitching: false,
+    })
+  })
+
   it('does not subscribe on a closed local socket', () => {
     const sendMessage = vi.fn()
     const { result } = renderHook(props => useFuturesProductionWorkstation(props), {

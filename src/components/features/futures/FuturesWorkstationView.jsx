@@ -305,8 +305,8 @@ export const FuturesWorkstationView = ({
   // the chart never goes blank and a gesture on it stays armed, carrying
   // the reading's age. On 2026-09-02 every switch blanked the chart for the
   // two seconds a new candle socket took through the proxy.
-  const switchingInterval = candleSelectionOwned
-    && state.candlesSwitching === true
+  const intervalSwitchPending = candleSelectionOwned && state.candlesSwitching === true
+  const switchingInterval = intervalSwitchPending
     && resources.candles !== null
     && resources.candles !== undefined
     && resources.candles.interval !== selectedInterval
@@ -336,7 +336,7 @@ export const FuturesWorkstationView = ({
   // the contract list, which is why an operator watching a dead chart reloaded
   // the window instead of using the retry sitting two panels away.
   const feedUnavailable = selectionOwned && state.status === 'unavailable'
-  const candlesState = switchingInterval ? 'loading' : resourceState(candles)
+  const candlesState = intervalSwitchPending ? 'loading' : resourceState(candles)
   const liveCandles = candles?.contract ?? EMPTY_ROWS
   // History is drawn behind the live window, never over it: the streaming rows
   // own the tail, and anything the history read repeats is dropped.
@@ -1196,6 +1196,15 @@ export const FuturesWorkstationView = ({
             onOrderCancel={onOrderCancel}
             onOrderEdit={onOrderEdit}
           />
+          {intervalSwitchPending ? (
+            <div
+              className="futures-workstation-interval-progress"
+              role="status"
+              aria-label={`Loading ${selectedInterval} candles`}
+            >
+              <span aria-hidden="true" />
+            </div>
+          ) : null}
           {/* Said at the edge the operator scrolled to, and left there. A read
               that could not be served is not a moment's news to be dismissed:
               it is where this chart stops until another scroll asks again, and

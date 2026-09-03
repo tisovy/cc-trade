@@ -575,19 +575,25 @@ const useFuturesProductionWorkstation = ({
     }
     const handleClose = () => {
       if (!owned()) return
-      setState(previousState => transitionFuturesWorkstationConnectionState(
-        previousState,
-        'disconnected',
-        'LOCAL_CONNECTION_CLOSED',
-      ))
+      setState((previousState) => Object.freeze({
+        ...transitionFuturesWorkstationConnectionState(
+          previousState,
+          'disconnected',
+          'LOCAL_CONNECTION_CLOSED',
+        ),
+        candlesSwitching: false,
+      }))
     }
     const handleError = () => {
       if (!owned()) return
-      setState(previousState => transitionFuturesWorkstationConnectionState(
-        previousState,
-        'unavailable',
-        'LOCAL_CONNECTION_ERROR',
-      ))
+      setState((previousState) => Object.freeze({
+        ...transitionFuturesWorkstationConnectionState(
+          previousState,
+          'unavailable',
+          'LOCAL_CONNECTION_ERROR',
+        ),
+        candlesSwitching: false,
+      }))
     }
 
     const unsubscribe = ensureDeskFrameRouter(wsConnection)?.subscribe(

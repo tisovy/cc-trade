@@ -38,7 +38,14 @@ stated beside the chart (the existing non-live notice), and replaces it when
 the new interval's series arrives. `chartPickable` stays true while any
 series is drawn; a pick during the switch carries `describeFuturesPriceReading`
 with state `loading` and the last candle's age — the same object a stale
-chart hands over today.
+chart hands over today. The chart frame also renders a small progress spinner
+from `intervalSwitchPending`, the authoritative `candlesSwitching` flag gated
+to the selected candle owner. This remains true when a rapid switch returns to
+the interval of the held series before either request settles; comparing only
+the held and selected interval would incorrectly call that in-flight chart
+live. The spinner has an accessible loading name and `pointer-events: none`, so
+it states the wait without turning the retained chart into a blocked loading
+curtain.
 
 ### D3. The interval is stored beside the contract
 

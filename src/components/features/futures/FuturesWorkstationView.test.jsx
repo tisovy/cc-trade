@@ -651,16 +651,68 @@ describe('pure Futures workstation presentation', () => {
   // on 2026-09-02 blanked the chart for the two seconds a candle socket took.
   it('keeps drawing the last series under loading while the new interval is fetched', () => {
     const state = createState({ interval: '5m', candlesSwitching: true })
-    renderView({ state, selectedInterval: '5m' })
+    const { rerender } = renderView({ state, selectedInterval: '5m' })
 
     const lastRender = workstationViewMocks.chartRender.mock.calls.at(-1)[0]
     expect(lastRender).toMatchObject({ symbol: 'BTCUSDT', interval: '5m' })
     expect(lastRender.candles.length).toBeGreaterThan(0)
     expect(lastRender.candles).toEqual(state.resources.candles.contract)
+    const progress = screen.getByRole('status', { name: 'Loading 5m candles' })
+    expect(progress).toHaveClass('futures-workstation-interval-progress')
+    expect(progress.querySelector('span')).toHaveAttribute('aria-hidden', 'true')
     // The book and the tape are untouched by the switch.
     expect(screen.getByLabelText('Futures market header')).toHaveTextContent('58420.25')
-    // The gesture stays armed on the series still drawn.
+    // The gesture stays armed on the series still drawn, through the progress
+    // layer rather than under a loading curtain.
     fireEvent.click(screen.getByText('Pick chart price'))
+
+    const stylesheet = readFileSync(
+      'src/components/features/futures/FuturesWorkstation.css',
+      'utf8',
+    )
+    expect(ruleIn(stylesheet, '.futures-workstation-interval-progress'))
+      .toContain('pointer-events: none;')
+    expect(ruleIn(stylesheet, '.futures-workstation-interval-progress > span'))
+      .toContain('pointer-events: none;')
+    expect(ruleIn(
+      mediaBlocks(stylesheet, '@media (prefers-reduced-motion: reduce)'),
+      '.futures-workstation-interval-progress > span',
+    )).toContain('animation: none;')
+
+    const deliveredState = createState({
+      interval: '5m',
+      candlesSwitching: false,
+      resources: Object.freeze({
+        ...state.resources,
+        candles: Object.freeze({ ...state.resources.candles, interval: '5m' }),
+      }),
+    })
+    rerender(
+      <FuturesWorkstationView
+        identity="USDⓈ-M PRODUCTION · REAL MONEY"
+        state={deliveredState}
+        selectedSymbol="BTCUSDT"
+        selectedInterval="5m"
+        symbolHistory={{ recent: ['BTCUSDT'], favorites: [] }}
+        onSymbolChange={() => {}}
+        onIntervalChange={() => {}}
+      />,
+    )
+    expect(screen.queryByRole('status', { name: 'Loading 5m candles' })).toBeNull()
+  })
+
+  it('keeps progress pending when a rapid switch returns to the held interval', () => {
+    const state = createState({ interval: '1m', candlesSwitching: true })
+    renderView({ state, selectedInterval: '1m' })
+
+    // 1m -> 5m -> 1m before either request settles leaves a 1m series on
+    // screen, but the second replacement request is still in flight. Equality
+    // between the held and selected intervals must not restate it as live.
+    expect(screen.getByRole('status', { name: 'Loading 1m candles' })).toBeInTheDocument()
+    expect(document.querySelector('.futures-workstation-reading-notice'))
+      .toHaveTextContent(/^LOADING chart/)
+    expect(workstationViewMocks.chartRender.mock.calls.at(-1)[0].candles)
+      .toEqual(state.resources.candles.contract)
   })
 
   it('keeps every ordered interval visible in the compact toolbar and selects weekly explicitly', () => {

@@ -28,6 +28,12 @@
 - [x] 2.3 Report `interval-shown` (`interval`, `from`, `cause`) through the
       display channel; declare in `desk-diagnostic-record.js`; assert through
       `describeDeskDiagnosticEvent`.
+- [x] 2.4 `FuturesWorkstationView`: show a compact, accessible, pointer-through
+      progress spinner over the held chart exactly while an interval switch is
+      waiting for its replacement candle series.
+- [x] 2.5 End the interval-switch wait when the local workstation connection
+      closes or errors, so the retained chart states the connection failure
+      instead of leaving an endless progress indicator over it.
 
 ## 3. Tests that bite, then the suite
 
@@ -57,12 +63,27 @@
       outside the filesystem sandbox so loopback integration sockets can bind;
       `eslint .`, production build and all four guards green. The sandboxed
       full-suite attempt had only the expected loopback `EPERM`/timeouts.
+- [x] 3.6 Prove the progress indicator appears only for the interval-switch
+      state, names the interval being loaded, does not intercept chart input and
+      leaves when the selected interval's series arrives.
+- [x] 3.7 Audit the completed interval-switch implementation and spec for state
+      lifecycle, accessibility, interaction, responsive layout and regression
+      scope; fix findings, then run the focused suites, full suite, eslint,
+      production build and all four guards. The audit caught and fixed both a
+      rapid `1m → 5m → 1m` false-live state and an endless switch wait after a
+      local close/error. Focused 307/307 and full 3061/3061 tests passed; eslint,
+      production build and every guard passed on 2026-09-03.
 
 ## 4. Operator verification (runbook, live)
 
-- [ ] 4.1 Switch intervals through a moving market: the book and tape do not
+- [x] 4.1 Switch intervals through a moving market: the book and tape do not
       blink, a gesture during the switch stages an order with the reading's
-      age stated, the chart replaces its series without going blank.
-- [ ] 4.2 Reload: the chart comes back on the interval it was on.
-- [ ] 4.3 Journal read: `interval-shown` lines match the switches; no
-      session `loading` line for a switch.
+      age stated, the chart replaces its series without going blank. Operator
+      confirmed the live behaviour on 2026-09-03.
+- [x] 4.2 Reload: the chart comes back on the interval it was on. The journal
+      records operator selection of `5m` at 15:56:02Z and restored `5m` after
+      remount at 15:56:19Z.
+- [x] 4.3 Journal read: `interval-shown` lines match the switches; no
+      session `loading` line for a switch. The 15:56 and 15:59 operator sequence
+      records `5m → 1m → 15m → 1m → 5m`; the only nearby loading lines precede
+      the initial live state and belong to the remount, not to those switches.

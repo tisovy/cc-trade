@@ -35,6 +35,10 @@ operator back on a fifteen-minute chart in the middle of a scalp.
 - **The chart stays pickable through the switch.** A price picked or a
   gesture made during the switch carries the reading it was taken off — the
   last candle, with its age — exactly as a stale chart does today.
+- **The switch is visibly in progress.** A compact spinner sits over the held
+  chart while the selected interval's candles are arriving, without covering
+  the series or intercepting chart gestures, and leaves with the switching
+  state.
 - **History follows the series actually on screen.** While the previous
   interval is held through a switch, the chart does not request a page for the
   newly selected interval behind the previous interval's oldest candle. Once

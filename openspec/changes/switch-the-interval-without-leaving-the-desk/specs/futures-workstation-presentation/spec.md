@@ -6,8 +6,11 @@ and nothing else. The session SHALL stay live; the order book, the tape and
 the header SHALL neither be re-delivered nor re-stated for the change. The
 chart SHALL keep drawing the series it last had, under a stated non-live
 state, until the new interval's series is delivered, and SHALL then replace
-it. A switch that fails SHALL leave the candles stale with the reason and
-retry on the interval's own schedule, without the session leaving live.
+it. While that replacement is in flight, the held chart SHALL show a compact,
+non-blocking progress indicator that does not intercept chart gestures. The
+indicator SHALL leave when the switching state ends. A switch that fails SHALL
+leave the candles stale with the reason and retry on the interval's own
+schedule, without the session leaving live.
 
 #### Scenario: The operator switches from 1m to 5m
 - **WHEN** the operator selects another interval while the book and tape are live
@@ -19,7 +22,11 @@ retry on the interval's own schedule, without the session leaving live.
 
 #### Scenario: A switch during a spike
 - **WHEN** the operator switches intervals while the market is moving fast
-- **THEN** the last series stays on screen with its state stated until the new one lands, and no panel goes blank
+- **THEN** the last series stays on screen with its state and a progress indicator shown until the new one lands, the chart remains interactive, and no panel goes blank
+
+#### Scenario: The local connection fails during a switch
+- **WHEN** the local workstation connection closes or errors before the replacement candle series arrives
+- **THEN** the retained chart states the connection failure, the progress indicator stops, and reconnection remains owned by the workstation's existing retry schedule
 
 #### Scenario: History is loaded after an interval switch
 - **WHEN** the operator switches intervals and then scrolls left after the new interval's series has landed
