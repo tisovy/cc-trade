@@ -649,7 +649,7 @@ describe('pure Futures workstation presentation', () => {
   // landed, the last series stays on the chart under a stated non-live state:
   // the chart never goes blank and a gesture on it stays armed. Every switch
   // on 2026-09-02 blanked the chart for the two seconds a candle socket took.
-  it('keeps drawing the last series under loading while the new interval is fetched', () => {
+  it('keeps drawing the last series under a grey veil while the new interval is fetched', () => {
     const state = createState({ interval: '5m', candlesSwitching: true })
     const { rerender } = renderView({ state, selectedInterval: '5m' })
 
@@ -662,16 +662,16 @@ describe('pure Futures workstation presentation', () => {
     expect(progress.querySelector('span')).toHaveAttribute('aria-hidden', 'true')
     // The book and the tape are untouched by the switch.
     expect(screen.getByLabelText('Futures market header')).toHaveTextContent('58420.25')
-    // The gesture stays armed on the series still drawn, through the progress
-    // layer rather than under a loading curtain.
+    // The gesture stays armed on the series still drawn through the veil.
     fireEvent.click(screen.getByText('Pick chart price'))
 
     const stylesheet = readFileSync(
       'src/components/features/futures/FuturesWorkstation.css',
       'utf8',
     )
-    expect(ruleIn(stylesheet, '.futures-workstation-interval-progress'))
-      .toContain('pointer-events: none;')
+    const progressRule = ruleIn(stylesheet, '.futures-workstation-interval-progress')
+    expect(progressRule).toContain('background: rgba(112, 116, 122, 0.34);')
+    expect(progressRule).toContain('pointer-events: none;')
     expect(ruleIn(stylesheet, '.futures-workstation-interval-progress > span'))
       .toContain('pointer-events: none;')
     expect(ruleIn(

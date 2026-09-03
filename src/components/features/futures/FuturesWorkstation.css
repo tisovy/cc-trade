@@ -882,16 +882,17 @@
   min-height: 320px;
 }
 
-/* The previous interval remains fully readable and interactive while the new
-   candle window arrives. This is only the wait's progress mark, not a loading
-   curtain: the empty layer and its ring both pass every pointer through to the
-   chart underneath. */
+/* The previous interval remains readable and interactive while the new candle
+   window arrives. The translucent grey veil states that the held series is not
+   live yet, while both it and the ring pass every pointer through to the chart
+   underneath. */
 .futures-workstation-interval-progress {
   position: absolute;
   inset: 0;
   z-index: 5;
   display: grid;
   place-items: center;
+  background: rgba(112, 116, 122, 0.34);
   pointer-events: none;
 }
 
