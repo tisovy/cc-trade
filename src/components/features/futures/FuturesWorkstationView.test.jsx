@@ -649,7 +649,7 @@ describe('pure Futures workstation presentation', () => {
   // landed, the last series stays on the chart under a stated non-live state:
   // the chart never goes blank and a gesture on it stays armed. Every switch
   // on 2026-09-02 blanked the chart for the two seconds a candle socket took.
-  it('keeps drawing the last series under a grey veil while the new interval is fetched', () => {
+  it('keeps drawing the last series under a dark veil while the new interval is fetched', () => {
     const state = createState({ interval: '5m', candlesSwitching: true })
     const { rerender } = renderView({ state, selectedInterval: '5m' })
 
@@ -670,7 +670,7 @@ describe('pure Futures workstation presentation', () => {
       'utf8',
     )
     const progressRule = ruleIn(stylesheet, '.futures-workstation-interval-progress')
-    expect(progressRule).toContain('background: rgba(112, 116, 122, 0.34);')
+    expect(progressRule).toContain('background: rgba(0, 0, 0, 0.42);')
     expect(progressRule).toContain('pointer-events: none;')
     expect(ruleIn(stylesheet, '.futures-workstation-interval-progress > span'))
       .toContain('pointer-events: none;')

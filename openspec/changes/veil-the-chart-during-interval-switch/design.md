@@ -8,7 +8,7 @@ presentation problem and the delta spec for the observable contract.
 
 **Goals:**
 
-- Reuse the existing switching-only layer to mute the chart without another
+- Reuse the existing switching-only layer to darken the chart without another
   state branch or DOM element.
 - Preserve the spinner's colour, chart readability and pointer-through input.
 
@@ -20,9 +20,10 @@ presentation problem and the delta spec for the observable contract.
 
 ## Decisions
 
-- Give the existing full-frame progress layer a translucent neutral-grey
-  background. This naturally starts and ends with `intervalSwitchPending`, and
-  its existing `pointer-events: none` keeps chart gestures available.
+- Give the existing full-frame progress layer a translucent black background
+  that darkens rather than lightens the chart. This naturally starts and ends
+  with `intervalSwitchPending`, and its existing `pointer-events: none` keeps
+  chart gestures available.
 - Keep the current stacking level. It veils the chart canvas while the spinner
   remains part of the same foreground layer and operator annotations retain
   their established higher stacking order.
@@ -32,9 +33,9 @@ presentation problem and the delta spec for the observable contract.
 
 ## Risks / Trade-offs
 
-- [The veil is too opaque and hides candle shape] → Use a translucent fill and
-  cover its declaration with a focused presentation test; tune visually during
-  operator verification.
+- [The dark veil is too opaque and hides candle shape] → Use a translucent fill
+  and cover its declaration with a focused presentation test; tune visually
+  during operator verification.
 - [The veil looks like a disabled chart] → Preserve pointer input and the
   visible spinner so the state reads as temporary progress rather than a
   blocked control.

@@ -883,7 +883,7 @@
 }
 
 /* The previous interval remains readable and interactive while the new candle
-   window arrives. The translucent grey veil states that the held series is not
+   window arrives. The translucent dark veil states that the held series is not
    live yet, while both it and the ring pass every pointer through to the chart
    underneath. */
 .futures-workstation-interval-progress {
@@ -892,7 +892,7 @@
   z-index: 5;
   display: grid;
   place-items: center;
-  background: rgba(112, 116, 122, 0.34);
+  background: rgba(0, 0, 0, 0.42);
   pointer-events: none;
 }
 
