@@ -701,6 +701,49 @@ describe('pure Futures workstation presentation', () => {
     expect(screen.queryByRole('status', { name: 'Loading 5m candles' })).toBeNull()
   })
 
+  // The hook ends the switch wait on a local close or error so the progress
+  // mark leaves. What the chart draws then is the series it still has, under
+  // the link's state — not a blank canvas behind «No candle has arrived for
+  // this contract yet», which is what it did on 2026-09-03.
+  it.each([
+    ['disconnected', 'LOCAL_CONNECTION_CLOSED'],
+    ['unavailable', 'LOCAL_CONNECTION_ERROR'],
+  ])('keeps the held series on screen while the local link is %s after a switch', (status, reasonCode) => {
+    const held = createState({ interval: '5m', candlesSwitching: true })
+    const state = createState({
+      interval: '5m',
+      candlesSwitching: false,
+      status,
+      reasonCode,
+      resources: Object.freeze({
+        ...held.resources,
+        status: Object.freeze({ connected: false, reasonCode, state: status, observedAt: 1_784_000_000_000 }),
+        candles: Object.freeze({ ...held.resources.candles, state: status }),
+      }),
+    })
+    renderView({ state, selectedInterval: '5m' })
+
+    const lastRender = workstationViewMocks.chartRender.mock.calls.at(-1)[0]
+    expect(lastRender).toMatchObject({ symbol: 'BTCUSDT', interval: '5m' })
+    expect(lastRender.candles).toEqual(state.resources.candles.contract)
+    expect(document.querySelector('.futures-workstation-reading-notice'))
+      .toHaveTextContent(new RegExp(`^${status.toUpperCase()} chart`))
+    expect(screen.queryByRole('status', { name: 'Loading 5m candles' })).toBeNull()
+    expect(document.querySelector('.futures-workstation-overlay')).toBeNull()
+    // The gesture stays armed on the series still drawn.
+    fireEvent.click(screen.getByText('Pick chart price'))
+  })
+
+  // On a live link a series at another interval outside a switch is not this
+  // selection's: the burst harness replays 1m frames under a 15m selection.
+  it('draws no series of another interval on a live link outside a switch', () => {
+    const state = createState({ interval: '5m', candlesSwitching: false })
+    renderView({ state, selectedInterval: '5m' })
+
+    expect(workstationViewMocks.chartRender.mock.calls.at(-1)[0].candles).toEqual([])
+    expect(screen.getByText('No candle has arrived for this contract yet.')).toBeInTheDocument()
+  })
+
   it('keeps progress pending when a rapid switch returns to the held interval', () => {
     const state = createState({ interval: '1m', candlesSwitching: true })
     renderView({ state, selectedInterval: '1m' })

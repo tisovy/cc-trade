@@ -306,10 +306,19 @@ export const FuturesWorkstationView = ({
   // the reading's age. On 2026-09-02 every switch blanked the chart for the
   // two seconds a new candle socket took through the proxy.
   const intervalSwitchPending = candleSelectionOwned && state.candlesSwitching === true
-  const switchingInterval = intervalSwitchPending
+  const transportConnected = resources.status?.connected === true
+  const seriesHeld = candleSelectionOwned
     && resources.candles !== null
     && resources.candles !== undefined
     && resources.candles.interval !== selectedInterval
+  // The held series is drawn while the switch waits, and while the local link
+  // is down after a switch that the link's failure ended: the hook drops the
+  // switch flag on a local close or error so the progress mark leaves, and the
+  // chart states the failure over the series it has instead of going blank
+  // behind a notice that no candle ever arrived (2026-09-03). On a live link a
+  // series at another interval outside a switch is simply not this selection's:
+  // the burst harness replays 1m frames under a 15m selection.
+  const switchingInterval = seriesHeld && (intervalSwitchPending || !transportConnected)
   const candles = candleSelectionOwned
     && (resources.candles?.interval === selectedInterval || switchingInterval)
     ? resources.candles
@@ -353,7 +362,6 @@ export const FuturesWorkstationView = ({
   }, [candleHistory, liveCandles, selectedInterval, selectedSymbol])
   const historyNotice = readHistoryNotice(candleHistory)
   const depthState = resourceState(depth)
-  const transportConnected = resources.status?.connected === true
   // `liveObservedAt`, not `observedAt`: the reducer keeps the last time each
   // resource was live, because the event that marks one stale is stamped with
   // the moment of the marking rather than the moment its data stopped.

@@ -11,6 +11,11 @@ will make the held-series state apparent without hiding the chart.
 - Keep the retained candles and progress spinner visible through the veil.
 - Keep the veil pointer-through and remove it with the existing switching
   state, so chart gestures remain available and no other chart state is dimmed.
+- Keep the held series drawn, without the veil and under the link's state,
+  while the local connection is down after a switch its failure ended.
+- Rewrite the canon requirement on opening history, which the interval-switch
+  archive left saying the replaced series is cleared before paint — the
+  opposite of the held series.
 
 ## Capabilities
 
