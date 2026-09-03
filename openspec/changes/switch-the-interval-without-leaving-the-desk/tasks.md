@@ -43,6 +43,20 @@
       report and the stored-interval restore. The record's `interval-shown`
       test bites through the display vocabulary.
 - [x] 3.2 Full suite, eslint, the four guards, build. **2026-09-03**: 3 003 tests green, `eslint .` clean, four guards ok, build ok.
+- [x] 3.3 Refuse a candle-history read while the series on screen belongs to
+      the interval being left; expose a fresh history handle when the selected
+      interval's series lands; shift the viewport only when the first row
+      previously drawn is still present behind genuinely prepended rows.
+- [x] 3.4 Prove the hook does not request new-interval history behind the held
+      old-interval window, the chart does not shift for a replacement window,
+      and the shared prepend counter still holds real history pages in place.
+- [x] 3.5 Run the focused renderer/history suites, the full suite and eslint;
+      record any unrelated timing-only failure separately rather than treating
+      it as candle-history evidence.
+      **2026-09-03**: 304 focused tests green; 3 058 full-suite tests green
+      outside the filesystem sandbox so loopback integration sockets can bind;
+      `eslint .`, production build and all four guards green. The sandboxed
+      full-suite attempt had only the expected loopback `EPERM`/timeouts.
 
 ## 4. Operator verification (runbook, live)
 

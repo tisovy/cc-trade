@@ -816,10 +816,24 @@ const useFuturesProductionWorkstation = ({
     })
   }, [liveCandles, liveInterval, state.symbol])
 
+  // History is read behind the live series of the selected interval, from the
+  // oldest bar the chart draws. Through a switch the chart draws the series of
+  // the interval being left, so a read issued then — stamped with the interval
+  // just selected, ended at the oldest bar of the other — fetched 1m candles
+  // behind the oldest 5m bar: a page a day and a half behind the 1m window,
+  // drawn with a hole in front of it, and a viewport moved onto air (BTRUSDT,
+  // 2026-09-03). No read while the series on screen is another interval's.
+  const seriesOnScreenIsForeign = liveInterval !== null && liveInterval !== interval
+
   const loadCandleHistory = useCallback(async (endTime) => {
     const activeSubscription = activeSubscriptionRef.current
     if (activeSubscription === null) return false
     if (!Number.isSafeInteger(endTime) || endTime <= 0) return false
+    // Refused rather than deferred, and under a handle that changes when the
+    // series lands: the chart re-evaluates its left edge on the handle, so the
+    // read it could not make during the switch is made then, behind the right
+    // series.
+    if (seriesOnScreenIsForeign) return false
     // One read at a time: the left edge fires continuously while scrolling. One
     // read of the session that issued it, though — a read outstanding when the
     // session was rebuilt is not still travelling, and holding the lock for it
@@ -870,7 +884,7 @@ const useFuturesProductionWorkstation = ({
       historyRequestRef.current = null
       return false
     }
-  }, [candleHistoryCache, interval, symbol])
+  }, [candleHistoryCache, interval, seriesOnScreenIsForeign, symbol])
 
   return {
     ...state,

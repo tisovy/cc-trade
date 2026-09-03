@@ -21,6 +21,10 @@ retry on the interval's own schedule, without the session leaving live.
 - **WHEN** the operator switches intervals while the market is moving fast
 - **THEN** the last series stays on screen with its state stated until the new one lands, and no panel goes blank
 
+#### Scenario: History is loaded after an interval switch
+- **WHEN** the operator switches intervals and then scrolls left after the new interval's series has landed
+- **THEN** history is requested behind that new series, the candles remain continuous, and replacing the held series does not move the viewport as though a history page had been prepended
+
 ## MODIFIED Requirements
 
 ### Requirement: The default chart interval is 15m

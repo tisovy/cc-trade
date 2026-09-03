@@ -54,6 +54,20 @@ interval left) and `cause` (`operator` | `restored`); the `symbol` field
 names the contract. Declared and asserted through
 `describeDeskDiagnosticEvent`.
 
+### D5. A history read belongs to the interval of the series it extends
+
+During a switch the chart deliberately continues drawing the interval being
+left. Its oldest candle is therefore not a valid `endTime` for a history
+request stamped with the interval just selected. The hook refuses that read
+while `liveInterval` names another interval, and exposes a new history callback
+when the selected interval's series lands so the chart retries its left edge
+behind the correct window.
+
+The shared viewport helper treats rows as prepended only when the first row
+previously drawn is still present immediately after them. A new interval's
+window that reaches farther back but contains none of the previous series is a
+replacement, not a prepend, so it must not shift the visible logical range.
+
 ## Residuals
 
 - The new candle socket still costs one handshake through the proxy per
@@ -75,3 +89,7 @@ names the contract. Declared and asserted through
   the contract history's five pure functions.
 - D4 carries `interval` and `fromInterval` as their own display fields — an
   interval does not pass the symbol validator that `from` uses.
+- D5 was added after operator verification exposed two coupled failures: the
+  held series could seed a history request for the newly selected interval,
+  and the replacement window could be mistaken for hundreds of prepended
+  rows. Both are renderer-only; the history protocol remains unchanged.

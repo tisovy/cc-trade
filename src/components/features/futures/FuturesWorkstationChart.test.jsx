@@ -2163,6 +2163,51 @@ describe('FuturesWorkstationChart history loading', () => {
     expect(chartMock.charts[0].timeScale().fitContent).toHaveBeenCalledTimes(fitted + 1)
   })
 
+  // A switch draws the held series until the new interval's window lands.
+  // That window opens before every bar drawn — a 5m window reaches back five
+  // times as far as a 1m one — and the chart read it as four hundred candles
+  // arriving in front, moving the viewport by that many bars onto air
+  // (2026-09-03). Bars count as in front only of a bar that is still drawn.
+  it('holds the viewport for a page in front of the bars it drew, not for a window that replaces them', () => {
+    const { rerender } = render(<FuturesWorkstationChart
+      {...properties(series(0, 80))}
+      symbol="BTCUSDT"
+      interval="1m"
+    />)
+    const timeScale = chartMock.charts[0].timeScale()
+    rerender(<FuturesWorkstationChart
+      {...properties(series(0, 80))}
+      symbol="BTCUSDT"
+      interval="5m"
+    />)
+    timeScale.visibleLogicalRange = { from: 20, to: 79 }
+    timeScale.setVisibleLogicalRange.mockClear()
+
+    const window = Array.from(
+      { length: 80 },
+      (_, index) => candle(START - ((80 - index) * 5 * MINUTE)),
+    )
+    rerender(<FuturesWorkstationChart
+      {...properties(window)}
+      symbol="BTCUSDT"
+      interval="5m"
+    />)
+    expect(timeScale.setVisibleLogicalRange).not.toHaveBeenCalled()
+    expect(timeScale.visibleLogicalRange).toEqual({ from: 20, to: 79 })
+
+    // A page in front of that window moves the viewport by exactly its width.
+    const page = Array.from(
+      { length: 40 },
+      (_, index) => candle(START - ((120 - index) * 5 * MINUTE)),
+    )
+    rerender(<FuturesWorkstationChart
+      {...properties([...page, ...window])}
+      symbol="BTCUSDT"
+      interval="5m"
+    />)
+    expect(timeScale.setVisibleLogicalRange).toHaveBeenCalledExactlyOnceWith({ from: 60, to: 119 })
+  })
+
   it('asks again when scrolling reaches the oldest loaded candle', () => {
     const onLoadHistory = vi.fn()
     render(<FuturesWorkstationChart

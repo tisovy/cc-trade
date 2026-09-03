@@ -35,6 +35,11 @@ operator back on a fifteen-minute chart in the middle of a scalp.
 - **The chart stays pickable through the switch.** A price picked or a
   gesture made during the switch carries the reading it was taken off — the
   last candle, with its age — exactly as a stale chart does today.
+- **History follows the series actually on screen.** While the previous
+  interval is held through a switch, the chart does not request a page for the
+  newly selected interval behind the previous interval's oldest candle. Once
+  the new series lands, left-edge loading resumes behind that series, without
+  a gap or a viewport jump.
 - **The interval is remembered.** The last selected interval is restored on
   mount and after a reload, per operator; `15m` is the default only where
   none was stored.
@@ -54,6 +59,8 @@ operator back on a fifteen-minute chart in the middle of a scalp.
   `src/components/features/futures/FuturesProductionWorkstation.jsx`
   (interval persistence), `src/utils/futuresSymbolHistory.js` or a sibling
   store, `src/hooks/useFuturesProductionWorkstation*.js` (candles-scoped
-  status), `desk-diagnostic-record.js` (display vocabulary).
+  status and interval-owned history reads), `src/utils/chartSeriesDraw.js`
+  (distinguish a prepended page from a replacement interval window),
+  `desk-diagnostic-record.js` (display vocabulary).
 - Not touched: the candle socket protocol, the interval picker, the
-  history pages, the book and tape delivery.
+  history-page protocol, the book and tape delivery.

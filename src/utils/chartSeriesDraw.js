@@ -61,6 +61,12 @@ export const planSeriesDraw = (drawn, next, { timeOf = rowTime, sameRow = identi
 // Older candles arriving in front shift every bar's index, so the chart has to
 // know how many before it can hold the viewport still.
 //
+// They are in front of something only if that something is still there: the
+// row drawn first has to follow them. A series that opens before every bar
+// drawn and holds none of them — another interval's window landing over the
+// one held through the switch — replaces what was drawn rather than extending
+// it, and a viewport moved by its width lands on air (2026-09-03).
+//
 // A row whose open time cannot be read is not counted. It looks like a detail
 // and is not: an accessor answers a row it cannot read with `null`, `Number`
 // reads that as the epoch, and the epoch is in front of every candle there has
@@ -75,5 +81,6 @@ export const countPrependedRows = (previousFirstTime, next, { timeOf = rowTime }
         if (!Number.isFinite(time) || time >= previousFirstTime) break;
         count += 1;
     }
-    return count;
+    if (count === rows.length) return 0;
+    return Number(timeOf(rows[count]) ?? NaN) === previousFirstTime ? count : 0;
 };

@@ -22,6 +22,15 @@ describe('countPrependedRows', () => {
         expect(countPrependedRows(next[0].time, next)).toBe(0);
     });
 
+    // Another interval's window opens before every bar drawn and holds none of
+    // them. Counted as rows in front, it moved the viewport by its whole width.
+    it('counts nothing when the row drawn first is not in the series', () => {
+        const next = run(1_700_000_000, 6);
+        expect(countPrependedRows(next[2].time + 1, next)).toBe(0);
+        expect(countPrependedRows(next.at(-1).time + HOUR, next)).toBe(0);
+        expect(countPrependedRows(next[2].time, next)).toBe(2);
+    });
+
     it('counts nothing when there was no previous series to hold in place', () => {
         expect(countPrependedRows(null, run(1_700_000_000, 3))).toBe(0);
         expect(countPrependedRows(1_700_000_000, undefined)).toBe(0);
@@ -38,7 +47,10 @@ describe('countPrependedRows', () => {
         const timeOf = row => (Number.isSafeInteger(row?.openTime) ? row.openTime : null);
         const rows = [{ openTime: 'x' }, { openTime: 20 }, { openTime: 30 }];
         expect(countPrependedRows(30, rows, { timeOf })).toBe(0);
-        expect(countPrependedRows(30, [{ openTime: 10 }, { openTime: 'x' }], { timeOf })).toBe(1);
+        // The count stops at the row it cannot read, and the row drawn first
+        // is not behind what it counted: nothing is held in place.
+        expect(countPrependedRows(30, [{ openTime: 10 }, { openTime: 'x' }], { timeOf })).toBe(0);
+        expect(countPrependedRows(30, [{ openTime: 10 }, { openTime: 30 }], { timeOf })).toBe(1);
     });
 });
 

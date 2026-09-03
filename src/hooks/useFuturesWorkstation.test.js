@@ -947,6 +947,65 @@ describe('useFuturesProductionWorkstation candle history', () => {
     expect(result.current.candleHistory.exhausted).toBe(false)
   })
 
+  // A switch keeps the last series on the chart until the new one lands, and
+  // the chart asks for history behind the oldest bar it draws. Stamped with the
+  // interval just selected, that read fetched 1m candles behind the oldest 5m
+  // bar — a page a day and a half behind the 1m window, drawn with a hole in
+  // front of it (BTRUSDT, 2026-09-03). A read waits for the series it would
+  // page behind.
+  it('reads no history behind the series of the interval being switched away from', async () => {
+    const socket = new LocalSocket()
+    const sendMessage = vi.fn(() => true)
+    const candleHistoryCache = missingCache()
+    const { result, rerender } = renderHook(props => useFuturesProductionWorkstation(props), {
+      initialProps: defaultProps(socket, sendMessage, { candleHistoryCache }),
+    })
+    const requestId = sendMessage.mock.calls[0][0].requestId
+    const liveWindow = (id, revision, interval, rows) => socket.emitMessage(
+      createFuturesProductionWorkstationEvent(eventValues(id, {
+        revision,
+        resource: 'candles',
+        payload: Object.freeze({ series: 'contract', interval, rows: Object.freeze(rows) }),
+      })),
+    )
+    act(() => liveWindow(requestId, 2, '1m', historyRows(-80, 0)))
+
+    rerender(defaultProps(socket, sendMessage, { interval: '5m', candleHistoryCache }))
+    const switchRequest = sendMessage.mock.calls.at(-1)[0]
+    expect(switchRequest.action).toBe(FUTURES_PRODUCTION_WORKSTATION_ACTIONS.SELECT_INTERVAL)
+    expect(result.current.candlesSwitching).toBe(true)
+    const refused = result.current.loadCandleHistory
+    const sent = sendMessage.mock.calls.length
+
+    // The chart still draws the 1m series, and asks behind its oldest bar.
+    await act(async () => {
+      expect(await result.current.loadCandleHistory(START - (80 * MINUTE))).toBe(false)
+    })
+    expect(sendMessage.mock.calls).toHaveLength(sent)
+    expect(candleHistoryCache.readPage).not.toHaveBeenCalled()
+
+    // The 5m series lands. The read is offered again under a new handle — the
+    // chart re-evaluates its left edge on it — and pages behind that series.
+    const fiveMinuteRows = Array.from({ length: 40 }, (_, index) => ({
+      ...historyRows(0, 1)[0],
+      openTime: START - ((40 - index) * 5 * MINUTE),
+      closeTime: START - ((39 - index) * 5 * MINUTE) - 1,
+    }))
+    act(() => liveWindow(switchRequest.requestId, 3, '5m', fiveMinuteRows))
+    expect(result.current.candlesSwitching).toBe(false)
+    expect(result.current.loadCandleHistory).not.toBe(refused)
+    await act(async () => {
+      expect(await result.current.loadCandleHistory(fiveMinuteRows[0].openTime)).toBe(true)
+    })
+    expect(sendMessage.mock.calls.at(-1)[0]).toMatchObject({
+      action: FUTURES_PRODUCTION_WORKSTATION_ACTIONS.LOAD_CANDLE_HISTORY,
+      requestId: switchRequest.requestId,
+      symbol: 'BTCUSDT',
+      interval: '5m',
+      endTime: fiveMinuteRows[0].openTime,
+    })
+  })
+
   it('gives weekly candles and history a fresh owner and ignores the abandoned interval', async () => {
     const socket = new LocalSocket()
     const sendMessage = vi.fn(() => true)
