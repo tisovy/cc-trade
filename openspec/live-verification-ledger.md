@@ -1028,3 +1028,23 @@ journal read follows it.
 |---|---:|---|---|---|---|---|
 | `veil-the-chart-during-interval-switch` | 3.1 | `OUTSTANDING` | — | Production | `769208e` or later | Switch intervals on a live chart: the held chart is visibly darkened while the ring turns, stays readable and takes a gesture, and returns to its normal background when the new series lands. |
 | `veil-the-chart-during-interval-switch` | 3.2 | `OUTSTANDING` | — | Production | `732371b` or later | Save any `electron/**` file while a switch is waiting (the main process restarts, the local link closes): the chart keeps its last series under `DISCONNECTED chart`, no veil, no «No candle has arrived» notice; when the desk subscribes again the chart comes back on the selected interval. |
+
+## Candles From The Nearest Source, 2026-09-04
+
+The chart reads candles from the machine's own candle store before the
+exchange (`read-candles-from-the-nearest-source`, `e6805da`): the new
+interval's window from the store under `loading` on every open and
+switch, history pages from the store whole or not at all, the exchange
+last. Deployed 2026-09-04 with the desk stopped, archived the same day
+with its live steps carried here; the operator's sitting closes them, my
+journal read follows it. `hunter`'s `topup=false` is in its working tree
+and takes effect on the restart in 3.2.
+
+| Change | Task | Status | Observation date | Account | Desk revision | Evidence |
+|---|---:|---|---|---|---|---|
+| `read-candles-from-the-nearest-source` | 3.2 | `OUTSTANDING` | — | Production | `e6805da` or later | Operator: `systemctl --user restart ui.service` after `hunter`'s `topup=false` is in place, so a page beyond the store's oldest minute makes `hunter` read nothing from Binance on the desk's behalf. |
+| `read-candles-from-the-nearest-source` | 5.2 | `OUTSTANDING` | — | Production | `e6805da` or later | Switch 1m → 5m → 1h on a live contract: the new interval's bars are on the chart under the veil at once, the veil lifts when the exchange's window lands, no jump; the journal shows `candle-store-window` `hit` before `contract-klines` on each switch. |
+| `read-candles-from-the-nearest-source` | 5.3 | `OUTSTANDING` | — | Production | `e6805da` or later | Scroll left through the last month on 5m: pages arrive with no `candle-history` timing; the journal shows `candle-store-page` `hit` per page; past 2026-07-30 the pages come from the exchange (`candle-history` timings resume). |
+| `read-candles-from-the-nearest-source` | 5.4 | `OUTSTANDING` | — | Production | `e6805da` or later | Stop `ui.service` for a minute: switches and scrolls keep working from the app cache and the exchange; the journal shows `candle-store-*` errors then `skipped`, then hits again after the unit is back. |
+| `read-candles-from-the-nearest-source` | 5.5 | `OUTSTANDING` | — | Production | `e6805da` or later | A CJK contract (龙虾USDT): the store serves its window and pages. |
+| `read-candles-from-the-nearest-source` | 5.6 | `OUTSTANDING` | — | Production | `e6805da` or later | Journal read after the sitting: the summary's «Candle reads» block states pages from the store, pages from the exchange, and the weight not spent. |
