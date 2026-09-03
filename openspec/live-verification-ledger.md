@@ -999,3 +999,18 @@ of starting the book from the page.
 §5 of the change stays open: the operator's next burst session by hand, my
 journal read after it (SUPERSEDED carrying the burst, `NOT_DRAWN` near zero,
 `heldBeats` counting while the stream carries), and the quiet-side control.
+
+## Outstanding — load the rest in a free minute, 2026-09-03
+
+The pool's background contracts park instead of reconnecting
+(`load-the-rest-in-a-free-minute`, implemented and self-audited in
+`3cea882`, archived the same day with its live steps carried here). The
+operator's sitting closes them; my journal read follows it.
+
+| Change | Task | Status | Observation date | Account | Desk revision | Evidence |
+|---|---:|---|---|---|---|---|
+| `load-the-rest-in-a-free-minute` | 5.1 | `OUTSTANDING` | — | Production | `3cea882` or later | Stop the proxy on 127.0.0.1:1080 for thirty seconds with eight contracts held, then restore it: the shown contract reconnects on its ladder; the journal shows seven `park` faults and no bootstrap for them; `lazy-bootstrap` timings then arrive one at a time, at least fifteen seconds apart, only after the shown contract is live. |
+| `load-the-rest-in-a-free-minute` | 5.2 | `OUTSTANDING` | — | Production | `3cea882` or later | Reload the window during the outage: one subscribe, the shown contract only; no read for the others. A renderer reload closes the whole runtime, so the pool is empty afterwards and only the subscribed contract opens; the held-and-parked path is what a renderer socket that drops and returns without a reload exercises. |
+| `load-the-rest-in-a-free-minute` | 5.3 | `OUTSTANDING` | — | Production | `3cea882` or later | Select a parked contract: it rebuilds at once (1–2 s) and takes the screen; the journal shows its bootstrap and nothing for the rest. |
+| `load-the-rest-in-a-free-minute` | 5.4 | `OUTSTANDING` | — | Production | `3cea882` or later | Journal read after a session (`node scripts/read-desk-record.mjs`): `Crossed books` equals the number of `stream` evidence lines; `Exchange refusals` is zero, or says which route was refused. |
+| `load-the-rest-in-a-free-minute` | 5.5 | `OUTSTANDING` | — | Production | `3cea882` or later | Leave a reconnecting contract: select another while the shown one is on its ladder; the journal shows one `park` fault for it under the ladder's reason and no bootstrap after. |
