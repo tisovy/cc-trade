@@ -47,6 +47,12 @@
       `confirm-a-fill-burst-once/design.md` keeps its residual as the record
       of when the read had none.
 
+- [x] 1.5 The span's newest end (D2, after the first live lines): rows newer
+      than the pass began, less `FUTURES_HISTORY_REPORT_FLIGHT_MS`, are
+      `restated`, never `unreported`. Found on the first non-zero live line —
+      37 of 86 rows «unreported» on a read that went out while the order was
+      still filling, all 86 held 0.35 s later.
+
 ## 2. The settled score, restored (main process)
 
 - [x] 2.1 `readFuturesSettledMoney`: capture the held rows before the walk;
@@ -91,6 +97,12 @@
       commit. Scope by grep: the seven files in the proposal's Impact plus
       the new `futures-history-reconfirmation.js` and the two dock/hook
       call sites.
+
+- [x] 4.3 The newest-end cut bites: the unit case (a row newer than the pass
+      began → restated, the bound itself judged) and the integration case (a
+      fill inside the read's own flight → `restated: 1`, one old enough →
+      `unreported: 1`) fail on `c3ea7c5`; the five existing score cases let
+      a report's flight pass before they read, as the burst timer does.
 
 ## 5. Operator verification (live) and the gate
 

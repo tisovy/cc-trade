@@ -29,6 +29,15 @@ export const FUTURES_HISTORY_SCORED_FIELDS = Object.freeze([
 
 const EMPTY_FILLS = Object.freeze(new Map());
 
+// How long a report takes to cross the socket after its fill. A read issued
+// while a burst is still filling can be answered with fills whose reports
+// have not landed: on 2026-09-03 a read after a burst on BULLAUSDT returned
+// 86 rows, 37 of them from that instant, and the pass 0.35 s later held every
+// one. Rows newer than the pass began, less this, are not judged. Two seconds
+// is above every private-stream lag the desk has measured through the proxy
+// (345 ms) with room for a main process busy folding another answer.
+export const FUTURES_HISTORY_REPORT_FLIGHT_MS = 2_000;
+
 const normalizeIdentity = (value) => {
     const identity = typeof value === 'string'
         ? value.trim()
@@ -125,22 +134,34 @@ export const createFuturesHistoryStreamShadow = ({
  * `returned` is every row the exchange answered with. A row from before the
  * moment the current stream connected is `restated`: the stream was not there
  * to report it, and calling it unreported would report the socket's downtime
- * as the socket's failure. Of the rows the stream could have reported, `held`
- * is the ones it did, `unreported` the ones it did not, and `differing` the
- * held ones whose fields the exchange states differently — once per row,
- * however many fields moved. `returned` is `restated + held + unreported`.
+ * as the socket's failure. So is a row newer than `judgeTo` — the moment the
+ * pass began, less a report's flight: its report may still be crossing the
+ * socket, and the read's own flight is not the socket's failure either. Of
+ * the rows the stream could have reported, `held` is the ones it did,
+ * `unreported` the ones it did not, and `differing` the held ones whose
+ * fields the exchange states differently — once per row, however many fields
+ * moved. `returned` is `restated + held + unreported`.
  */
-export const scoreFuturesHistoryReading = ({ rows, fills = EMPTY_FILLS, connectedAt = null }) => {
+export const scoreFuturesHistoryReading = ({
+    rows,
+    fills = EMPTY_FILLS,
+    connectedAt = null,
+    judgeTo = null,
+}) => {
     let returned = 0;
     let restated = 0;
     let held = 0;
     let unreported = 0;
     let differing = 0;
     const judgeFrom = Number.isSafeInteger(connectedAt) && connectedAt >= 0 ? connectedAt : null;
+    const judgeUntil = Number.isSafeInteger(judgeTo) ? judgeTo : null;
     for (const row of Array.isArray(rows) ? rows : []) {
         returned += 1;
         const time = Number(row?.time);
-        if (judgeFrom === null || !Number.isFinite(time) || time < judgeFrom) {
+        if (judgeFrom === null
+            || !Number.isFinite(time)
+            || time < judgeFrom
+            || (judgeUntil !== null && time > judgeUntil)) {
             restated += 1;
             continue;
         }

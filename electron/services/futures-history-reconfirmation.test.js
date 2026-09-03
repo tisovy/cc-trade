@@ -149,6 +149,25 @@ describe('scoring one contract against the stream', () => {
         })).toEqual({ returned: 3, restated: 2, held: 1, unreported: 0, differing: 0 });
     });
 
+    // Fills that executed as the request left. The exchange's answer can
+    // carry them before their reports have crossed the socket — on
+    // 2026-09-03 a read after a burst returned 86 rows, 37 of them fills of
+    // that instant, and the pass 0.35 s later held every one.
+    it('restates rows newer than the pass began, less a report in flight', () => {
+        expect(scoreFuturesHistoryReading({
+            rows: [
+                restRow(),
+                restRow({ id: '4103', time: 1_700_000_900 }),
+                restRow({ id: '4104', time: 1_700_000_700 }),
+                // The bound itself is judged: a report has had its flight.
+                restRow({ id: '4105', time: 1_700_000_800 }),
+            ],
+            fills,
+            connectedAt: 1_700_000_000,
+            judgeTo: 1_700_000_800,
+        })).toEqual({ returned: 4, restated: 1, held: 1, unreported: 2, differing: 0 });
+    });
+
     it('restates everything when no stream is connected', () => {
         expect(scoreFuturesHistoryReading({
             rows: [restRow(), restRow({ id: '4103' })],

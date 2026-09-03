@@ -523,11 +523,16 @@ const RECORDED_FIELDS = Object.freeze({
     // which could be asked what they had found.
     //
     // Counts only, never a row: `returned` is what the exchange answered,
-    // `restated` the rows from before the current stream connected (the stream
-    // was not there to report them, and they prove nothing either way), `held`
-    // the rows the stream had reported, `unreported` the rows it had not, and
-    // `differing` the held rows whose fields the exchange states differently.
-    // `returned` is `restated + held + unreported`.
+    // `restated` the rows the stream could not be held to — from before the
+    // current stream connected, or newer than the pass began less a report's
+    // flight (the stream was not there for the first, and the second's
+    // report may still be crossing the socket; neither proves anything
+    // either way), `held` the rows the stream had reported, `unreported` the
+    // rows it had not, and `differing` the held rows whose fields the
+    // exchange states differently. `returned` is `restated + held +
+    // unreported`. On a `fill` read the stream has long been up, so its
+    // `restated` is the fills that executed inside the read's own flight —
+    // rows never judged, since the cursor moves past them.
     //
     // `vouched` is 1 only when every contract's stream proof held from the
     // start of the pass to its acceptance. A pass whose stream dropped

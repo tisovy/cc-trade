@@ -82,6 +82,7 @@ import {
     readFuturesTradeHistoryWindow,
 } from './futures-trade-history-window.js';
 import {
+    FUTURES_HISTORY_REPORT_FLIGHT_MS,
     addFuturesHistoryScore,
     createFuturesHistoryStreamShadow,
     emptyFuturesHistoryScore,
@@ -6328,6 +6329,14 @@ export function setupBinanceConnection({
             const historyReason = forcedSymbols.length > 0
                 ? 'continuation'
                 : typeof reason === 'string' ? reason : 'unstated';
+            // Rows newer than this are not judged: a fill that executed as
+            // the pass began may be answered by the exchange before its
+            // report has crossed the socket (37 of 86 on one read,
+            // 2026-09-03), and the read's own flight is not the socket's
+            // failure. Such rows are restated, and never judged later — the
+            // cursor moves past them; the fill read's `restated` is the size
+            // of that blind spot.
+            const judgeTo = Date.now() - FUTURES_HISTORY_REPORT_FLIGHT_MS;
             const score = emptyFuturesHistoryScore();
             const recordHistory = (outcome, code = null) => {
                 diagnosticRecord.record('history', {
@@ -7052,6 +7061,7 @@ export function setupBinanceConnection({
                             rows: symbolTradeReading?.rows ?? [],
                             fills: futuresHistoryStreamShadow.fillsOf(historySymbol),
                             connectedAt: proof.connectedAt,
+                            judgeTo,
                         }));
                         if (!proof.connected
                             || !futuresHistoryStreamConnected

@@ -62,6 +62,15 @@ failure — the same bound `compareFuturesSettledReadings` applies through
 is still the epoch at acceptance for every covered contract; a pass whose
 stream dropped mid-way writes 0, and its `unreported` is not evidence.
 
+The span has a newest end too (added after the first live lines, below): a
+row newer than the moment the pass began, less a report's flight
+(`FUTURES_HISTORY_REPORT_FLIGHT_MS`, 2 s), is `restated` as well. A fill that
+executed as the request left can be in the exchange's answer before its
+report has crossed the socket, and the read's own flight is not the socket's
+failure. Such rows are never judged later — the cursor moves past them — so
+a `fill` read's `restated` is the size of that blind spot, stated per reason
+in the summary.
+
 ### D3. What differs is six fields, compared as exact decimals
 
 Per field, with no tolerance: the four amounts as exact decimals where trailing
@@ -123,6 +132,29 @@ goes through one `executeHistoryRead` so the line can state `reads`. The
 settled comparison is bounded to the span walked, `[windowFrom, now]`, rather
 than to the lane's `coveredFrom`: the commit prunes held rows that fell out of
 the window, and a pruned row is not the exchange withdrawing it.
+
+## First live lines, 2026-09-03 (audit before the commit)
+
+The desk ran the implementation from 14:34Z; 247 `history` lines and 8
+`settled` lines by 19:47Z. Read, not skimmed:
+
+- Every `fill`, `stream`, `bootstrap` and `continuation` pass scored; the
+  `verification` settled pass at 15:43Z wrote `verified: 6, missing: 0,
+  differing: 0` — six lanes compared, the first measured zeros since
+  `ac1800e`.
+- One non-zero: 16:25:40.068Z `fill`, BULLAUSDT, `returned: 86, held: 49,
+  unreported: 37, vouched: 1`. A limit order placed at 16:25:33 was filling
+  as the read went out; 0.35 s later the next pass returned the same 86 rows
+  with `held: 86`. The 37 were fills of that instant whose reports were still
+  crossing the socket — the read's own flight, not the socket's failure, and
+  under the gate a false non-zero would have kept the read another month. D2
+  gains the newest-end cut above; the case is the biting test.
+- 181 of the 247 lines are `bootstrap` passes with `contracts: 0, reads: 0`,
+  one every 30 s: the renderer's basis read is re-sent on the account beat
+  and answered from hand without a REST call. Free, but the summary counts
+  them as reads run. Pre-existing (the read was never recorded before);
+  left for its own change — the cause is in the renderer's basis-read
+  effect, not in the score.
 
 ## Residual
 

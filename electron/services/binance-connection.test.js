@@ -17,6 +17,7 @@ import {
     readDeskDiagnosticCommandEvent,
     readDeskDiagnosticOutboundEvent,
 } from './desk-diagnostic-record.js';
+import { FUTURES_HISTORY_REPORT_FLIGHT_MS } from './futures-history-reconfirmation.js';
 import { FUTURES_ACCOUNT_READ_REASONS } from './futures-account-state.js';
 
 const ACCOUNT_FINGERPRINT = '0123456789abcdef';
@@ -14064,6 +14065,10 @@ describe('setupBinanceConnection user-data orchestration', () => {
         };
         const historyLines = diagnostics => diagnostics.filter(entry => entry.kind === 'history');
         const settledLines = diagnostics => diagnostics.filter(entry => entry.kind === 'settled');
+        // The burst timer reads ten seconds after the last fill; a report has
+        // landed long before. A read the moment a fill is sent would find the
+        // fill inside its own flight and restate it rather than judge it.
+        const reportsLanded = () => vi.advanceTimersByTimeAsync(FUTURES_HISTORY_REPORT_FLIGHT_MS + 1);
 
         const startDeskWithStream = async (diagnosticRecord) => {
             setupBinanceConnection({
@@ -14138,6 +14143,7 @@ describe('setupBinanceConnection user-data orchestration', () => {
             sendStreamFill(stream, { tradeId: 10_501, time: filledAt });
             sendStreamFill(stream, { tradeId: 10_502, time: filledAt + 1, realizedPnl: '12.5' });
             await flushMicrotasks();
+            await reportsLanded();
             moduleMocks.futuresAdapter.getTradeHistory.mockResolvedValue([
                 // The held cursor's own row, repeated inclusively by the endpoint:
                 // from before any stream, and so restated rather than judged.
@@ -14170,10 +14176,40 @@ describe('setupBinanceConnection user-data orchestration', () => {
             const filledAt = Date.now();
             sendStreamFill(stream, { tradeId: 10_501, time: filledAt });
             await flushMicrotasks();
+            await reportsLanded();
             moduleMocks.futuresAdapter.getTradeHistory.mockResolvedValue([
                 restFill({ id: 200, time: 1 }),
                 restFill({ id: 10_501, time: filledAt }),
-                restFill({ id: 10_777, time: filledAt + 2 }),
+                // Old enough for a report to have landed: judged, and unreported.
+                restFill({ id: 10_777, time: filledAt + 1 }),
+            ]);
+
+            await runFuturesCommand(gapRead());
+
+            expect(historyLines(diagnostics).at(-1)).toMatchObject({
+                returned: 3, restated: 1, held: 1, unreported: 1, differing: 0, vouched: 1,
+            });
+        });
+
+        // Fills that executed as the request left. The exchange's answer can
+        // carry them before their reports have crossed the socket: on
+        // 2026-09-03 a read after a burst on BULLAUSDT returned 86 rows, 37 of
+        // them fills of that instant, and the pass 0.35 s later held every
+        // one. A row newer than the pass began, less a report's flight, is
+        // restated, not unreported; one old enough for its report to have
+        // landed is judged.
+        it('restates a fill from inside the read\'s own flight instead of calling it unreported', async () => {
+            const { diagnostics, diagnosticRecord } = recordedLines();
+            const stream = await startDeskWithStream(diagnosticRecord);
+            const filledAt = Date.now();
+            sendStreamFill(stream, { tradeId: 10_501, time: filledAt });
+            await flushMicrotasks();
+            await reportsLanded();
+            const readAt = Date.now();
+            moduleMocks.futuresAdapter.getTradeHistory.mockResolvedValue([
+                restFill({ id: 10_501, time: filledAt }),
+                restFill({ id: 10_777, time: readAt }),
+                restFill({ id: 10_779, time: readAt - FUTURES_HISTORY_REPORT_FLIGHT_MS - 1 }),
             ]);
 
             await runFuturesCommand(gapRead());
@@ -14190,6 +14226,7 @@ describe('setupBinanceConnection user-data orchestration', () => {
             sendStreamFill(stream, { tradeId: 10_501, time: filledAt });
             sendStreamFill(stream, { tradeId: 10_502, time: filledAt + 1 });
             await flushMicrotasks();
+            await reportsLanded();
             moduleMocks.futuresAdapter.getTradeHistory.mockResolvedValue([
                 restFill({ id: 10_501, time: filledAt, commission: '0.00500000' }),
                 // The same number at another scale is not a restatement.
@@ -14223,6 +14260,7 @@ describe('setupBinanceConnection user-data orchestration', () => {
             const reconnectedAt = Date.now();
             sendStreamFill(reopened, { tradeId: 10_601, time: reconnectedAt });
             await flushMicrotasks();
+            await reportsLanded();
             moduleMocks.futuresAdapter.getTradeHistory.mockResolvedValue([
                 restFill({ id: 10_501, time: filledAt }),
                 restFill({ id: 10_550, time: filledAt + 3_000 }),
@@ -14242,6 +14280,7 @@ describe('setupBinanceConnection user-data orchestration', () => {
             const filledAt = Date.now();
             sendStreamFill(stream, { tradeId: 10_501, time: filledAt });
             await flushMicrotasks();
+            await reportsLanded();
             moduleMocks.futuresAdapter.getTradeHistory.mockImplementation(async () => {
                 stream.handlers.close();
                 return [restFill({ id: 10_501, time: filledAt })];

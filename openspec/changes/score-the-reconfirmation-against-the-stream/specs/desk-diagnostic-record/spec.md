@@ -51,6 +51,10 @@ be read from the summaries alone.
 - **WHEN** a history command arrives without a reason, or with a word outside the vocabulary
 - **THEN** the event names the reason `unstated`, and the main process's own continuation rounds name `continuation`
 
+#### Scenario: A fill inside the read's own flight
+- **WHEN** the read returns a fill that executed after the pass began, less the time a report takes to cross the socket
+- **THEN** that row is counted as outside the stream's span, not as unreported, and the pass's count of such rows states how many fills went unjudged
+
 #### Scenario: The stream reconnected inside the window
 - **WHEN** the read returns rows older than the moment the current stream connection was made
 - **THEN** those rows are counted as outside the stream's span, not as unreported
