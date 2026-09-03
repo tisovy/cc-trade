@@ -53,3 +53,5 @@ returned, the rows already held from the stream, the rows the stream never
 reported, the rows that differed — counts only. A month of zeros is the
 evidence; a single non-zero is the reason the read stays. Operator's note,
 2026-09-03.
+Opened as change `score-the-reconfirmation-against-the-stream` the same day,
+which also found the settled line's own score to be literals since `ac1800e`.

@@ -336,13 +336,25 @@ export const mergeVerifiedFuturesSettledReading = (held, fresh, windowFrom) => {
  * record and that record carries no money. Only rows inside the span the fresh
  * read actually covered are judged: a held row older than that was not asked
  * about, and calling it missing would report the walk's own budget as the
- * exchange contradicting itself.
+ * exchange contradicting itself. The same at the newest end, and per lane —
+ * the walk answers one kind of flow at a time, and a funding row is not
+ * missing from a page of commission rebates.
+ *
+ * Called from nowhere between `ac1800e` (2026-08-23) and 2026-09-03, while the
+ * record kept writing the zeros it would have produced.
  */
-export const compareFuturesSettledReadings = (held, fresh, coveredFrom) => {
+export const compareFuturesSettledReadings = (
+    held,
+    fresh,
+    coveredFrom,
+    { coveredTo = null, incomeType = null } = {},
+) => {
     let missing = 0;
     let differing = 0;
     for (const [key, row] of held instanceof Map ? held : new Map()) {
         if (!isFiniteNumber(row?.time) || row.time < coveredFrom) continue;
+        if (isFiniteNumber(coveredTo) && row.time > coveredTo) continue;
+        if (incomeType !== null && row?.incomeType !== incomeType) continue;
         const answered = fresh instanceof Map ? fresh.get(key) : undefined;
         if (answered === undefined) {
             missing += 1;

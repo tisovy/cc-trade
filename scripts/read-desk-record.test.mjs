@@ -868,3 +868,81 @@ describe('the evidence beside faults', () => {
     expect(formatDeskDiagnosticSummary(summary)).toContain('lazy-bootstrap')
   })
 })
+
+// The two reads that confirm the stream against the exchange, and what they
+// found (2026-09-03). The block is the operator's evidence for ending a read:
+// it is present whenever either read ran, zeros included, and it tells a pass
+// that compared from one that did not.
+describe('the reconfirmation score', () => {
+  const settled = (overrides = {}) => ({
+    kind: 'settled', reason: 'verification', order: 'ascending', pages: 1, reads: 6, attempts: 6,
+    chargedWeight: 180, types: 6, lanes: 6, restored: 0, verified: 6, missing: 0, differing: 0,
+    rows: 12, kept: 12, contracts: 2, fundingRows: 4, rebateRows: 0, rebateSymbolRows: 0,
+    rebateTradeRows: 0, recipients: 1, coveredMs: 604800000, coverageGainedMs: 0,
+    outcome: 'complete', code: null, ...overrides,
+  })
+  const history = (overrides = {}) => ({
+    kind: 'history', reason: 'fill', contracts: 1, reads: 1, returned: 3, restated: 1, held: 2,
+    unreported: 0, differing: 0, vouched: 1, outcome: 'complete', code: null, ...overrides,
+  })
+  const record = [
+    line({ at: '2026-09-03T09:00:00.000Z', ...settled({ reason: 'bootstrap', verified: 0 }) }),
+    line({ at: '2026-09-03T10:00:00.000Z', ...settled({ missing: 1 }) }),
+    line({ at: '2026-09-03T10:30:00.000Z', ...settled({ reason: 'extension', verified: 0, missing: 0 }) }),
+    line({ at: '2026-09-03T11:00:00.000Z', ...settled({ differing: 2 }) }),
+    line({ at: '2026-09-03T11:00:10.000Z', ...history() }),
+    line({ at: '2026-09-03T11:00:20.000Z', ...history({ returned: 2, restated: 0, held: 2 }) }),
+    line({ at: '2026-09-03T11:00:30.000Z', ...history({ reason: 'continuation', vouched: 0, unreported: 1, held: 0, returned: 2 }) }),
+    line({ at: '2026-09-03T11:01:00.000Z', ...history({ reason: 'open', differing: 1, reads: 4, contracts: 3 }) }),
+  ].join('')
+
+  it('counts the passes that compared apart from the passes that ran', () => {
+    const summary = summarizeDeskDiagnosticRecord(record)
+    expect(summary.reconfirmation.settled).toEqual({
+      passes: 4, compared: 2, missing: 1, differing: 2,
+    })
+  })
+
+  it('keeps the history score by reason, and the vouched score apart', () => {
+    const summary = summarizeDeskDiagnosticRecord(record)
+    expect(summary.reconfirmation.history).toEqual([
+      {
+        reason: 'fill', count: 2, vouched: 2, reads: 2, returned: 5, restated: 1, held: 4,
+        unreported: 0, differing: 0, vouchedUnreported: 0, vouchedDiffering: 0,
+      },
+      {
+        reason: 'continuation', count: 1, vouched: 0, reads: 1, returned: 2, restated: 1, held: 0,
+        unreported: 1, differing: 0, vouchedUnreported: 0, vouchedDiffering: 0,
+      },
+      {
+        reason: 'open', count: 1, vouched: 1, reads: 4, returned: 3, restated: 1, held: 2,
+        unreported: 0, differing: 1, vouchedUnreported: 0, vouchedDiffering: 1,
+      },
+    ])
+  })
+
+  it('prints both scores, and the unvouched non-zero as not counting', () => {
+    const printed = formatDeskDiagnosticSummary(summarizeDeskDiagnosticRecord(record))
+    expect(printed).toContain('Reconfirmation against the stream')
+    expect(printed).toContain('  settled passes 4, compared 2, missing 1, differing 2')
+    expect(printed).toContain(
+      '  history reads 4 (vouched 3), requests 7, returned 10, restated 3, held 6'
+      + ', unreported 1 (on vouched 0), differing 1 (on vouched 1)',
+    )
+    expect(printed).toMatch(/fill {11}n= {4}2 {2}vouched {5}2 {2}returned {6}5/)
+  })
+
+  it('states a day of zeros rather than leaving the block out', () => {
+    const quiet = summarizeDeskDiagnosticRecord([
+      line({ at: '2026-09-03T11:00:10.000Z', ...history({ returned: 0, restated: 0, held: 0 }) }),
+    ].join(''))
+    const printed = formatDeskDiagnosticSummary(quiet)
+    expect(printed).toContain('  settled passes 0, compared 0, missing 0, differing 0')
+    expect(printed).toContain('  history reads 1 (vouched 1), requests 1, returned 0')
+  })
+
+  it('leaves the block out of a day neither read ran', () => {
+    expect(formatDeskDiagnosticSummary(summarizeDeskDiagnosticRecord(DAY)))
+      .not.toContain('Reconfirmation')
+  })
+})

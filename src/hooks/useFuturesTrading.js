@@ -1092,6 +1092,10 @@ const useFuturesTrading = ({
           sendCommandRef.current?.(createFuturesAccountHistoryCommand({
             basisOnly: true,
             coverage: historyCoverageRef.current,
+            // Named so the record can score this read apart from the others:
+            // whether the read after a fill ever brings what the stream did
+            // not is the question that decides if it keeps being sent.
+            reason: 'fill',
             symbol: touched,
             views: ['trades'],
           }))
@@ -1927,6 +1931,9 @@ const useFuturesTrading = ({
   const loadHistory = useCallback((targetSymbol, {
     basisOnly = false,
     full = false,
+    // Why the panel asks: `open`, `refresh` or `full`, from the control that
+    // asked. The command drops anything outside its closed set.
+    reason = null,
     views = null,
   } = {}) => {
     if (!state.historyStoreReady) return false
@@ -1935,6 +1942,7 @@ const useFuturesTrading = ({
       coverage: state.history.coverage,
       basisOnly,
       full,
+      reason,
       symbol: symbolToLoad,
       views,
     }))
@@ -2070,6 +2078,7 @@ const useFuturesTrading = ({
       // reconnects need only the cheaper cursor gaps.
       full: missingSettlementEvidence,
       coverage: state.history.coverage,
+      reason: 'stream',
       symbol: reconcileSymbol,
       views: ['trades'],
     }))
@@ -2143,6 +2152,7 @@ const useFuturesTrading = ({
     const sendBasisRead = () => sendCommand(createFuturesAccountHistoryCommand({
       basisOnly: true,
       coverage: state.history.coverage,
+      reason: 'bootstrap',
       symbol: positions[0]?.symbol,
       views: ['trades'],
     }))

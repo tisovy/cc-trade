@@ -1855,7 +1855,7 @@ describe('FuturesPortfolioDock', () => {
     // the operator's word (2026-08-23); the wide discovery read still runs
     // where the coverage machinery asks for it.
     fireEvent.click(screen.getByRole('button', { name: 'Re-read account history' }))
-    expect(onLoadHistory).toHaveBeenCalledExactlyOnceWith('BTCUSDT', { views: ['trades'] })
+    expect(onLoadHistory).toHaveBeenCalledExactlyOnceWith('BTCUSDT', { views: ['trades'], reason: 'refresh' })
     expect(screen.queryByRole('button', { name: 'Read full account history' }))
       .not.toBeInTheDocument()
   })
@@ -1887,7 +1887,7 @@ describe('FuturesPortfolioDock', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Re-read account history' }))
     expect(onLoadHistory).toHaveBeenCalledExactlyOnceWith(
       'BTCUSDT',
-      { full: true, views: ['trades'] },
+      { full: true, reason: 'full', views: ['trades'] },
     )
   })
 
@@ -1959,7 +1959,7 @@ describe('FuturesPortfolioDock', () => {
     expect(onLoadHistory).not.toHaveBeenCalled()
 
     fireEvent.click(screen.getByRole('tab', { name: 'Closed positions' }))
-    expect(onLoadHistory).toHaveBeenCalledExactlyOnceWith('BTCUSDT', { views: ['trades'] })
+    expect(onLoadHistory).toHaveBeenCalledExactlyOnceWith('BTCUSDT', { views: ['trades'], reason: 'open' })
 
     // The read answered for the view that asked. Opening the other view reads
     // the other endpoint — once — and going back reads nothing.
@@ -1968,7 +1968,7 @@ describe('FuturesPortfolioDock', () => {
       <FuturesPortfolioDock selectedSymbol="BTCUSDT" onLoadHistory={onLoadHistory} history={readTrades} />,
     )
     fireEvent.click(screen.getByRole('tab', { name: 'Order history' }))
-    expect(onLoadHistory).toHaveBeenNthCalledWith(2, 'BTCUSDT', { views: ['orders'] })
+    expect(onLoadHistory).toHaveBeenNthCalledWith(2, 'BTCUSDT', { views: ['orders'], reason: 'open' })
 
     fireEvent.click(screen.getByRole('tab', { name: 'Closed positions' }))
     fireEvent.click(screen.getByRole('tab', { name: 'Order history' }))
@@ -1994,7 +1994,7 @@ describe('FuturesPortfolioDock', () => {
       />,
     )
     fireEvent.click(screen.getByRole('tab', { name: 'Closed positions' }))
-    expect(onLoadHistory).toHaveBeenCalledExactlyOnceWith('BTCUSDT', { views: ['trades'] })
+    expect(onLoadHistory).toHaveBeenCalledExactlyOnceWith('BTCUSDT', { views: ['trades'], reason: 'open' })
 
     rerender(
       <FuturesPortfolioDock
@@ -2017,7 +2017,7 @@ describe('FuturesPortfolioDock', () => {
     )
 
     expect(onLoadHistory).toHaveBeenCalledTimes(2)
-    expect(onLoadHistory).toHaveBeenNthCalledWith(2, 'BTCUSDT', { views: ['trades'] })
+    expect(onLoadHistory).toHaveBeenNthCalledWith(2, 'BTCUSDT', { views: ['trades'], reason: 'open' })
   })
 
   // A frame that never left is not a read. The attempt stays armed so the next
@@ -2040,13 +2040,13 @@ describe('FuturesPortfolioDock', () => {
       <FuturesPortfolioDock selectedSymbol="BTCUSDT" onLoadHistory={unsendable} history={unread} />,
     )
     fireEvent.click(screen.getByRole('tab', { name: 'Order history' }))
-    expect(unsendable).toHaveBeenCalledExactlyOnceWith('BTCUSDT', { views: ['orders'] })
+    expect(unsendable).toHaveBeenCalledExactlyOnceWith('BTCUSDT', { views: ['orders'], reason: 'open' })
 
     const sendable = vi.fn(() => true)
     rerender(
       <FuturesPortfolioDock selectedSymbol="BTCUSDT" onLoadHistory={sendable} history={unread} />,
     )
-    expect(sendable).toHaveBeenCalledExactlyOnceWith('BTCUSDT', { views: ['orders'] })
+    expect(sendable).toHaveBeenCalledExactlyOnceWith('BTCUSDT', { views: ['orders'], reason: 'open' })
   })
 
   it('states how old the reading is and refuses a second read while one is in flight', () => {

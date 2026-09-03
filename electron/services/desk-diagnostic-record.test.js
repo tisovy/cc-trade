@@ -1844,3 +1844,69 @@ describe('the evidence beside a fault', () => {
         })).toBeNull();
     });
 });
+
+// The read that confirms a fill burst against the exchange, scored against the
+// stream it is confirming. Written on 2026-09-03, when 88 such reads in a day
+// could not be asked whether one had found anything.
+describe('the history line keeps the score of a reconfirmation read', () => {
+    const line = (overrides = {}) => describeDeskDiagnosticEvent('history', {
+        reason: 'fill',
+        contracts: 1,
+        reads: 1,
+        returned: 3,
+        restated: 1,
+        held: 2,
+        unreported: 0,
+        differing: 0,
+        vouched: 1,
+        outcome: 'complete',
+        code: null,
+        ...overrides,
+    });
+
+    it('keeps the counts and the reason, and nothing that names a fill', () => {
+        expect(line({ price: '100.5', tradeId: '4101', symbol: 'BTCUSDT' })).toEqual({
+            kind: 'history',
+            reason: 'fill',
+            contracts: 1,
+            reads: 1,
+            returned: 3,
+            restated: 1,
+            held: 2,
+            unreported: 0,
+            differing: 0,
+            vouched: 1,
+            outcome: 'complete',
+            code: null,
+        });
+    });
+
+    it('accepts every reason a read can state, and refuses one it cannot', () => {
+        for (const reason of [
+            'fill', 'open', 'refresh', 'full', 'stream', 'bootstrap', 'continuation', 'unstated',
+        ]) {
+            expect(line({ reason })).toMatchObject({ kind: 'history', reason });
+        }
+        expect(line({ reason: 'because' })).toBeNull();
+        expect(line({ reason: undefined })).toBeNull();
+    });
+
+    it('refuses a malformed count rather than writing half a score', () => {
+        expect(line({ unreported: -1 })).toBeNull();
+        expect(line({ vouched: 'yes' })).toBeNull();
+        expect(line({ held: undefined })).toBeNull();
+    });
+
+    it('tolerates a code it will not repeat, and keeps the outcome', () => {
+        expect(line({ outcome: 'failed', code: '-1003' })).toMatchObject({
+            outcome: 'failed',
+            code: null,
+        });
+        expect(line({ outcome: 'failed', code: 'ECONNRESET' })).toMatchObject({
+            outcome: 'failed',
+            code: 'ECONNRESET',
+        });
+        expect(line({ outcome: 'abandoned', code: 'ACTIVATION_RETIRED' }).outcome)
+            .toBe('abandoned');
+    });
+});

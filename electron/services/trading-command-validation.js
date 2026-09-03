@@ -4,6 +4,7 @@ import {
     DEFAULT_ACCOUNT_ID,
     DEFAULT_SPOT_ORDER_TYPE,
     DEFAULT_SPOT_TIME_IN_FORCE,
+    FUTURES_HISTORY_READ_REASONS,
     FUTURES_HISTORY_VIEW_VALUES,
     FUTURES_LEVERAGE_LIMITS,
     FUTURES_MARGIN_TYPES,
@@ -833,6 +834,11 @@ export const validateTypedTradingCommand = (payload, { selectedSymbol } = {}) =>
                     ...(payload.basisOnly === true ? { basisOnly: true } : {}),
                     ...(Object.keys(coverage).length > 0 ? { coverage } : {}),
                     ...(payload.full === true ? { full: true } : {}),
+                    // Carried only from the closed set; anything else is a
+                    // read that did not say, and is recorded as such.
+                    ...(FUTURES_HISTORY_READ_REASONS.includes(payload.reason)
+                        ? { reason: payload.reason }
+                        : {}),
                     ...(views === null ? {} : { views }),
                 },
             };

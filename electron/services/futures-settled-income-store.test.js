@@ -239,6 +239,31 @@ describe('comparing a kept reading against the exchange', () => {
             .toEqual({ missing: 0, differing: 1 });
     });
 
+    // The walk answers one kind of flow at a time, to the moment it started.
+    // A funding row is not missing from a page of rebates, and a row the
+    // exchange wrote after the pass began was not asked about either.
+    it('judges only the lane it is given, inside the span walked', () => {
+        const fresh = new Map([
+            ['FUNDING_FEE:one', row(NOW - 3_600_000, 'one')],
+        ]);
+        const heldWithOtherLane = new Map([
+            ...held,
+            ['COMMISSION:three', {
+                ...row(NOW - 1_800_000, 'three', '-0.01'), incomeType: 'COMMISSION',
+            }],
+            ['FUNDING_FEE:four', row(NOW + 60_000, 'four')],
+        ]);
+        expect(compareFuturesSettledReadings(heldWithOtherLane, fresh, NOW - 8 * 3_600_000, {
+            coveredTo: NOW,
+            incomeType: 'FUNDING_FEE',
+        })).toEqual({ missing: 1, differing: 0 });
+        // Without the lane, the commission row is judged against a page that
+        // never carried commissions: the guard that keeps a lane's own score.
+        expect(compareFuturesSettledReadings(heldWithOtherLane, fresh, NOW - 8 * 3_600_000, {
+            coveredTo: NOW,
+        })).toEqual({ missing: 2, differing: 0 });
+    });
+
     // A held row older than the span the fresh read reached was never asked
     // about. Counting it as missing reports the walk's own budget as the
     // exchange contradicting itself — and that number would be read as a store

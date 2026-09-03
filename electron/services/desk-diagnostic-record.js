@@ -11,7 +11,10 @@
 // the desk exactly as it would be with no record at all.
 import fs from 'node:fs';
 import path from 'node:path';
-import { TRADING_COMMAND_ACTIONS } from '../../src/utils/tradingCommands.js';
+import {
+    FUTURES_HISTORY_READ_REASONS,
+    TRADING_COMMAND_ACTIONS,
+} from '../../src/utils/tradingCommands.js';
 import { FUTURES_ACCOUNT_READ_REASONS } from './futures-account-state.js';
 import {
     FUTURES_MARGIN_ESTIMATE_MAX_BPS,
@@ -124,6 +127,12 @@ const READ_REASON = new RegExp(`^(?:${FUTURES_ACCOUNT_READ_REASONS.join('|')})$`
 // account at all. Sharing one list would have dropped every line whose reason
 // was `fill` or `funding`, which is most of them.
 const SETTLED_REASON = /^(?:bootstrap|stream|fill|funding|settlement|refresh|confirm|credit-confirm|insurance|insurance-confirm|verification|extension|tick)$/;
+// Why the desk re-read the account's trade history. The renderer's closed set,
+// plus the two words only the main process can say: `continuation` for its own
+// bounded walker's rounds, `unstated` for a command that named no reason.
+const HISTORY_REASON = new RegExp(
+    `^(?:${[...FUTURES_HISTORY_READ_REASONS, 'continuation', 'unstated'].join('|')})$`,
+);
 // Which way round the exchange hands back a page of the income record. The whole
 // backward walk rests on it being oldest-first — a full page is then the *oldest*
 // thousand rows of the range asked for — and the endpoint's documentation does
@@ -450,8 +459,17 @@ const RECORDED_FIELDS = Object.freeze({
         // exchange said about it when it was checked. A kept reading is only
         // safe while somebody can see whether it has ever been wrong.
         ['restored', count],
-        // Whether the held rows were checked against the exchange this pass or
-        // merely extended. `missing: 0` means nothing without it.
+        // Whether the held rows were checked against the exchange this pass,
+        // and what the check found. `verified` is the number of lanes whose
+        // whole window the pass re-read and compared; `missing` counts held
+        // rows the exchange no longer states inside the span it re-read,
+        // `differing` held rows it states with a different amount. Beside
+        // `verified: 0` the two zeros are silence, not agreement: an
+        // extension pass asks only for the newest end and compares nothing.
+        // From `ac1800e` (2026-08-23) to 2026-09-03 all three were written from
+        // literals — sixteen passes a day recorded `verified: 1, missing: 0,
+        // differing: 0` and none had compared a row — which is the reason
+        // the comparison now writes them, and the summary reads them.
         ['verified', count],
         ['missing', count],
         ['differing', count],
@@ -494,6 +512,43 @@ const RECORDED_FIELDS = Object.freeze({
         // file.
         ['partialKind', optional(text(PARTIAL_KIND))],
         ['awaitingLanes', optional(count)],
+        ['code', tolerated(text(CODE))],
+    ]),
+    // One line per pass over the trade history — the read that confirms, after
+    // a fill burst, what the private stream already reported. Its whole point
+    // is the score: whether the exchange ever states a fill the stream did not,
+    // or states one differently. Thirty daily summaries of zeros on vouched
+    // passes are the evidence for ending the read; one non-zero keeps it. Until
+    // 2026-09-03 the read kept no score at all — 88 reads that day, none of
+    // which could be asked what they had found.
+    //
+    // Counts only, never a row: `returned` is what the exchange answered,
+    // `restated` the rows from before the current stream connected (the stream
+    // was not there to report them, and they prove nothing either way), `held`
+    // the rows the stream had reported, `unreported` the rows it had not, and
+    // `differing` the held rows whose fields the exchange states differently.
+    // `returned` is `restated + held + unreported`.
+    //
+    // `vouched` is 1 only when every contract's stream proof held from the
+    // start of the pass to its acceptance. A pass whose stream dropped
+    // mid-way writes 0, and a zero `unreported` beside `vouched: 0` is not
+    // evidence: the socket may simply have missed the fill it is being
+    // scored on. `contracts: 0` is a pass that read nothing and compared
+    // nothing.
+    history: Object.freeze([
+        ['reason', text(HISTORY_REASON)],
+        ['contracts', count],
+        // REST requests this pass made, both endpoints.
+        ['reads', count],
+        ['returned', count],
+        ['restated', count],
+        ['held', count],
+        ['unreported', count],
+        ['differing', count],
+        ['vouched', count],
+        // `complete` answered every contract, `partial` some, `failed` none,
+        // `abandoned` was overtaken before it could answer.
+        ['outcome', text(OUTCOME)],
         ['code', tolerated(text(CODE))],
     ]),
     // The calculator's amounts never arrive here. One event is the aggregate

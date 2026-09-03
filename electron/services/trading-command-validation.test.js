@@ -672,6 +672,31 @@ describe('backend trading command validation', () => {
         expect(unmarked.command).not.toHaveProperty('basisOnly');
     });
 
+    // The reason crosses the boundary only as one of the renderer's closed
+    // words. The main process records anything else as `unstated`.
+    it('carries the history read reason from the closed set only', () => {
+        const base = {
+            action: TRADING_COMMAND_ACTIONS.ACCOUNT_HISTORY,
+            version: TRADE_COMMAND_VERSION,
+            marketType: 'futures',
+            accountId: 'default',
+            clientOrderId: 'history-reason',
+            symbol: 'BTCUSDT',
+            views: ['trades'],
+        };
+        for (const reason of ['fill', 'open', 'refresh', 'full', 'stream', 'bootstrap']) {
+            expect(validateTypedTradingCommand({ ...base, reason })).toMatchObject({
+                ok: true,
+                command: { symbol: 'BTCUSDT', reason },
+            });
+        }
+        for (const reason of ['continuation', 'unstated', 'because', 7, null]) {
+            const validated = validateTypedTradingCommand({ ...base, reason });
+            expect(validated.ok).toBe(true);
+            expect(validated.command).not.toHaveProperty('reason');
+        }
+    });
+
     it('preserves explicit v2 trade-history continuity evidence', () => {
         const tradeCoverage = (continuityComplete) => ({
             version: 2,

@@ -81,6 +81,13 @@ import {
     FUTURES_TRADE_HISTORY_WINDOW,
     readFuturesTradeHistoryWindow,
 } from './futures-trade-history-window.js';
+import {
+    addFuturesHistoryScore,
+    createFuturesHistoryStreamShadow,
+    emptyFuturesHistoryScore,
+    scoreFuturesHistoryReading,
+} from './futures-history-reconfirmation.js';
+import { compareFuturesSettledReadings } from './futures-settled-income-store.js';
 import { proveFuturesTradeHistoryReverseFlat } from './futures-trade-history-reverse-flat.js';
 import { createFuturesFeeValuationPriceSource } from './futures-fee-valuation.js';
 import {
@@ -2206,6 +2213,16 @@ export function setupBinanceConnection({
     // races a REST read impossible to clear accidentally.
     let futuresHistoryStreamConnected = false;
     let futuresHistoryStreamEpoch = 0;
+    // When the current epoch's stream came up, or null while none is up. A
+    // history read judges only the rows the stream could have reported —
+    // those at or after this moment; older rows are restated, not unreported.
+    let futuresHistoryStreamConnectedAt = null;
+    // What the stream reported, per contract, bounded like the review: the
+    // reading every trade-history read is scored against. One score, kept
+    // here, rather than one per mounted renderer.
+    const futuresHistoryStreamShadow = createFuturesHistoryStreamShadow({
+        windowMs: FUTURES_HISTORY_WINDOW_MS,
+    });
     let futuresHistoryActivityRevision = 0;
     let futuresHistoryRotationOffset = 0;
     const futuresHistoryActivityBySymbol = new Map();
@@ -2246,6 +2263,7 @@ export function setupBinanceConnection({
 
     const invalidateFuturesHistoryStream = () => {
         futuresHistoryStreamConnected = false;
+        futuresHistoryStreamConnectedAt = null;
         futuresHistoryStreamEpoch += 1;
     };
 
@@ -2269,6 +2287,7 @@ export function setupBinanceConnection({
 
     const captureFuturesHistoryProof = symbol => ({
         connected: futuresHistoryStreamConnected,
+        connectedAt: futuresHistoryStreamConnectedAt,
         epoch: futuresHistoryStreamEpoch,
         activity: futuresHistoryActivityOf(symbol),
         highestFillId: futuresHistoryHighestFillIdBySymbol.get(symbol) ?? null,
@@ -2369,6 +2388,7 @@ export function setupBinanceConnection({
         futuresHistoryActivityBySymbol.clear();
         futuresHistoryHighestFillIdBySymbol.clear();
         futuresHistoryProofBySymbol.clear();
+        futuresHistoryStreamShadow.clear();
         for (const session of futuresHistorySessions) session.reset();
         futuresHistoryRotationOffset = 0;
         // Fence off every income walk issued before this account/activation
@@ -3449,6 +3469,14 @@ export function setupBinanceConnection({
         let pageOrder = 'none';
         let restored = 0;
         let coverageBeforeMs = 0;
+        // The score of this pass against the rows it held going in: lanes
+        // whose whole window was re-read and compared, and what the comparison
+        // found. Measured, never assumed — from `ac1800e` to 2026-09-03 these
+        // were literals, and sixteen lines a day said `verified: 1, missing:
+        // 0` about passes that had compared nothing.
+        let verified = 0;
+        let missing = 0;
+        let differing = 0;
 
         const requestedCoverageMs = resource => refreshIncomeTypes.reduce((total, incomeType) => {
             const lane = resource?.lanes?.[incomeType];
@@ -3484,9 +3512,9 @@ export function setupBinanceConnection({
                 lanes: refreshIncomeTypes.length,
                 incomeTypes: refreshIncomeTypes,
                 restored,
-                verified: verifyFullWindow && outcome !== 'failed' ? 1 : 0,
-                missing: 0,
-                differing: 0,
+                verified,
+                missing,
+                differing,
                 rows: held.length,
                 kept: held.length,
                 contracts: new Set(held.map(row => row.symbol).filter(Boolean)).size,
@@ -3564,6 +3592,12 @@ export function setupBinanceConnection({
             publishFuturesSettledIncome(_futuresSettled, { reason, readAt: now });
         }
 
+        // What was held before the walk, for the comparison after it. Captured
+        // here, after the restore from disk, so a kept reading is what gets
+        // checked against the exchange.
+        const heldBeforeWalk = verifyFullWindow && _futuresSettled.rows instanceof Map
+            ? new Map(_futuresSettled.rows)
+            : null;
         const walked = await walkFuturesSettledIncomeLanes({
             now,
             windowFrom,
@@ -3646,6 +3680,32 @@ export function setupBinanceConnection({
             && lane?.targetTo !== null
             && lane.coveredTo >= lane.targetTo
         );
+        // Lane by lane, and only a lane this pass walked to the window's start
+        // and back: an extension pass asks for the newest end alone, and a held
+        // row older than what was asked about is not missing. The span judged
+        // is the span walked, `[windowFrom, now]` — a row the commit pruned
+        // for falling out of the window is not the exchange withdrawing it.
+        if (heldBeforeWalk !== null) {
+            for (const incomeType of refreshIncomeTypes) {
+                const lane = walked.resource.lanes[incomeType];
+                if (!passProducedSuccessfulLane(lane)) continue;
+                const compared = compareFuturesSettledReadings(
+                    heldBeforeWalk,
+                    lane.rows,
+                    Math.max(windowFrom, lane.coveredFrom),
+                    { coveredTo: Math.min(now, lane.coveredTo), incomeType },
+                );
+                verified += 1;
+                missing = addBoundedCount(missing, compared.missing);
+                differing = addBoundedCount(differing, compared.differing);
+                if (compared.missing > 0 || compared.differing > 0) {
+                    logger.warn(
+                        '[futures-settled] kept reading corrected by the exchange:',
+                        { incomeType, missing: compared.missing, differing: compared.differing },
+                    );
+                }
+            }
+        }
         const fullPassProvedRecovery = refreshIncomeTypes.length
             === FUTURES_SETTLED_INCOME_TYPES.length
             && FUTURES_SETTLED_INCOME_TYPES.every(incomeType => (
@@ -4258,6 +4318,7 @@ export function setupBinanceConnection({
     };
     const markFuturesUserDataReady = () => {
         futuresHistoryStreamConnected = true;
+        futuresHistoryStreamConnectedAt = Date.now();
         futuresAccountResources = markFuturesResourceReady(
             futuresAccountResources,
             'userDataStream',
@@ -4610,6 +4671,10 @@ export function setupBinanceConnection({
                             && cumulativeFilledQuantity > 0);
                     if (actualFill) {
                         noteFuturesHistoryActivity(report.symbol, report.tradeId);
+                        // The fill as the stream stated it, kept so the read
+                        // that confirms it can be scored: did the exchange
+                        // state anything the stream did not?
+                        futuresHistoryStreamShadow.note(report.symbol, report.tradeId, report);
                         // The fill itself already carries gross commission. Only
                         // a rebate posted later is missing, so buying four income
                         // lanes immediately on every partial fill is pure weight.
@@ -6244,6 +6309,9 @@ export function setupBinanceConnection({
                 symbol,
                 coverage = {},
                 full = false,
+                // Why the read was asked for, from the caller. The command
+                // boundary has already narrowed it to the closed set.
+                reason = null,
                 // Which endpoints the view that asked needs. A command that does
                 // not say is answered with both, as it always was.
                 views = FUTURES_HISTORY_VIEW_VALUES,
@@ -6253,6 +6321,36 @@ export function setupBinanceConnection({
                     .map(value => String(value ?? '').trim().toUpperCase())
                     .filter(Boolean))]
                 : [];
+            // One line per pass, whatever the pass came to. The score is what
+            // the exchange's answer said about the stream's own account of the
+            // fills; the reason is the caller's, and the walker's rounds are
+            // its own. A command that named none is recorded as `unstated`.
+            const historyReason = forcedSymbols.length > 0
+                ? 'continuation'
+                : typeof reason === 'string' ? reason : 'unstated';
+            const score = emptyFuturesHistoryScore();
+            const recordHistory = (outcome, code = null) => {
+                diagnosticRecord.record('history', {
+                    reason: historyReason,
+                    contracts: score.contracts,
+                    reads: score.reads,
+                    returned: score.returned,
+                    restated: score.restated,
+                    held: score.held,
+                    unreported: score.unreported,
+                    differing: score.differing,
+                    vouched: score.contracts > 0 && score.vouched ? 1 : 0,
+                    outcome,
+                    code: code === null || code === undefined ? null : String(code),
+                });
+            };
+            // Every history-endpoint request of this pass goes through here so
+            // the line can say what the pass cost; discovery's own reads are
+            // recorded by their route, not here.
+            const executeHistoryRead = (operation, weight) => {
+                score.reads += 1;
+                return futuresRestLimiter.execute(operation, weight);
+            };
             const readsOrders = views.includes(FUTURES_HISTORY_VIEWS.ORDERS);
             const readsTrades = views.includes(FUTURES_HISTORY_VIEWS.TRADES);
             const activation = futuresActivationGeneration;
@@ -6290,7 +6388,10 @@ export function setupBinanceConnection({
                     discoveryComplete: false,
                 }
                 : await collectFuturesHistorySymbols(symbol, { coverage, full, isObsolete });
-            if (isObsolete()) return;
+            if (isObsolete()) {
+                recordHistory('abandoned', 'ACTIVATION_RETIRED');
+                return;
+            }
             const readSymbols = forcedSymbols.length > 0
                 ? symbols
                 : basisOnly
@@ -6421,7 +6522,7 @@ export function setupBinanceConnection({
                             limit: FUTURES_HISTORY_LIMIT,
                             maxRows: FUTURES_HELD_HISTORY_MAX_ORDERS_PER_CONTRACT,
                             identityOf: order => order?.orderId,
-                            load: from => futuresRestLimiter.execute(
+                            load: from => executeHistoryRead(
                                 () => (isObsolete()
                                     ? []
                                     : futuresTradingAdapter.getOrderHistory({
@@ -6443,7 +6544,7 @@ export function setupBinanceConnection({
                                         MAX_REQUESTS: currentWindowRequestLimit,
                                     },
                                     readWindow: ({ startTime, endTime, limit }) => (
-                                        futuresRestLimiter.execute(
+                                        executeHistoryRead(
                                             () => (isObsolete()
                                                 ? []
                                                 : futuresTradingAdapter.getTradeHistory({
@@ -6463,7 +6564,7 @@ export function setupBinanceConnection({
                                             limit: FUTURES_TRADE_HISTORY_LIMIT,
                                             maxRows: FUTURES_HELD_HISTORY_MAX_TRADES_PER_CONTRACT,
                                             identityOf: trade => trade?.id,
-                                            load: from => futuresRestLimiter.execute(
+                                            load: from => executeHistoryRead(
                                                 () => (isObsolete()
                                                     ? []
                                                     : futuresTradingAdapter.getTradeHistory({
@@ -6486,7 +6587,7 @@ export function setupBinanceConnection({
                                                 MAX_REQUESTS: forwardWindowRequestLimit,
                                             },
                                             readWindow: ({ startTime, endTime, limit }) => (
-                                                futuresRestLimiter.execute(
+                                                executeHistoryRead(
                                                     () => (isObsolete()
                                                         ? []
                                                         : futuresTradingAdapter.getTradeHistory({
@@ -6519,7 +6620,7 @@ export function setupBinanceConnection({
                                                 MAX_REQUESTS: olderWindowRequestLimit,
                                             },
                                             readWindow: ({ startTime, endTime, limit }) => (
-                                                futuresRestLimiter.execute(
+                                                executeHistoryRead(
                                                     () => (isObsolete()
                                                         ? []
                                                         : futuresTradingAdapter.getTradeHistory({
@@ -6942,6 +7043,21 @@ export function setupBinanceConnection({
                     if (readsTrades) {
                         trades.push(...(acceptedTradeReading?.rows ?? []));
                         tradeCoverage[historySymbol] = acceptedTradeReading?.coverage ?? null;
+                        // Scored on what the exchange answered this pass, not
+                        // on the rows a checkpoint carried over from an earlier
+                        // one; those were scored when they arrived. The proof
+                        // captured before the read vouches for the score only
+                        // if it still holds now that the rows are accepted.
+                        addFuturesHistoryScore(score, scoreFuturesHistoryReading({
+                            rows: symbolTradeReading?.rows ?? [],
+                            fills: futuresHistoryStreamShadow.fillsOf(historySymbol),
+                            connectedAt: proof.connectedAt,
+                        }));
+                        if (!proof.connected
+                            || !futuresHistoryStreamConnected
+                            || proof.epoch !== futuresHistoryStreamEpoch) {
+                            score.vouched = false;
+                        }
                     }
                     // Where a read started from, stated only for the endpoint it
                     // started: the renderer decides what it may replace from this,
@@ -7046,13 +7162,17 @@ export function setupBinanceConnection({
                     logger.error(`[futures-history] ${historySymbol} request failed:`, error?.code || error?.message);
                 }
             }));
-            if (isObsolete()) return;
+            if (isObsolete()) {
+                recordHistory('abandoned', 'ACTIVATION_RETIRED');
+                return;
+            }
             // Failed internal continuations are still reported below, but their
             // checkpoint stays truthful and receives only a bounded retry. This
             // must happen before the all-failed early return.
             scheduleFuturesHistoryTradeReacquisition(pendingTradeReacquisitions);
             if (readSymbols.length > 0 && unavailable.length === readSymbols.length) {
                 const [failure] = failures;
+                recordHistory('failed', failure?.code ?? 'FUTURES_API_ERROR');
                 emit({
                     futures_history: {
                         accountFingerprint: futuresTradingAdapter?.credentialFingerprint ?? null,
@@ -7108,6 +7228,10 @@ export function setupBinanceConnection({
                     error: null,
                 },
             });
+            recordHistory(
+                unavailable.length > 0 ? 'partial' : 'complete',
+                unavailable.length > 0 ? failures[0]?.code ?? 'FUTURES_API_ERROR' : null,
+            );
             if (completedTradeReacquisitions.size > 0) {
                 const completedSymbols = [...completedTradeReacquisitions.keys()];
                 // The frozen repair deliberately ends at its original target.

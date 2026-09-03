@@ -62,6 +62,27 @@ export const FUTURES_HISTORY_VIEW_VALUES = Object.freeze([
     FUTURES_HISTORY_VIEWS.TRADES,
 ]);
 
+// Why the renderer asks for the account's history. Named by the caller, never
+// inferred from the command's shape: one command, several callers, and the
+// record's question — does the read after a fill ever bring what the stream did
+// not — is answerable only if the read after a fill says that is what it is.
+// The main process adds `continuation` for its own walker and `unstated` for a
+// command that does not say.
+export const FUTURES_HISTORY_READ_REASONS = Object.freeze([
+    // The burst timer, ten seconds after the last fill.
+    'fill',
+    // The review opened a view it had not read.
+    'open',
+    // The operator pressed ↻.
+    'refresh',
+    // The operator's re-read runs the whole discovery again.
+    'full',
+    // The authenticated stream reopened, and what it missed is read back.
+    'stream',
+    // The positions were first read under this activation.
+    'bootstrap',
+]);
+
 export const DEFAULT_SPOT_ORDER_TYPE = 'LIMIT';
 export const DEFAULT_SPOT_TIME_IN_FORCE = 'GTC';
 
@@ -350,6 +371,7 @@ export const createFuturesAccountHistoryCommand = ({
     clientOrderId,
     coverage = {},
     full = false,
+    reason = null,
     symbol,
     views = null,
 } = {}) => ({
@@ -363,6 +385,9 @@ export const createFuturesAccountHistoryCommand = ({
     coverage,
     ...(basisOnly === true ? { basisOnly: true } : {}),
     full: full === true,
+    // A reason outside the closed set is dropped here, and the read is then
+    // recorded as `unstated` — which is the truth about it.
+    ...(FUTURES_HISTORY_READ_REASONS.includes(reason) ? { reason } : {}),
     symbol,
     ...(Array.isArray(views) && views.length > 0 ? { views: [...views] } : {}),
 });

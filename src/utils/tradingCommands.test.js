@@ -230,6 +230,25 @@ describe('trading command contract', () => {
         })).not.toHaveProperty('basisOnly');
     });
 
+    // The reason is the caller's word for why it read, and the record scores
+    // the read by it. A word outside the closed set is not carried: the read
+    // is then recorded as `unstated`, which is what it is.
+    it('carries the history read reason only from the closed set', () => {
+        expect(createFuturesAccountHistoryCommand({
+            symbol: 'BTCUSDT', basisOnly: true, views: ['trades'], reason: 'fill',
+        })).toMatchObject({ reason: 'fill' });
+        for (const reason of ['open', 'refresh', 'full', 'stream', 'bootstrap']) {
+            expect(createFuturesAccountHistoryCommand({ symbol: 'BTCUSDT', reason }).reason)
+                .toBe(reason);
+        }
+        expect(createFuturesAccountHistoryCommand({ symbol: 'BTCUSDT' }))
+            .not.toHaveProperty('reason');
+        expect(createFuturesAccountHistoryCommand({ symbol: 'BTCUSDT', reason: 'continuation' }))
+            .not.toHaveProperty('reason');
+        expect(createFuturesAccountHistoryCommand({ symbol: 'BTCUSDT', reason: 'because' }))
+            .not.toHaveProperty('reason');
+    });
+
     it('rejects legacy adaptation for unsupported command families', () => {
         expect(() => toLegacyTradingRequest(createSpotCancelAllCommand({ symbol: 'BTCUSDT' })))
             .toThrow('trade.cancelAll cannot be adapted to the legacy protocol');

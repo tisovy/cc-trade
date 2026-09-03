@@ -843,7 +843,7 @@ export const FuturesPortfolioDock = ({
     }
     if (historyReading) return
     if (requestedViewsRef.current.has(historyView)) return
-    if (onLoadHistory(selectedSymbol, { views: [historyView] })) {
+    if (onLoadHistory(selectedSymbol, { views: [historyView], reason: 'open' })) {
       requestedViewsRef.current.add(historyView)
     }
   }, [historyReading, historyView, historyViewRead, onLoadHistory, selectedSymbol])
@@ -1134,6 +1134,7 @@ export const FuturesPortfolioDock = ({
                 onClick={() => {
                   onLoadHistory?.(selectedSymbol, {
                     ...(history?.discoveryComplete === false ? { full: true } : {}),
+                    reason: history?.discoveryComplete === false ? 'full' : 'refresh',
                     views: historyView === null ? null : [historyView],
                   })
                   // The same press heals a failed wallet-adjustment reading:

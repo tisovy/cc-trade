@@ -1558,7 +1558,7 @@ describe('useFuturesTrading', () => {
       await act(async () => { await vi.advanceTimersByTimeAsync(10_000) })
       expect(historyReads()).toHaveLength(1)
       expect(historyReads()[0]).toMatchObject({
-        symbol: 'BTCUSDT', basisOnly: true, views: ['trades'],
+        symbol: 'BTCUSDT', basisOnly: true, views: ['trades'], reason: 'fill',
       })
     } finally {
       unmount()

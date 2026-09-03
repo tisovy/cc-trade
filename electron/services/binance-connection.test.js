@@ -5041,7 +5041,11 @@ describe('setupBinanceConnection user-data orchestration', () => {
             attempts: SETTLED_ALL_INCOME_TYPES.length + 1,
             chargedWeight: (SETTLED_ALL_INCOME_TYPES.length + 1) * 30,
             types: SETTLED_ALL_INCOME_TYPES.length,
-            verified: 1,
+            // Every lane walked its whole window and was compared with what
+            // was held: six lanes compared, not one flag set.
+            verified: SETTLED_ALL_INCOME_TYPES.length,
+            missing: 0,
+            differing: 0,
             outcome: 'complete',
         });
     });
@@ -14041,5 +14045,314 @@ describe('setupBinanceConnection user-data orchestration', () => {
         ))).toBe(false);
     });
 
-});
+    // The read that confirms a fill burst, scored against the stream it
+    // confirms (2026-09-03). Asserted through `describeDeskDiagnosticEvent`,
+    // never through a mocked `record()` alone: the journal writes only the
+    // fields a kind declares, and a line the file would refuse is no line.
+    describe('the reconfirmation keeps its own score', () => {
+        const recordedLines = () => {
+            const diagnostics = [];
+            const diagnosticRecord = {
+                ...DESK_DIAGNOSTICS_UNRECORDED,
+                record: (kind, payload) => {
+                    const event = describeDeskDiagnosticEvent(kind, payload);
+                    diagnostics.push(event ?? { kind, refused: true, payload });
+                    return true;
+                },
+            };
+            return { diagnostics, diagnosticRecord };
+        };
+        const historyLines = diagnostics => diagnostics.filter(entry => entry.kind === 'history');
+        const settledLines = diagnostics => diagnostics.filter(entry => entry.kind === 'settled');
 
+        const startDeskWithStream = async (diagnosticRecord) => {
+            setupBinanceConnection({
+                localWebSocketAccess: { host: '127.0.0.1' },
+                diagnosticRecord,
+            });
+            moduleMocks.websocketServerHandlers.request({
+                origin: 'http://localhost:5174',
+                accept: vi.fn(() => moduleMocks.rendererConnection),
+            });
+            await activateMarket('futures-live');
+            return openFuturesHistoryStream();
+        };
+
+        // A fill as the private stream states it, at the given time.
+        const sendStreamFill = (socket, {
+            tradeId,
+            orderId = tradeId,
+            time,
+            price = '100.50',
+            quantity = '0.400',
+            commission = '0.00402000',
+            realizedPnl = '0',
+        }) => {
+            socket.handlers.message(JSON.stringify({
+                e: 'ORDER_TRADE_UPDATE',
+                E: time,
+                o: {
+                    s: 'BTCUSDT', i: orderId, X: 'FILLED', x: 'TRADE', S: 'SELL', o: 'LIMIT',
+                    p: price, L: price, ap: price, q: quantity, z: quantity, l: quantity,
+                    t: tradeId, n: commission, N: 'USDT', rp: realizedPnl, T: time,
+                },
+            }));
+        };
+
+        // The same fill as `/userTrades` states it.
+        const restFill = ({
+            id,
+            time,
+            price = '100.50',
+            quantity = '0.400',
+            commission = '0.00402000',
+            realizedPnl = '0',
+        }) => futuresHistoryTrade({
+            id: String(id),
+            orderId: String(id),
+            symbol: 'BTCUSDT',
+            side: 'SELL',
+            price,
+            quantity,
+            commission,
+            commissionAsset: 'USDT',
+            realizedPnl,
+            time,
+        });
+
+        const gapRead = (overrides = {}) => ({
+            action: 'account.history',
+            clientOrderId: 'score-1',
+            symbol: 'BTCUSDT',
+            basisOnly: true,
+            coverage: futuresHistoryCoverage(['BTCUSDT']),
+            views: ['trades'],
+            reason: 'fill',
+            ...overrides,
+        });
+
+        it('holds every fill the stream reported, and restates the row from before it connected', async () => {
+            const { diagnostics, diagnosticRecord } = recordedLines();
+            const stream = await startDeskWithStream(diagnosticRecord);
+            const filledAt = Date.now();
+            sendStreamFill(stream, { tradeId: 10_501, time: filledAt });
+            sendStreamFill(stream, { tradeId: 10_502, time: filledAt + 1, realizedPnl: '12.5' });
+            await flushMicrotasks();
+            moduleMocks.futuresAdapter.getTradeHistory.mockResolvedValue([
+                // The held cursor's own row, repeated inclusively by the endpoint:
+                // from before any stream, and so restated rather than judged.
+                restFill({ id: 200, time: 1 }),
+                restFill({ id: 10_501, time: filledAt }),
+                restFill({ id: 10_502, time: filledAt + 1, realizedPnl: '12.5' }),
+            ]);
+
+            await runFuturesCommand(gapRead());
+
+            expect(historyLines(diagnostics)).toEqual([{
+                kind: 'history',
+                reason: 'fill',
+                contracts: 1,
+                reads: 1,
+                returned: 3,
+                restated: 1,
+                held: 2,
+                unreported: 0,
+                differing: 0,
+                vouched: 1,
+                outcome: 'complete',
+                code: null,
+            }]);
+        });
+
+        it('counts a fill the exchange states and the stream never reported', async () => {
+            const { diagnostics, diagnosticRecord } = recordedLines();
+            const stream = await startDeskWithStream(diagnosticRecord);
+            const filledAt = Date.now();
+            sendStreamFill(stream, { tradeId: 10_501, time: filledAt });
+            await flushMicrotasks();
+            moduleMocks.futuresAdapter.getTradeHistory.mockResolvedValue([
+                restFill({ id: 200, time: 1 }),
+                restFill({ id: 10_501, time: filledAt }),
+                restFill({ id: 10_777, time: filledAt + 2 }),
+            ]);
+
+            await runFuturesCommand(gapRead());
+
+            expect(historyLines(diagnostics).at(-1)).toMatchObject({
+                returned: 3, restated: 1, held: 1, unreported: 1, differing: 0, vouched: 1,
+            });
+        });
+
+        it('counts a fill the exchange states differently from the stream', async () => {
+            const { diagnostics, diagnosticRecord } = recordedLines();
+            const stream = await startDeskWithStream(diagnosticRecord);
+            const filledAt = Date.now();
+            sendStreamFill(stream, { tradeId: 10_501, time: filledAt });
+            sendStreamFill(stream, { tradeId: 10_502, time: filledAt + 1 });
+            await flushMicrotasks();
+            moduleMocks.futuresAdapter.getTradeHistory.mockResolvedValue([
+                restFill({ id: 10_501, time: filledAt, commission: '0.00500000' }),
+                // The same number at another scale is not a restatement.
+                restFill({ id: 10_502, time: filledAt + 1, commission: '0.00402', price: '100.5' }),
+            ]);
+
+            await runFuturesCommand(gapRead());
+
+            expect(historyLines(diagnostics).at(-1)).toMatchObject({
+                returned: 2, restated: 0, held: 2, unreported: 0, differing: 1, vouched: 1,
+            });
+        });
+
+        // A reconnect inside the window. The fill the stream missed while it
+        // was down is from before the current epoch connected: restated, not
+        // unreported — the socket's downtime is not the socket's failure.
+        it('restates what the stream could not have reported after a reconnect', async () => {
+            const { diagnostics, diagnosticRecord } = recordedLines();
+            const stream = await startDeskWithStream(diagnosticRecord);
+            const filledAt = Date.now();
+            sendStreamFill(stream, { tradeId: 10_501, time: filledAt });
+            await flushMicrotasks();
+            stream.handlers.close();
+            await vi.advanceTimersByTimeAsync(6_000);
+            await flushMicrotasks();
+            const reopened = moduleMocks.futuresUserDataSockets.at(-1);
+            expect(reopened).not.toBe(stream);
+            reopened.handlers.open();
+            await vi.advanceTimersByTimeAsync(1_000);
+            await flushMicrotasks();
+            const reconnectedAt = Date.now();
+            sendStreamFill(reopened, { tradeId: 10_601, time: reconnectedAt });
+            await flushMicrotasks();
+            moduleMocks.futuresAdapter.getTradeHistory.mockResolvedValue([
+                restFill({ id: 10_501, time: filledAt }),
+                restFill({ id: 10_550, time: filledAt + 3_000 }),
+                restFill({ id: 10_601, time: reconnectedAt }),
+            ]);
+
+            await runFuturesCommand(gapRead());
+
+            expect(historyLines(diagnostics).at(-1)).toMatchObject({
+                returned: 3, restated: 2, held: 1, unreported: 0, differing: 0, vouched: 1,
+            });
+        });
+
+        it('withdraws the vouch when the stream drops during the read', async () => {
+            const { diagnostics, diagnosticRecord } = recordedLines();
+            const stream = await startDeskWithStream(diagnosticRecord);
+            const filledAt = Date.now();
+            sendStreamFill(stream, { tradeId: 10_501, time: filledAt });
+            await flushMicrotasks();
+            moduleMocks.futuresAdapter.getTradeHistory.mockImplementation(async () => {
+                stream.handlers.close();
+                return [restFill({ id: 10_501, time: filledAt })];
+            });
+
+            await runFuturesCommand(gapRead());
+
+            expect(historyLines(diagnostics).at(-1)).toMatchObject({
+                returned: 1, held: 1, unreported: 0, vouched: 0, outcome: 'complete',
+            });
+        });
+
+        // One command, two callers, and the walker's own rounds: the reason
+        // is the caller's word, or `unstated`, never inferred from the shape.
+        it('names the reason the read stated, the walker as its own, and a failed pass as failed', async () => {
+            const { diagnostics, diagnosticRecord } = recordedLines();
+            const stream = await startDeskWithStream(diagnosticRecord);
+            const filledAt = Date.now();
+            sendStreamFill(stream, { tradeId: 10_501, time: filledAt });
+            await flushMicrotasks();
+            // A refusal the transport will not retry on its own; a reset it
+            // would, and the pass would then succeed on the second attempt.
+            moduleMocks.futuresAdapter.getTradeHistory
+                .mockRejectedValueOnce(Object.assign(new Error('refused'), {
+                    code: 'HISTORY_REFUSED',
+                    status: 400,
+                }))
+                .mockResolvedValue([restFill({ id: 10_501, time: filledAt })]);
+
+            await runFuturesCommand(gapRead({ reason: undefined }));
+            expect(historyLines(diagnostics)[0]).toMatchObject({
+                reason: 'unstated', contracts: 0, reads: 1, returned: 0, vouched: 0,
+                outcome: 'failed', code: 'HISTORY_REFUSED',
+            });
+
+            // The walker's round, five seconds on, is a pass of its own.
+            await vi.advanceTimersByTimeAsync(10_000);
+            await flushMicrotasks();
+            expect(historyLines(diagnostics)).toHaveLength(2);
+            expect(historyLines(diagnostics).at(-1)).toMatchObject({
+                reason: 'continuation', contracts: 1, returned: 1, held: 1, vouched: 1,
+                outcome: 'complete', code: null,
+            });
+
+            for (const reason of ['open', 'refresh', 'full', 'stream', 'bootstrap']) {
+                await runFuturesCommand(gapRead({ clientOrderId: `score-${reason}`, reason }));
+                expect(historyLines(diagnostics).at(-1)).toMatchObject({ reason });
+            }
+        });
+
+        // The settled score, restored: from `ac1800e` to 2026-09-03 the line
+        // wrote `missing: 0, differing: 0` from literals and `verified: 1` for
+        // any verification pass that did not fail, while the comparison had no
+        // caller at all.
+        it('scores a verification pass against the rows it held, lane by lane', async () => {
+            const { diagnostics, diagnosticRecord } = recordedLines();
+            const fundingRow = {
+                symbol: 'BTCUSDT', incomeType: 'FUNDING_FEE', income: '-1.25',
+                asset: 'USDT', time: Date.now() - 60_000, tranId: '700000000000000777',
+            };
+            let stated = [fundingRow];
+            moduleMocks.futuresAdapter.getIncomePage.mockImplementation(({ incomeType }) => (
+                Promise.resolve({
+                    rows: incomeType === 'FUNDING_FEE' ? stated : [],
+                    full: false,
+                })
+            ));
+            await startFuturesDeskForSettled({ diagnosticRecord });
+            await openFuturesHistoryStream();
+            // The first pass compared nothing: it held nothing to compare.
+            expect(settledLines(diagnostics).at(-1)).toMatchObject({
+                reason: 'bootstrap', verified: 0, missing: 0, differing: 0, rows: 1,
+            });
+
+            // The exchange restates the charge.
+            stated = [{ ...fundingRow, income: '-1.50' }];
+            await vi.advanceTimersByTimeAsync(60 * 60_000 + 30_000);
+            await flushMicrotasks();
+            const restated = settledLines(diagnostics)
+                .filter(entry => entry.reason === 'verification').at(-1);
+            expect(restated).toMatchObject({
+                verified: SETTLED_ALL_INCOME_TYPES.length,
+                missing: 0,
+                differing: 1,
+                outcome: 'complete',
+            });
+            expect(console.warn).toHaveBeenCalledWith(
+                '[futures-settled] kept reading corrected by the exchange:',
+                { incomeType: 'FUNDING_FEE', missing: 0, differing: 1 },
+            );
+
+            // Then it no longer states it at all.
+            stated = [];
+            await vi.advanceTimersByTimeAsync(60 * 60_000);
+            await flushMicrotasks();
+            expect(settledLines(diagnostics)
+                .filter(entry => entry.reason === 'verification').at(-1)).toMatchObject({
+                verified: SETTLED_ALL_INCOME_TYPES.length,
+                missing: 1,
+                differing: 0,
+            });
+
+            // A pass that walks only the newest end compares nothing, and says
+            // so with `verified: 0` rather than with zeros that read as agreement.
+            await runFuturesCommand({
+                action: 'account.refresh', clientOrderId: 'score-refresh', symbol: 'BTCUSDT',
+            });
+            await vi.advanceTimersByTimeAsync(30_000);
+            await flushMicrotasks();
+            expect(settledLines(diagnostics).filter(entry => entry.reason === 'refresh').at(-1))
+                .toMatchObject({ verified: 0, missing: 0, differing: 0 });
+        });
+    });
+});

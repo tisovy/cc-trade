@@ -120,6 +120,15 @@ export const summarizeDeskDiagnosticRecord = (text) => {
   // Every fault by its phase and code. The codes alone merge a socket close
   // with the parking it caused; the phase says which was which.
   const faults = new Map()
+  // The two reads that confirm the stream against the exchange, and what they
+  // found (2026-09-03). Thirty daily summaries of zeros here are the evidence
+  // for ending a read; one non-zero keeps it. Settled passes are counted
+  // apart from the passes that compared: an extension pass compares nothing
+  // and its zeros are silence. History reads are kept by the reason the read
+  // stated, and their unreported/differing are stated twice — over every
+  // pass, and over the vouched passes alone, which are the ones that count.
+  const settledScore = { passes: 0, compared: 0, missing: 0, differing: 0 }
+  const historyScore = new Map()
   const sessions = []
   const commands = []
   // How long each kind of command took to answer. Keyed by action and market
@@ -222,6 +231,42 @@ export const summarizeDeskDiagnosticRecord = (text) => {
     }
     if (line.kind === 'fault' && typeof line.phase === 'string') {
       bump(faults, `${phaseFamily(line.phase)} ${line.code ?? '-'}`)
+    }
+    if (line.kind === 'settled') {
+      settledScore.passes += 1
+      if (Number(line.verified) > 0) {
+        settledScore.compared += 1
+        settledScore.missing += Number(line.missing) || 0
+        settledScore.differing += Number(line.differing) || 0
+      }
+    }
+    if (line.kind === 'history') {
+      const reason = typeof line.reason === 'string' ? line.reason : '(unstated)'
+      const observed = historyScore.get(reason) ?? {
+        count: 0,
+        vouched: 0,
+        reads: 0,
+        returned: 0,
+        restated: 0,
+        held: 0,
+        unreported: 0,
+        differing: 0,
+        vouchedUnreported: 0,
+        vouchedDiffering: 0,
+      }
+      observed.count += 1
+      observed.reads += Number(line.reads) || 0
+      observed.returned += Number(line.returned) || 0
+      observed.restated += Number(line.restated) || 0
+      observed.held += Number(line.held) || 0
+      observed.unreported += Number(line.unreported) || 0
+      observed.differing += Number(line.differing) || 0
+      if (Number(line.vouched) === 1) {
+        observed.vouched += 1
+        observed.vouchedUnreported += Number(line.unreported) || 0
+        observed.vouchedDiffering += Number(line.differing) || 0
+      }
+      historyScore.set(reason, observed)
     }
     if (line.kind === 'request') {
       const route = typeof line.route === 'string' ? line.route : '(unnamed)'
@@ -416,6 +461,12 @@ export const summarizeDeskDiagnosticRecord = (text) => {
     crossings: descending(crossings.entries()),
     exchangeRefusals: descending(exchangeRefusals.entries()),
     faults: descending(faults.entries()),
+    reconfirmation: {
+      settled: settledScore,
+      history: [...historyScore.entries()]
+        .map(([reason, observed]) => ({ reason, ...observed }))
+        .sort((left, right) => right.count - left.count),
+    },
     sessions,
     commands,
     phases,
@@ -535,6 +586,62 @@ export const formatDeskDiagnosticSummary = (summary, { day = null } = {}) => {
         `  ${entry.reason.padEnd(22)} n=${String(entry.count).padStart(5)}`
         + `  weight ${String(entry.weight).padStart(6)}`
         + `  resources ${String(entry.resources).padStart(5)}`,
+      )
+    }
+  }
+
+  // Present whenever either read ran, zeros included: a day of zeros is the
+  // reading the question wants, and a day the block is absent is a day
+  // neither read ran at all.
+  const reconfirmation = summary.reconfirmation ?? null
+  const settledScore = reconfirmation?.settled ?? null
+  const historyScore = Array.isArray(reconfirmation?.history) ? reconfirmation.history : []
+  if ((settledScore !== null && settledScore.passes > 0) || historyScore.length > 0) {
+    out.push('', 'Reconfirmation against the stream')
+    if (settledScore !== null) {
+      out.push(
+        `  settled passes ${settledScore.passes}, compared ${settledScore.compared}`
+        + `, missing ${settledScore.missing}, differing ${settledScore.differing}`,
+      )
+    }
+    const total = historyScore.reduce((sum, entry) => ({
+      count: sum.count + entry.count,
+      vouched: sum.vouched + entry.vouched,
+      reads: sum.reads + entry.reads,
+      returned: sum.returned + entry.returned,
+      restated: sum.restated + entry.restated,
+      held: sum.held + entry.held,
+      unreported: sum.unreported + entry.unreported,
+      differing: sum.differing + entry.differing,
+      vouchedUnreported: sum.vouchedUnreported + entry.vouchedUnreported,
+      vouchedDiffering: sum.vouchedDiffering + entry.vouchedDiffering,
+    }), {
+      count: 0,
+      vouched: 0,
+      reads: 0,
+      returned: 0,
+      restated: 0,
+      held: 0,
+      unreported: 0,
+      differing: 0,
+      vouchedUnreported: 0,
+      vouchedDiffering: 0,
+    })
+    out.push(
+      `  history reads ${total.count} (vouched ${total.vouched}), requests ${total.reads}`
+      + `, returned ${total.returned}, restated ${total.restated}, held ${total.held}`
+      + `, unreported ${total.unreported} (on vouched ${total.vouchedUnreported})`
+      + `, differing ${total.differing} (on vouched ${total.vouchedDiffering})`,
+    )
+    for (const entry of historyScore) {
+      out.push(
+        `    ${entry.reason.padEnd(14)} n=${String(entry.count).padStart(5)}`
+        + `  vouched ${String(entry.vouched).padStart(5)}`
+        + `  returned ${String(entry.returned).padStart(6)}`
+        + `  restated ${String(entry.restated).padStart(6)}`
+        + `  held ${String(entry.held).padStart(6)}`
+        + `  unreported ${String(entry.unreported).padStart(4)}`
+        + `  differing ${String(entry.differing).padStart(4)}`,
       )
     }
   }
