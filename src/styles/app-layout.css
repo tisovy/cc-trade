@@ -404,12 +404,16 @@
   box-sizing: border-box;
   display: block;
   padding: 0 18px 18px;
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
 }
 
 .futures-mode-view > .futures-production-workstation {
-  width: min(100%, 1580px);
-  margin: 0 auto;
+  /* The workstation grid already bounds both side rails and gives every spare
+     pixel to the chart. A desktop maximum here only strands usable window
+     space outside the desk while its dense readings compete inside it. */
+  width: 100%;
+  margin: 0;
 }
 
 .futures-mode-view.is-production {

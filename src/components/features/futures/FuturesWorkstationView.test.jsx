@@ -350,6 +350,9 @@ describe('pure Futures workstation presentation', () => {
     const futuresPageRule = appStylesheet.match(
       /\.futures-mode-view\s*\{(?<declarations>[^}]*)\}/,
     )?.groups?.declarations
+    const workstationFrameRule = appStylesheet.match(
+      /\.futures-mode-view > \.futures-production-workstation\s*\{(?<declarations>[^}]*)\}/,
+    )?.groups?.declarations
     const switchOverlayRule = appStylesheet.match(
       /\.market-mode-FUTURES_LIVE > \.market-mode-switch\s*\{(?<declarations>[^}]*)\}/,
     )?.groups?.declarations
@@ -361,6 +364,11 @@ describe('pure Futures workstation presentation', () => {
     )?.groups?.declarations
 
     expect(futuresPageRule).toContain('padding: 0 18px 18px;')
+    expect(futuresPageRule).toContain('overflow-x: hidden;')
+    expect(futuresPageRule).toContain('overflow-y: auto;')
+    expect(workstationFrameRule).toContain('width: 100%;')
+    expect(workstationFrameRule).toContain('margin: 0;')
+    expect(workstationFrameRule).not.toMatch(/max-width\s*:/)
     expect(switchOverlayRule).toContain('position: absolute;')
     expect(clockedGridRule).toContain('"identity identity identity"')
     expect(clockedGridRule).toContain('"clock clock clock"')
