@@ -15,6 +15,7 @@ import {
 import {
     FUTURES_PRODUCTION_WORKSTATION_FRESHNESS,
     FUTURES_PRODUCTION_WORKSTATION_HELD_CONTRACTS,
+    FUTURES_PRODUCTION_WORKSTATION_WARMER,
     readFuturesProductionWorkstationHeldContracts,
 } from './futures-production-workstation-service.js';
 import { FUTURES_WORKSTATION_EVENT_MAX_BYTES } from '../../src/utils/futuresWorkstationProtocolShared.js';
@@ -3802,12 +3803,15 @@ describe('selecting is not subscribing', () => {
     });
 
     // A session is only worth holding if it can admit it went stale unwatched.
-    // Delivered as `live` on the strength of being held, it would put the
-    // operator in front of a book that stopped moving some minutes ago under a
-    // badge saying it had not.
-    it('delivers a session that failed unwatched in the state it is actually in', async () => {
-        const { runtime, subscribers, events } = await openPool();
+    // It admits it by not being delivered at all: a background session that
+    // lost its stream parks, and selecting it rebuilds it from the exchange,
+    // stating why it stopped under `loading` while it does (2026-09-03).
+    // Delivered as it stood, it would put the operator in front of a book that
+    // stopped moving some minutes ago.
+    it('rebuilds a session that failed unwatched when it is selected, naming why it stopped', async () => {
+        const { clock, runtime, subscribers, reads, events } = await openPool();
         const quiet = events.BTCUSDT.length;
+        const before = runtime.service.sessions.get('BTCUSDT');
 
         // The background contract loses its stream.
         subscribers.get('BTCUSDT').onDisconnect('SOCKET_DISCONNECTED');
@@ -3816,15 +3820,35 @@ describe('selecting is not subscribing', () => {
         expect(events.BTCUSDT).toHaveLength(quiet);
         // And the contract on screen carried on.
         expect(events.ETHUSDT.at(-1)).toMatchObject({ symbol: 'ETHUSDT' });
+        // Nothing is armed for it: no ladder, no read.
+        expect(before.parked).toMatchObject({ code: 'SOCKET_DISCONNECTED' });
+        expect(clock.timeoutCount()).toBe(0);
+        const idle = counts(reads);
 
         const back = [];
         await selectSymbol(runtime, 'pool-back-broken', 'BTCUSDT', back);
 
-        expect(back.filter(event => event.resource === 'status').at(-1)).toMatchObject({
-            resource: 'status',
-            state: 'resynchronizing',
+        // Rebuilt whole, on the screen, from a fresh read of everything.
+        const rebuilt = runtime.service.sessions.get('BTCUSDT');
+        expect(rebuilt).not.toBe(before);
+        expect(rebuilt.parked).toBeNull();
+        expect(runtime.service.shown).toBe(rebuilt);
+        expect(counts(reads)).toEqual(Object.fromEntries(
+            Object.entries(idle).map(([name, count]) => [name, count + 1]),
+        ));
+        const statuses = back.filter(event => event.resource === 'status');
+        expect(statuses[0]).toMatchObject({
+            state: 'loading',
             payload: { connected: false, reasonCode: 'SOCKET_DISCONNECTED' },
         });
+        expect(statuses.at(-1)).toMatchObject({
+            state: 'live',
+            payload: { connected: true, reasonCode: null },
+        });
+        expect(back.every(event => event.requestId === 'pool-back-broken')).toBe(true);
+        // The contract that was on screen is still held, untouched.
+        expect(runtime.service.sessions.get('ETHUSDT').parked).toBeNull();
+        expect(runtime.service.sessions.size).toBe(2);
     });
 
     // The tape settings and the emitter belong to the panel, not to whichever
@@ -3922,27 +3946,37 @@ describe('the pool is bounded', () => {
         expect(clock.timeoutCount()).toBe(0);
     });
 
-    // A held contract that loses its socket rebuilds itself on its own ladder.
-    // What it must not do is arrive back on the screen: the operator is looking
-    // at something else, and a reconnect is not a selection.
-    it('does not put a reconnecting background contract on the screen', async () => {
-        const { clock, runtime, subscribers, events, open } = openPool(2);
-        await open('reconnect-bg-btc', 'BTCUSDT');
-        await open('reconnect-bg-eth', 'ETHUSDT');
+    // A held contract that loses its socket does not rebuild itself: it parks,
+    // and nothing is armed for it — no ladder, no read — until it is selected
+    // or the desk finds a free minute (2026-09-03). What it must not do either
+    // way is arrive on the screen: the operator is looking at something else.
+    it('parks a background contract that loses its socket, and keeps the screen', async () => {
+        const { clock, base, runtime, subscribers, events, open } = openPool(2);
+        await open('park-bg-btc', 'BTCUSDT');
+        await open('park-bg-eth', 'ETHUSDT');
         const before = runtime.service.sessions.get('BTCUSDT');
         const quiet = events.BTCUSDT.length;
+        const sockets = base.getActiveTimerCount();
 
         subscribers.get('BTCUSDT').onDisconnect('SOCKET_DISCONNECTED');
-        clock.runTimeouts();
-        await vi.waitFor(() => expect(runtime.service.sessions.get('BTCUSDT')).not.toBe(before));
 
-        // Rebuilt, held, and still not the one being shown.
+        // Parked: the same session, in the pool, with its sockets closed and
+        // no timer armed for it — the one interval left is the warmer's.
+        expect(runtime.service.sessions.get('BTCUSDT')).toBe(before);
+        expect(before.parked).toMatchObject({ code: 'SOCKET_DISCONNECTED' });
+        expect(before.status).toMatchObject({
+            state: 'resynchronizing',
+            connected: false,
+            reasonCode: 'SOCKET_DISCONNECTED',
+        });
+        expect(base.getActiveTimerCount()).toBe(sockets - 1);
+        expect(before.freshnessTimer).toBeNull();
+        expect(before.reconnectTimer).toBeNull();
+        expect(clock.timeoutCount()).toBe(0);
+        expect(clock.intervalCount()).toBe(2);
         expect(runtime.service.shown).toMatchObject({ symbol: 'ETHUSDT' });
         expect(runtime.service.sessions.size).toBe(2);
         expect(events.BTCUSDT).toHaveLength(quiet);
-        // And it keeps its place in the pool's order rather than looking like
-        // the contract the operator has gone longest without.
-        expect(runtime.service.sessions.get('BTCUSDT').shownOrder).toBe(before.shownOrder);
 
         const delivered = events.ETHUSDT.length;
         subscribers.get('ETHUSDT').onMessage(productionTradeFrame({
@@ -4298,5 +4332,442 @@ describe('a crossing leaves its evidence once', () => {
             lastUpdateId: expect.any(String),
         });
         expect(session.bookRecovering).toBe(true);
+    });
+});
+
+// The operator's ruling of 2026-09-03: the shown contract is always current;
+// the rest load in a free minute; a background contract never reconnects on
+// its own. On the storms of 2026-09-02 every held contract laddered and
+// bootstrapped at once, against the one budget the shown contract needed.
+describe('a background contract loads in a free minute', () => {
+    const openPool = async ({
+        heldContracts = 3,
+        symbols = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT'],
+    } = {}) => {
+        // The fake's own cycle timers run on the system clock, so the manual
+        // clock's intervals are the freshness monitors and the warmer alone.
+        const clock = createManualClock();
+        const base = createFuturesProductionWorkstationFakeTransport();
+        const subscribers = new Map();
+        const room = { usedWeight: 0, maximumWeight: 600 };
+        const failing = new Set();
+        // Contracts the exchange no longer lists: a wake finds no contract.
+        const delisted = new Set();
+        const reads = {
+            loadExchangeInfo: vi.fn(async (options) => {
+                const catalog = JSON.parse(await base.loadExchangeInfo(options));
+                return JSON.stringify({
+                    ...catalog,
+                    symbols: catalog.symbols.filter(entry => !delisted.has(entry.symbol)),
+                });
+            }),
+            bootstrapIndependent: vi.fn(options => base.bootstrapIndependent(options)),
+            bootstrapInterval: vi.fn(options => base.bootstrapInterval(options)),
+            readDepthSnapshot: vi.fn((options) => {
+                if (failing.has(options.symbol)) {
+                    const error = new Error('route down');
+                    error.code = 'ROUTE_DOWN';
+                    return Promise.reject(error);
+                }
+                return base.readDepthSnapshot(options);
+            }),
+            connect: vi.fn((options) => {
+                subscribers.set(options.symbol, options);
+                return base.connect(options);
+            }),
+        };
+        const faults = [];
+        const timings = [];
+        const runtime = track(createFuturesProductionWorkstationRuntimeForTest({
+            clock: clock.clock,
+            heldContracts,
+            onInternalError: fault => faults.push(fault),
+            onTiming: timing => timings.push(timing),
+            transport: {
+                ...base,
+                ...reads,
+                readBudgetRoom: () => Object.freeze({ ...room }),
+            },
+        }));
+        const events = Object.fromEntries(symbols.map(symbol => [symbol, []]));
+        const open = (requestId, symbol) => runtime.service.handleRequest(
+            productionRequest(requestId, symbol),
+            { emit: event => events[symbol].push(event) },
+        );
+        for (const symbol of symbols) await open(`free-open-${symbol}`, symbol);
+        const counts = () => Object.fromEntries(
+            Object.entries(reads).map(([name, spy]) => [name, spy.mock.calls.length]),
+        );
+        const session = symbol => runtime.service.sessions.get(symbol);
+        const parkedCode = symbol => session(symbol)?.parked?.code ?? null;
+        const lostStream = (symbol, reason = 'SOCKET_CLOSED') => (
+            subscribers.get(symbol).onDisconnect(reason)
+        );
+        const lostCandles = (symbol, reason = 'CLOSED') => (
+            subscribers.get(symbol).onCandleDisconnect(reason)
+        );
+        // A diff that does not continue the book the bootstrap bridged.
+        const gap = symbol => subscribers.get(symbol).onMessage(
+            FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols[symbol].streams.makeCycle(2)[0],
+        );
+        const live = (symbol, previous) => vi.waitFor(() => {
+            expect(session(symbol)).not.toBe(previous);
+            expect(session(symbol).status).toMatchObject({ state: 'live' });
+        });
+        const parkFaults = () => faults.filter(fault => fault.phase === 'park');
+        const wakes = () => timings.filter(timing => timing.phase === 'lazy-bootstrap');
+        return {
+            clock, base, runtime, subscribers, room, failing, delisted, faults, events,
+            open, counts, session, parkedCode, lostStream, lostCandles, gap, live,
+            parkFaults, wakes,
+        };
+    };
+
+    it('parks a background book that gaps, and reads no page for it', async () => {
+        const rig = await openPool();
+        const btc = rig.session('BTCUSDT');
+        const idle = rig.counts();
+
+        // A diff that does not continue the book the bootstrap bridged.
+        rig.subscribers.get('BTCUSDT').onMessage(
+            FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols.BTCUSDT.streams.makeCycle(2)[0],
+        );
+
+        // No round: parked under the gap's name, at once.
+        expect(btc.bookRecovering).toBe(false);
+        expect(rig.parkedCode('BTCUSDT')).toBe('DEPTH_SEQUENCE_GAP');
+        expect(rig.parkFaults()).toEqual([
+            { phase: 'park', code: 'DEPTH_SEQUENCE_GAP', symbol: 'BTCUSDT' },
+        ]);
+        rig.clock.runTimeouts();
+        await Promise.resolve();
+        expect(rig.counts()).toEqual(idle);
+        expect(rig.runtime.service.shown).toMatchObject({ symbol: 'SOLUSDT' });
+    });
+
+    it('delivers a resubscribed live contract from what it holds, and leaves the parked ones parked', async () => {
+        const rig = await openPool();
+        rig.lostStream('BTCUSDT');
+        rig.lostStream('ETHUSDT');
+        const btc = rig.session('BTCUSDT');
+        const eth = rig.session('ETHUSDT');
+        const sol = rig.session('SOLUSDT');
+        const idle = rig.counts();
+        rig.room.usedWeight = 600;
+
+        // The renderer's socket came back and it subscribes again to the
+        // contract it was showing.
+        const back = [];
+        await rig.runtime.service.handleRequest(productionRequest('free-reload', 'SOLUSDT'), {
+            emit: event => back.push(event),
+        });
+
+        expect(rig.counts()).toEqual(idle);
+        expect(rig.session('SOLUSDT')).toBe(sol);
+        expect(back.filter(event => event.resource === 'status').map(event => event.state))
+            .toEqual(['live']);
+        expect(rig.session('BTCUSDT')).toBe(btc);
+        expect(rig.session('ETHUSDT')).toBe(eth);
+        expect(rig.parkedCode('BTCUSDT')).toBe('SOCKET_CLOSED');
+        expect(rig.parkedCode('ETHUSDT')).toBe('SOCKET_CLOSED');
+        expect(rig.clock.timeoutCount()).toBe(0);
+    });
+
+    it('wakes one parked contract per tick, most recently shown first, only in a free minute', async () => {
+        const rig = await openPool();
+        rig.lostStream('BTCUSDT');
+        rig.lostStream('ETHUSDT');
+        const btc = rig.session('BTCUSDT');
+        const eth = rig.session('ETHUSDT');
+        const idle = rig.counts();
+        // The shown contract keeps delivering while two are parked.
+        expect(rig.runtime.service.shown).toMatchObject({ symbol: 'SOLUSDT' });
+
+        // A busy minute is not a free one.
+        rig.room.usedWeight = 500;
+        rig.clock.runIntervals();
+        await Promise.resolve();
+        expect(rig.counts()).toEqual(idle);
+        expect(rig.wakes()).toEqual([]);
+
+        // A free one wakes exactly one: the contract shown most recently.
+        rig.room.usedWeight = 0;
+        rig.clock.runIntervals();
+        await rig.live('ETHUSDT', eth);
+        expect(rig.session('BTCUSDT')).toBe(btc);
+        expect(rig.parkedCode('BTCUSDT')).toBe('SOCKET_CLOSED');
+        expect(rig.session('ETHUSDT').parked).toBeNull();
+        expect(rig.session('ETHUSDT').shownOrder).toBe(eth.shownOrder);
+        expect(rig.wakes()).toEqual([
+            expect.objectContaining({ phase: 'lazy-bootstrap', outcome: 'ok', symbol: 'ETHUSDT' }),
+        ]);
+        // Woken, held, and not on the screen.
+        expect(rig.runtime.service.shown).toMatchObject({ symbol: 'SOLUSDT' });
+        expect(rig.events.ETHUSDT.filter(event => event.resource === 'status').at(-1))
+            .toMatchObject({ state: 'live' });
+
+        // The floor holds the next wake, whatever the budget says.
+        rig.clock.runIntervals();
+        await Promise.resolve();
+        expect(rig.session('BTCUSDT')).toBe(btc);
+
+        rig.clock.advance(FUTURES_PRODUCTION_WORKSTATION_WARMER.FLOOR_MS);
+        rig.clock.runIntervals();
+        await rig.live('BTCUSDT', btc);
+        expect(rig.wakes().map(timing => timing.symbol)).toEqual(['ETHUSDT', 'BTCUSDT']);
+        expect(rig.runtime.service.shown).toMatchObject({ symbol: 'SOLUSDT' });
+        expect(rig.runtime.service.sessions.size).toBe(3);
+
+        // Nothing parked: the warmer's own tick takes it down, leaving the
+        // three freshness monitors.
+        rig.clock.runIntervals();
+        expect(rig.runtime.service.warmTimer).toBeNull();
+        expect(rig.clock.intervalCount()).toBe(3);
+    });
+
+    it('holds the tick while the shown contract is reconnecting, whatever room the budget has', async () => {
+        const rig = await openPool({ heldContracts: 2, symbols: ['BTCUSDT', 'ETHUSDT'] });
+        rig.lostStream('BTCUSDT');
+        const btc = rig.session('BTCUSDT');
+        const eth = rig.session('ETHUSDT');
+
+        // The shown contract loses its route too, and climbs its own ladder.
+        rig.lostStream('ETHUSDT');
+        expect(eth.reconnectTimer).not.toBeNull();
+        expect(rig.parkedCode('ETHUSDT')).toBeNull();
+
+        rig.clock.runIntervals();
+        await Promise.resolve();
+        expect(rig.session('BTCUSDT')).toBe(btc);
+        expect(rig.wakes()).toEqual([]);
+
+        // The shown contract comes back first; only then is a minute free.
+        rig.clock.runTimeouts();
+        await rig.live('ETHUSDT', eth);
+        expect(rig.runtime.service.shown).toBe(rig.session('ETHUSDT'));
+        rig.clock.runIntervals();
+        await rig.live('BTCUSDT', btc);
+        expect(rig.wakes().map(timing => timing.symbol)).toEqual(['BTCUSDT']);
+    });
+
+    it('parks a wake that fails, and tries again after the floor', async () => {
+        const rig = await openPool({ heldContracts: 2, symbols: ['BTCUSDT', 'ETHUSDT'] });
+        rig.lostStream('BTCUSDT');
+        const btc = rig.session('BTCUSDT');
+        rig.failing.add('BTCUSDT');
+
+        rig.clock.runIntervals();
+        await vi.waitFor(() => expect(rig.parkedCode('BTCUSDT')).toBe('ROUTE_DOWN'));
+
+        const again = rig.session('BTCUSDT');
+        expect(again).not.toBe(btc);
+        expect(again.reconnectTimer).toBeNull();
+        expect(rig.clock.timeoutCount()).toBe(0);
+        expect(rig.wakes()).toEqual([
+            expect.objectContaining({ phase: 'lazy-bootstrap', outcome: 'error', symbol: 'BTCUSDT' }),
+        ]);
+        expect(rig.parkFaults().map(fault => fault.code)).toEqual(['SOCKET_CLOSED', 'ROUTE_DOWN']);
+        expect(rig.runtime.service.shown).toMatchObject({ symbol: 'ETHUSDT' });
+
+        // Not before the floor, nor inside the hold a failed wake earns — twice
+        // the floor from the park — and then once more.
+        rig.failing.delete('BTCUSDT');
+        rig.clock.runIntervals();
+        await Promise.resolve();
+        expect(rig.session('BTCUSDT')).toBe(again);
+        rig.clock.advance(FUTURES_PRODUCTION_WORKSTATION_WARMER.FLOOR_MS);
+        rig.clock.runIntervals();
+        await Promise.resolve();
+        expect(rig.session('BTCUSDT')).toBe(again);
+        rig.clock.advance(FUTURES_PRODUCTION_WORKSTATION_WARMER.FLOOR_MS);
+        rig.clock.runIntervals();
+        await rig.live('BTCUSDT', again);
+        expect(rig.wakes().map(timing => timing.outcome)).toEqual(['error', 'ok']);
+    });
+
+    // The three ways a shown session is mid-recovery when the operator moves
+    // off it. Each used to finish in the background — the rung's bootstrap and
+    // its reads, the rest of the round's pages, the candle socket's bootstrap
+    // — for a contract nobody was looking at (audit of 2026-09-03).
+    it('parks the contract that leaves the screen on its ladder, and the ladder with it', async () => {
+        const rig = await openPool({ heldContracts: 2, symbols: ['BTCUSDT', 'ETHUSDT'] });
+        const eth = rig.session('ETHUSDT');
+        rig.lostStream('ETHUSDT');
+        expect(eth.reconnectTimer).not.toBeNull();
+        const idle = rig.counts();
+
+        await rig.open('free-leave-ladder', 'BTCUSDT');
+
+        expect(rig.runtime.service.shown).toBe(rig.session('BTCUSDT'));
+        expect(rig.session('ETHUSDT')).toBe(eth);
+        expect(eth.reconnectTimer).toBeNull();
+        expect(rig.parkedCode('ETHUSDT')).toBe('SOCKET_CLOSED');
+        expect(rig.parkFaults()).toEqual([
+            { phase: 'park', code: 'SOCKET_CLOSED', symbol: 'ETHUSDT' },
+        ]);
+        // The rung never fires: no bootstrap and no read for it.
+        expect(rig.clock.timeoutCount()).toBe(0);
+        rig.clock.runTimeouts();
+        await Promise.resolve();
+        expect(rig.counts()).toEqual(idle);
+        expect(rig.session('ETHUSDT')).toBe(eth);
+    });
+
+    it('parks the contract that leaves the screen mid-round, and reads no page for it', async () => {
+        const rig = await openPool({ heldContracts: 2, symbols: ['BTCUSDT', 'ETHUSDT'] });
+        const eth = rig.session('ETHUSDT');
+        rig.gap('ETHUSDT');
+        expect(eth.bookRecovering).toBe(true);
+        const idle = rig.counts();
+
+        await rig.open('free-leave-round', 'BTCUSDT');
+
+        expect(rig.parkedCode('ETHUSDT')).toBe('DEPTH_SEQUENCE_GAP');
+        expect(rig.parkFaults()).toEqual([
+            { phase: 'park', code: 'DEPTH_SEQUENCE_GAP', symbol: 'ETHUSDT' },
+        ]);
+        // The round's bridge timer fires into a session that is no longer
+        // held: the round ends without its page.
+        rig.clock.runTimeouts();
+        await vi.waitFor(() => expect(eth.bookRecovering).toBe(false));
+        expect(rig.counts()).toEqual(idle);
+        expect(rig.session('ETHUSDT')).toBe(eth);
+        expect(rig.runtime.service.shown).toBe(rig.session('BTCUSDT'));
+    });
+
+    it('parks the contract that leaves the screen on its candle ladder', async () => {
+        const rig = await openPool({ heldContracts: 2, symbols: ['BTCUSDT', 'ETHUSDT'] });
+        const eth = rig.session('ETHUSDT');
+        rig.lostCandles('ETHUSDT', 'CLOSED');
+        expect(eth.intervalReconnectTimer).not.toBeNull();
+        const idle = rig.counts();
+
+        await rig.open('free-leave-candles', 'BTCUSDT');
+
+        expect(rig.parkedCode('ETHUSDT')).toBe('CANDLE_CLOSED');
+        expect(eth.intervalReconnectTimer).toBeNull();
+        expect(rig.clock.timeoutCount()).toBe(0);
+        rig.clock.runTimeouts();
+        await Promise.resolve();
+        expect(rig.counts()).toEqual(idle);
+        expect(rig.session('ETHUSDT')).toBe(eth);
+    });
+
+    it('holds the tick while the shown contract is on its candle ladder', async () => {
+        const rig = await openPool({ heldContracts: 2, symbols: ['BTCUSDT', 'ETHUSDT'] });
+        rig.lostStream('BTCUSDT');
+        const btc = rig.session('BTCUSDT');
+        const eth = rig.session('ETHUSDT');
+        rig.lostCandles('ETHUSDT', 'CLOSED');
+        expect(eth.intervalReconnectTimer).not.toBeNull();
+
+        rig.clock.runIntervals();
+        await Promise.resolve();
+        expect(rig.session('BTCUSDT')).toBe(btc);
+        expect(rig.wakes()).toEqual([]);
+
+        // The candle socket comes back on its own rung; only then is a minute free.
+        rig.clock.runTimeouts();
+        await vi.waitFor(() => {
+            expect(eth.intervalReconnectTimer).toBeNull();
+            expect(eth.intervalBootstrapping).toBe(false);
+            expect(eth.intervalReconnectAttempt).toBe(0);
+        });
+        rig.clock.runIntervals();
+        await rig.live('BTCUSDT', btc);
+        expect(rig.wakes().map(timing => timing.symbol)).toEqual(['BTCUSDT']);
+    });
+
+    it('does not hold the warmer on a contract that stands unavailable', async () => {
+        const rig = await openPool();
+        rig.lostStream('ETHUSDT');
+        const eth = rig.session('ETHUSDT');
+        // Delisted while it was parked: the wake finds no contract and the
+        // session stands unavailable — neither parked nor loading.
+        rig.delisted.add('ETHUSDT');
+        rig.clock.runIntervals();
+        await vi.waitFor(() => {
+            expect(rig.session('ETHUSDT')).not.toBe(eth);
+            expect(rig.session('ETHUSDT').status).toMatchObject({
+                state: 'unavailable',
+                reasonCode: 'SYMBOL_UNAVAILABLE',
+            });
+        });
+        expect(rig.session('ETHUSDT').parked).toBeNull();
+        expect(rig.session('ETHUSDT').bootstrapped).toBe(false);
+
+        // The next contract to park still gets its minute.
+        rig.lostStream('BTCUSDT');
+        const btc = rig.session('BTCUSDT');
+        rig.clock.advance(FUTURES_PRODUCTION_WORKSTATION_WARMER.FLOOR_MS);
+        rig.clock.runIntervals();
+        await rig.live('BTCUSDT', btc);
+        expect(rig.wakes().map(timing => timing.symbol)).toEqual(['BTCUSDT']);
+    });
+
+    it('holds a contract whose wake failed, longer each time, behind the ones not tried', async () => {
+        const rig = await openPool();
+        rig.lostStream('BTCUSDT');
+        rig.lostStream('ETHUSDT');
+        rig.failing.add('ETHUSDT');
+        const btc = rig.session('BTCUSDT');
+        const { FLOOR_MS } = FUTURES_PRODUCTION_WORKSTATION_WARMER;
+
+        // Most recently shown first: ETH, whose wake fails and parks it again.
+        rig.clock.runIntervals();
+        await vi.waitFor(() => expect(rig.parkedCode('ETHUSDT')).toBe('ROUTE_DOWN'));
+        const ethAgain = rig.session('ETHUSDT');
+        expect(ethAgain.lazyWakes).toBe(1);
+        expect(rig.session('BTCUSDT')).toBe(btc);
+
+        // After the floor the one not yet tried goes, not the one that failed.
+        rig.clock.advance(FLOOR_MS);
+        rig.clock.runIntervals();
+        await rig.live('BTCUSDT', btc);
+        expect(rig.session('ETHUSDT')).toBe(ethAgain);
+
+        // The failed one is held twice the floor from its park. Tried again,
+        // it fails again, and is held four floors.
+        rig.clock.advance(FLOOR_MS);
+        rig.clock.runIntervals();
+        await vi.waitFor(() => expect(rig.session('ETHUSDT')).not.toBe(ethAgain));
+        const ethThird = rig.session('ETHUSDT');
+        await vi.waitFor(() => expect(rig.parkedCode('ETHUSDT')).toBe('ROUTE_DOWN'));
+        expect(ethThird.lazyWakes).toBe(2);
+        expect(rig.wakes().map(timing => [timing.symbol, timing.outcome])).toEqual([
+            ['ETHUSDT', 'error'], ['BTCUSDT', 'ok'], ['ETHUSDT', 'error'],
+        ]);
+
+        rig.failing.delete('ETHUSDT');
+        for (const floor of [1, 2, 3]) {
+            rig.clock.advance(FLOOR_MS);
+            rig.clock.runIntervals();
+            await Promise.resolve();
+            expect(rig.session('ETHUSDT'), `floor ${floor} of the hold`).toBe(ethThird);
+        }
+        rig.clock.advance(FLOOR_MS);
+        rig.clock.runIntervals();
+        await rig.live('ETHUSDT', ethThird);
+        expect(rig.session('ETHUSDT').lazyWakes).toBe(0);
+
+        // Up with a bridged book, the count is cleared: its next park is not held.
+        const ethLive = rig.session('ETHUSDT');
+        rig.lostStream('ETHUSDT');
+        expect(rig.parkedCode('ETHUSDT')).toBe('SOCKET_CLOSED');
+        rig.clock.advance(FLOOR_MS);
+        rig.clock.runIntervals();
+        await rig.live('ETHUSDT', ethLive);
+        expect(rig.parkFaults().map(fault => fault.symbol)).toEqual([
+            'BTCUSDT', 'ETHUSDT', 'ETHUSDT', 'ETHUSDT', 'ETHUSDT',
+        ]);
+    });
+
+    it('states the room the public budget has, from the reviewed transport', async () => {
+        const { createFuturesProductionWorkstationReviewedTransport } = await import(
+            './futures-production-workstation-transport.js'
+        );
+        const room = createFuturesProductionWorkstationReviewedTransport().readBudgetRoom();
+        expect(room).toEqual({ usedWeight: 0, maximumWeight: 600 });
+        expect(Object.isFrozen(room)).toBe(true);
     });
 });

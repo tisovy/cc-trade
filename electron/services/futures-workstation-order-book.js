@@ -632,6 +632,11 @@ export class FuturesWorkstationOrderBook {
     }
 
     applyDelta(delta) {
+        // The identity the book stood at before this diff, kept for the
+        // evidence a crossing leaves: `lastUpdateId` is the book's, the other
+        // three are the diff's, and written from the diff's final id they
+        // were one number stated twice (2026-09-03).
+        const before = this.lastUpdateId;
         applyLevels(this.bids, delta.bids);
         applyLevels(this.asks, delta.asks);
         this.lastUpdateId = delta.finalUpdateIdBigInt;
@@ -648,7 +653,7 @@ export class FuturesWorkstationOrderBook {
             // recorded with nothing to read them by.
             const error = new FuturesWorkstationOrderBookError('CROSSED_ORDER_BOOK');
             error.evidence = Object.freeze({
-                lastUpdateId: delta.finalUpdateId,
+                lastUpdateId: before === null || before === undefined ? null : before.toString(),
                 firstUpdateId: delta.firstUpdateId,
                 finalUpdateId: delta.finalUpdateId,
                 previousFinalUpdateId: delta.previousFinalUpdateId,

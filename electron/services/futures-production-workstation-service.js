@@ -230,8 +230,10 @@ const applyReading = (session, request) => {
  * larger is not bandwidth or CPU — both are noise at this scale — but sockets:
  * twenty-four connections against the three the desk used to hold, each on
  * Binance's twenty-four-hour rotation, which is about one reconnect an hour
- * across the pool. That is only tolerable because a reconnect is scoped to the
- * session it happens on and is invisible unless it lands on the shown contract.
+ * across the pool. That is only tolerable because a reconnect is the shown
+ * session's alone: a background session that loses its socket parks, and is
+ * rebuilt when it is selected or when the desk finds a free minute
+ * (`FUTURES_PRODUCTION_WORKSTATION_WARMER`, 2026-09-03).
  *
  * `CC_TRADE_FUTURES_HELD_CONTRACTS` overrides it for a run. A value outside
  * 1..32 is refused rather than clamped: a bound the operator typed wrong should
@@ -255,6 +257,42 @@ export const readFuturesProductionWorkstationHeldContracts = (
     return parsed;
 };
 
+/**
+ * How the rest of the pool loads once the shown contract is live.
+ *
+ * A background session never reconnects on its own — the operator's ruling of
+ * 2026-09-03. A storm that closed eight sockets used to be eight ladders and
+ * eight bootstraps against the one budget the shown contract needed to come
+ * back on. A background session parks instead, and a warmer wakes one parked
+ * session per tick, most recently shown first, only while the shown session is
+ * bootstrapped and live, the public read budget has `ROOM_WEIGHT` to spare —
+ * one bootstrap at 24 plus a recovery round for the shown contract at 60, with
+ * margin — and `FLOOR_MS` has passed since the last wake.
+ *
+ * A wake that fails parks the session again, and the warmer holds it for
+ * `FLOOR_MS` doubled per failed wake, up to `HOLD_CEILING_MS`, behind every
+ * parked session it has not tried yet. Without the hold a contract whose route
+ * alone is down — or whose book will not bridge, the SKRUSDT loop — is woken
+ * every floor for the rest of the day and the others never get their minute
+ * (audit of 2026-09-03).
+ */
+export const FUTURES_PRODUCTION_WORKSTATION_WARMER = Object.freeze({
+    CHECK_MS: 5_000,
+    ROOM_WEIGHT: 120,
+    FLOOR_MS: 15_000,
+    HOLD_CEILING_MS: 600_000,
+});
+
+// How long a parked session is held before the warmer tries it again: nothing
+// after a park the warmer had no hand in, then the floor doubled per failed
+// wake, to the ceiling.
+const wakeHoldMs = lazyWakes => (lazyWakes === 0
+    ? 0
+    : Math.min(
+        FUTURES_PRODUCTION_WORKSTATION_WARMER.FLOOR_MS * (2 ** lazyWakes),
+        FUTURES_PRODUCTION_WORKSTATION_WARMER.HOLD_CEILING_MS,
+    ));
+
 export class FuturesProductionWorkstationService {
     constructor({
         transport,
@@ -275,6 +313,7 @@ export class FuturesProductionWorkstationService {
             || typeof transport.bootstrapInterval !== 'function'
             || typeof transport.connect !== 'function'
             || typeof transport.close !== 'function'
+            || typeof transport.readBudgetRoom !== 'function'
             || typeof clock.now !== 'function'
             || typeof clock.setInterval !== 'function'
             || typeof clock.clearInterval !== 'function'
@@ -302,6 +341,10 @@ export class FuturesProductionWorkstationService {
         // orders selections and nothing else, so it cannot be wrong about the
         // time and cannot regress.
         this.selection = 0;
+        // The warmer's timer, armed while anything is parked, and when it last
+        // woke a session — the floor is measured from here.
+        this.warmTimer = null;
+        this.lastWakeAt = null;
         this.stopped = false;
         this.tapeSettings = FUTURES_WORKSTATION_DEFAULT_TAPE_SETTINGS;
     }
@@ -458,7 +501,18 @@ export class FuturesProductionWorkstationService {
         if ((request.action === FUTURES_PRODUCTION_WORKSTATION_ACTIONS.SUBSCRIBE
             || request.action === FUTURES_PRODUCTION_WORKSTATION_ACTIONS.SELECT_SYMBOL)
             && this.sessions.has(request.symbol)) {
-            await this.selectHeldContract(this.sessions.get(request.symbol), request, emit);
+            const held = this.sessions.get(request.symbol);
+            // A parked contract is rebuilt, not selected: there is nothing
+            // current in it to deliver. The operator asked for it, so it takes
+            // the screen, and states under `loading` the reason it stopped.
+            if (held.parked !== null) {
+                await this.startGeneration(request, emit, 0, {
+                    takesTheScreen: true,
+                    reasonCode: held.parked.code,
+                });
+                return;
+            }
+            await this.selectHeldContract(held, request, emit);
             return;
         }
         if (request.action === FUTURES_PRODUCTION_WORKSTATION_ACTIONS.SELECT_INTERVAL
@@ -751,17 +805,32 @@ export class FuturesProductionWorkstationService {
     // here rather than at release time, so the pool can name the contract the
     // operator has gone longest without.
     showSession(session) {
+        const outgoing = this.shown;
         // A tape payload the outgoing contract was holding back is dropped
         // rather than left armed. It has nothing to deliver any more — the
         // emitter would refuse it — and a timer that fires to do nothing is
         // still a timer per held contract, arming and firing forever.
-        if (this.shown !== null && this.shown !== session) {
-            this.clearPendingTapeTimer(this.shown);
-            this.clearPendingDepthDelivery(this.shown);
+        if (outgoing !== null && outgoing !== session) {
+            this.clearPendingTapeTimer(outgoing);
+            this.clearPendingDepthDelivery(outgoing);
         }
         this.selection += 1;
         session.shownOrder = this.selection;
         this.shown = session;
+        // The ladder, the candle ladder and the recovery round are the shown
+        // session's. A contract that leaves the screen with one running would
+        // otherwise finish it in the background — the rung's bootstrap and its
+        // reads, or the rest of a round's pages, for a contract nobody is
+        // looking at (audit of 2026-09-03). It parks instead, under the reason
+        // it was already stating, and a selection or the warmer rebuilds it.
+        if (outgoing === null || outgoing === session || !this.isHeld(outgoing)) return;
+        if (outgoing.reconnectTimer === null
+            && outgoing.intervalReconnectTimer === null
+            && !outgoing.bookRecovering) return;
+        const reason = outgoing.bookRecovering
+            ? outgoing.bookRecoveryReason
+            : outgoing.status?.reasonCode;
+        this.parkSession(outgoing, reason ?? 'LEFT_THE_SCREEN');
     }
 
     // Room for one more contract. Least recently shown goes first, in full,
@@ -954,7 +1023,10 @@ export class FuturesProductionWorkstationService {
                 ? Math.max(0, finishedAt - session.startedAt)
                 : 0;
             this.onTiming(Object.freeze({
-                phase: 'aggregate-ready',
+                // A wake the warmer started is the same bootstrap under its own
+                // name, so a day's record can be asked how many contracts loaded
+                // in a free minute and how long each took.
+                phase: session.lazy ? 'lazy-bootstrap' : 'aggregate-ready',
                 durationMs,
                 outcome,
                 cache: null,
@@ -968,20 +1040,31 @@ export class FuturesProductionWorkstationService {
         }
     }
 
-    async startGeneration(request, emit, reconnectAttempt) {
+    async startGeneration(request, emit, reconnectAttempt, {
+        // The warmer's wake of a parked session: a bootstrap under its own
+        // timing phase, keeping the reading the session carried.
+        lazy = false,
+        // Stated by the caller when the entitlement below does not decide it:
+        // a parked contract the operator selected is not on the screen yet and
+        // takes it.
+        takesTheScreen: entitled = null,
+        // What the opening `loading` says, when there is a reason to state — a
+        // parked contract names why it stopped while it rebuilds.
+        reasonCode = null,
+    } = {}) {
         // A generation replaces whatever this contract was running — a first
-        // open, a resubscribe and a reconnect all arrive here — and takes a
-        // place in the pool, which the contracts held for longest without being
-        // shown make room for.
+        // open, a resubscribe, a reconnect and a wake all arrive here — and
+        // takes a place in the pool, which the contracts held for longest
+        // without being shown make room for.
         const previous = this.sessions.get(request.symbol) ?? null;
         // Whether this generation is entitled to the screen, decided before the
         // session it replaces is released. A contract the desk is opening for
         // the first time is: the operator asked for it. A contract rebuilding
-        // itself is entitled to exactly what it already had — a held session
-        // whose socket dropped reconnects on its own ladder, and it must not
-        // pull the display onto a contract nobody is looking at while silencing
-        // the one they are.
-        const takesTheScreen = previous === null || this.shown === previous;
+        // itself is entitled to exactly what it already had — the shown session
+        // reconnects on its own ladder, and a parked one woken in a free minute
+        // must not pull the display onto a contract nobody is looking at while
+        // silencing the one they are.
+        const takesTheScreen = entitled ?? (previous === null || this.shown === previous);
         this.releaseSession(previous);
         this.makeRoomForSession(request.symbol);
         this.generation += 1;
@@ -1002,7 +1085,7 @@ export class FuturesProductionWorkstationService {
         // is the same contract, still on screen. Both live on the session now,
         // so what a reconnect keeps is read from the session it replaces rather
         // than from a field the next contract would have inherited.
-        const openingFresh = reconnectAttempt === 0;
+        const openingFresh = reconnectAttempt === 0 && !lazy;
         const session = {
             request,
             requestId: request.requestId,
@@ -1057,9 +1140,20 @@ export class FuturesProductionWorkstationService {
             depthRows: openingFresh ? null : (previous?.depthRows ?? null),
             depthRange: openingFresh ? null : (previous?.depthRange ?? null),
             // A rebuild inherits its place in the pool's order. Left at zero, a
-            // background contract that reconnected would look like the one the
-            // operator had gone longest without and be the first evicted.
+            // background contract woken in a free minute would look like the
+            // one the operator had gone longest without and be the first
+            // evicted.
             shownOrder: previous?.shownOrder ?? 0,
+            // Set when a background session stops on its own account and waits
+            // to be rebuilt: when, and why. Null while the session runs.
+            parked: null,
+            lazy,
+            // How many wakes in a row have failed to bring this contract up with
+            // a bridged book, cleared when one does. The warmer's order and hold.
+            lazyWakes: lazy ? (previous?.lazyWakes ?? 0) + 1 : 0,
+            // The reason the recovery round in flight was started for, while one
+            // is: what a park names when the contract leaves the screen mid-round.
+            bookRecoveryReason: null,
             // The last status this session stated, kept so it can state it
             // again to whoever selects the contract next.
             status: null,
@@ -1110,7 +1204,7 @@ export class FuturesProductionWorkstationService {
                 ? FUTURES_WORKSTATION_STATES.UNAVAILABLE
                 : FUTURES_WORKSTATION_STATES.LOADING,
             false,
-            pastTheCeiling ? 'RECONNECT_EXHAUSTED' : null,
+            pastTheCeiling ? 'RECONNECT_EXHAUSTED' : reasonCode,
         );
 
         let bootstrapAbort = null;
@@ -1297,6 +1391,7 @@ export class FuturesProductionWorkstationService {
             if (!this.isHeld(session)) return;
             if (bookResult.live) this.deliverDepth(session, { immediate: true });
             session.reconnectAttempt = 0;
+            if (bookResult.live) session.lazyWakes = 0;
             this.emitStatus(session, FUTURES_WORKSTATION_STATES.LIVE, true, null);
             this.emitAggregateTiming(session, bookResult.live ? 'ok' : 'no-book');
             this.startFreshnessMonitor(session);
@@ -1559,6 +1654,13 @@ export class FuturesProductionWorkstationService {
      */
     async recoverBook(session, reasonCode, { immediate = false } = {}) {
         if (!this.isHeld(session) || session.reconnectTimer !== null) return;
+        // A book nobody is looking at is not read for. The session parks under
+        // the book's reason and is rebuilt whole when it is wanted; see
+        // `parkSession`.
+        if (!this.isShown(session)) {
+            this.parkSession(session, reasonCode);
+            return;
+        }
         if (session.bookRecovering) return;
         const now = this.observedNow(session);
         // Backed off between rounds, because every diff arriving on a book that
@@ -1579,6 +1681,7 @@ export class FuturesProductionWorkstationService {
             && session.bookRecoveredAt !== null
             && now - session.bookRecoveredAt < cooldownMs) return;
         session.bookRecovering = true;
+        session.bookRecoveryReason = reasonCode;
         session.bookRecoveredAt = now;
         // 'abandoned' is the round leaving through a release or a resync:
         // those say nothing about whether the exchange can serve a snapshot,
@@ -1661,6 +1764,7 @@ export class FuturesProductionWorkstationService {
             if (outcome === 'recovered') session.bookRecoveryFailures = 0;
             if (outcome === 'failed') session.bookRecoveryFailures += 1;
             session.bookRecovering = false;
+            session.bookRecoveryReason = null;
             session.bookRecoveredAt = this.observedNow(session);
         }
     }
@@ -1850,6 +1954,10 @@ export class FuturesProductionWorkstationService {
         if (!this.isHeld(session)
             || session.reconnectTimer !== null
             || session.intervalReconnectTimer !== null) return;
+        if (!this.isShown(session)) {
+            this.parkSession(session, reasonCode);
+            return;
+        }
 
         session.intervalEpoch += 1;
         session.intervalAbortController?.abort();
@@ -1896,6 +2004,13 @@ export class FuturesProductionWorkstationService {
 
     scheduleResync(session, reasonCode) {
         if (!this.isHeld(session) || session.reconnectTimer !== null) return;
+        // The ladder is the shown session's. A background session that would
+        // climb it parks instead — the operator's ruling of 2026-09-03: the
+        // shown contract is always current, the rest load in a free minute.
+        if (!this.isShown(session)) {
+            this.parkSession(session, reasonCode);
+            return;
+        }
         // Running out of fast attempts ends the hurry, not the recovery. The
         // ladder spends 91.5 s — shorter than a proxy restart, a VPN
         // renegotiation or a laptop waking up. Halting here left the desk
@@ -1973,6 +2088,130 @@ export class FuturesProductionWorkstationService {
         if (!session) return;
         if (this.sessions.get(session.symbol) === session) this.sessions.delete(session.symbol);
         if (this.shown === session) this.shown = null;
+        this.stopSession(session);
+    }
+
+    /**
+     * A background session stops, keeps its place, and waits.
+     *
+     * Everything a resynchronization would tear down is torn down — sockets,
+     * book, timers — and nothing is armed in its place: no ladder, no cooldown,
+     * no read. The session stays in the pool under its own `shownOrder`, with
+     * the reason it stopped on its status, and comes back one of two ways: the
+     * operator selects it, or the warmer finds a free minute.
+     *
+     * The abort is what makes it stop. Every callback still in flight for the
+     * session — a bootstrap between awaits, a frame off a socket that is
+     * closing — fails `isHeld` from here on, exactly as a released session's
+     * do; what distinguishes a parked session from a released one is that it
+     * is still in the pool.
+     */
+    parkSession(session, reasonCode) {
+        if (!this.isHeld(session) || this.isShown(session)) return;
+        const now = this.clock.now();
+        session.parked = Object.freeze({
+            at: Number.isSafeInteger(now) && now >= 0 ? now : null,
+            code: reasonCode,
+        });
+        // What whoever selects it next is told, until the rebuild says more.
+        session.status = Object.freeze({
+            state: FUTURES_WORKSTATION_STATES.RESYNCHRONIZING,
+            connected: false,
+            reasonCode,
+        });
+        this.stopSession(session);
+        this.onInternalError({ phase: 'park', code: reasonCode, symbol: session.symbol });
+        this.ensureWarmer();
+    }
+
+    // Armed when a session parks and disarmed by its own tick once nothing is
+    // parked, so a desk with every contract live runs no timer for it.
+    ensureWarmer() {
+        if (this.stopped || this.warmTimer !== null) return;
+        this.warmTimer = this.clock.setInterval(
+            () => this.warmOne(),
+            FUTURES_PRODUCTION_WORKSTATION_WARMER.CHECK_MS,
+        );
+        this.warmTimer?.unref?.();
+    }
+
+    clearWarmer() {
+        if (this.warmTimer === null) return;
+        this.clock.clearInterval(this.warmTimer);
+        this.warmTimer = null;
+    }
+
+    /**
+     * One parked session, in a free minute.
+     *
+     * Four questions in order, and a wake only if all four say yes: is anything
+     * parked; is the shown session bootstrapped and live — not loading, not on
+     * either ladder, not rebuilding its book — because a quiet minute while the
+     * shown contract is reconnecting is not free; does the public read budget
+     * hold `ROOM_WEIGHT`; has `FLOOR_MS` passed since the last wake. One wake at
+     * a time: a session still loading — from the last wake, or from a selection
+     * the operator moved off before it came up — holds the tick. A session that
+     * stands unavailable is not loading and holds nothing (a wake whose
+     * contract was delisted meanwhile held the warmer for good, audit of
+     * 2026-09-03).
+     *
+     * Which one: fewest failed wakes first, then most recently shown — the
+     * contract the operator is likeliest to come back to — and never one still
+     * inside its hold (`wakeHoldMs`). A wake that fails parks again through the
+     * same rule as any other background failure.
+     */
+    warmOne() {
+        if (this.stopped) return;
+        const parked = [...this.sessions.values()].filter(session => session.parked !== null);
+        if (parked.length === 0) {
+            this.clearWarmer();
+            return;
+        }
+        const shown = this.shown;
+        if (shown === null
+            || !this.isHeld(shown)
+            || !shown.bootstrapped
+            || shown.reconnectTimer !== null
+            || shown.intervalReconnectTimer !== null
+            || shown.intervalBootstrapping
+            || shown.bookRecovering
+            || shown.status?.state !== FUTURES_WORKSTATION_STATES.LIVE) return;
+        for (const session of this.sessions.values()) {
+            if (session !== shown
+                && session.parked === null
+                && !session.bootstrapped
+                && session.status?.state === FUTURES_WORKSTATION_STATES.LOADING) return;
+        }
+        let room;
+        try {
+            room = this.transport.readBudgetRoom();
+        } catch (error) {
+            this.onInternalError({ phase: 'warmer', code: safeCode(error), symbol: null });
+            return;
+        }
+        if (!Number.isSafeInteger(room?.usedWeight)
+            || !Number.isSafeInteger(room?.maximumWeight)
+            || room.maximumWeight - room.usedWeight
+                < FUTURES_PRODUCTION_WORKSTATION_WARMER.ROOM_WEIGHT) return;
+        const now = this.clock.now();
+        if (!Number.isSafeInteger(now)) return;
+        if (this.lastWakeAt !== null
+            && now - this.lastWakeAt < FUTURES_PRODUCTION_WORKSTATION_WARMER.FLOOR_MS) return;
+        const ready = parked
+            .filter(session => session.parked.at === null
+                || now - session.parked.at >= wakeHoldMs(session.lazyWakes))
+            .sort((first, second) => first.lazyWakes - second.lazyWakes
+                || second.shownOrder - first.shownOrder);
+        if (ready.length === 0) return;
+        this.lastWakeAt = now;
+        const session = ready[0];
+        void this.startGeneration(session.request, session.emit, 0, { lazy: true });
+    }
+
+    // Every socket, book and timer a session runs, torn down step by step. What
+    // a release and a park have in common; what they do not is whether the
+    // session keeps its place in the pool.
+    stopSession(session) {
         this.release(() => session.abortController.abort(), session.symbol);
         this.release(() => session.intervalAbortController?.abort(), session.symbol);
         this.release(() => session.stream?.close?.(), session.symbol);
@@ -1997,6 +2236,7 @@ export class FuturesProductionWorkstationService {
     stop() {
         if (this.stopped) return;
         this.stopped = true;
+        this.clearWarmer();
         for (const session of [...this.sessions.values()]) this.releaseSession(session);
         this.transport.close();
     }

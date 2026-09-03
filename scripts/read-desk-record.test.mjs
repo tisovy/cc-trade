@@ -771,17 +771,57 @@ describe('withholdings and routes', () => {
     expect(report).toContain('Requests by route (5 attempts, weight 46)')
     expect(report).toContain('history-trades')
   })
+
+  it('says the exchange refused nothing when it refused nothing', () => {
+    expect(summary.exchangeRefusals).toEqual([])
+    expect(formatDeskDiagnosticSummary(summary)).toContain('Exchange refusals (0)\n  (none)')
+  })
+})
+
+// The exchange's own refusals, by route: whether the desk's limiter is skewed
+// against the exchange's is answered by the record (2026-09-03).
+describe('the refusals the exchange stated', () => {
+  const day = [
+    line({ at: '2026-09-03T10:00:00.000Z', kind: 'request', standing: 'ordinary', route: 'depth', attempts: 2, chargedWeight: 20, observedWeight: 2390, backpressureMs: 0, connectionRetries: 0, networkRetries: 0, timestampRetries: 0, rateLimitResponses: 1, outcome: 'error', status: 429, code: 'RATE_LIMITED' }),
+    line({ at: '2026-09-03T10:00:01.000Z', kind: 'request', standing: 'ordinary', route: 'depth', attempts: 1, chargedWeight: 20, observedWeight: 2400, backpressureMs: 0, connectionRetries: 0, networkRetries: 0, timestampRetries: 0, rateLimitResponses: 1, outcome: 'error', status: 429, code: 'RATE_LIMITED' }),
+    line({ at: '2026-09-03T10:02:00.000Z', kind: 'request', standing: 'command', route: 'order', attempts: 1, chargedWeight: 1, observedWeight: 2401, backpressureMs: 0, connectionRetries: 0, networkRetries: 0, timestampRetries: 0, rateLimitResponses: 1, outcome: 'error', status: 418, code: 'IP_BANNED' }),
+    line({ at: '2026-09-03T10:03:00.000Z', kind: 'request', standing: 'ordinary', route: 'income', attempts: 1, chargedWeight: 30, observedWeight: 40, backpressureMs: 0, connectionRetries: 0, networkRetries: 0, timestampRetries: 0, rateLimitResponses: 0, outcome: 'ok', status: 200, code: null }),
+  ].join('')
+  const summary = summarizeDeskDiagnosticRecord(day)
+
+  it('lists them by status and route', () => {
+    expect(summary.exchangeRefusals).toEqual([
+      { key: '429 depth', count: 2 },
+      { key: '418 order', count: 1 },
+    ])
+    const report = formatDeskDiagnosticSummary(summary)
+    expect(report).toContain('Exchange refusals (3)')
+    expect(report).toContain('     2  429 depth')
+    expect(report).toContain('     1  418 order')
+  })
 })
 
 // What a fault left behind is read beside it: the closes of 2026-09-02 each
 // followed seconds of lag, and the crossings were a hundred lines with nothing
 // to read them by.
 describe('the evidence beside faults', () => {
+  // One crossing on AKEUSDT is what the desk writes since 2026-09-03: the
+  // evidence on the stream line, the fault of the round it began bare, and the
+  // round's own fault lines after it. SKRUSDT crossed inside a round's replay,
+  // which leaves its evidence under the round's phase. A background contract
+  // parked and was woken in a free minute.
   const day = [
     line({ at: '2026-09-02T21:44:14.498Z', kind: 'fault', phase: 'stream-close', code: 'SOCKET_CLOSED', symbol: 'AKEUSDT' }),
     line({ at: '2026-09-02T21:44:14.498Z', kind: 'evidence', phase: 'stream-close', code: 'SOCKET_CLOSED', symbol: 'AKEUSDT', closeCode: 1006, closedBy: 'transport', lastUpstreamMs: 3_878, lastUpdateId: null, firstUpdateId: null, finalUpdateId: null, previousFinalUpdateId: null, crossedLevels: null }),
-    line({ at: '2026-09-02T21:46:24.752Z', kind: 'evidence', phase: 'stream', code: 'CROSSED_ORDER_BOOK', symbol: 'AKEUSDT', closeCode: null, closedBy: null, lastUpstreamMs: null, lastUpdateId: '9', firstUpdateId: '8', finalUpdateId: '9', previousFinalUpdateId: '7', crossedLevels: 2 }),
-    line({ at: '2026-09-02T21:46:25.000Z', kind: 'evidence', phase: 'book-recovery', code: 'CROSSED_ORDER_BOOK', symbol: 'SKRUSDT', closeCode: null, closedBy: null, lastUpstreamMs: null, lastUpdateId: '19', firstUpdateId: '18', finalUpdateId: '19', previousFinalUpdateId: '17', crossedLevels: 1 }),
+    line({ at: '2026-09-02T21:46:24.752Z', kind: 'fault', phase: 'stream', code: 'CROSSED_ORDER_BOOK', symbol: 'AKEUSDT' }),
+    line({ at: '2026-09-02T21:46:24.752Z', kind: 'evidence', phase: 'stream', code: 'CROSSED_ORDER_BOOK', symbol: 'AKEUSDT', closeCode: null, closedBy: null, lastUpstreamMs: null, lastUpdateId: '7', firstUpdateId: '8', finalUpdateId: '9', previousFinalUpdateId: '7', crossedLevels: 2 }),
+    line({ at: '2026-09-02T21:46:24.753Z', kind: 'fault', phase: 'book-recovery', code: 'CROSSED_ORDER_BOOK', symbol: 'AKEUSDT' }),
+    line({ at: '2026-09-02T21:46:25.900Z', kind: 'fault', phase: 'book-recovery', code: 'DEPTH_BOOTSTRAP_NOT_BRIDGED', symbol: 'AKEUSDT' }),
+    line({ at: '2026-09-02T21:46:25.000Z', kind: 'fault', phase: 'book-recovery', code: 'CROSSED_ORDER_BOOK', symbol: 'SKRUSDT' }),
+    line({ at: '2026-09-02T21:46:25.000Z', kind: 'evidence', phase: 'book-recovery', code: 'CROSSED_ORDER_BOOK', symbol: 'SKRUSDT', closeCode: null, closedBy: null, lastUpstreamMs: null, lastUpdateId: '17', firstUpdateId: '18', finalUpdateId: '19', previousFinalUpdateId: '17', crossedLevels: 1 }),
+    line({ at: '2026-09-02T21:47:00.000Z', kind: 'fault', phase: 'stream-close', code: 'SOCKET_CLOSED', symbol: 'SKRUSDT' }),
+    line({ at: '2026-09-02T21:47:00.001Z', kind: 'fault', phase: 'park', code: 'SOCKET_CLOSED', symbol: 'SKRUSDT' }),
+    line({ at: '2026-09-02T21:47:20.000Z', kind: 'timing', phase: 'lazy-bootstrap', durationMs: 1_240, outcome: 'ok', cache: null, code: null, symbol: 'SKRUSDT' }),
   ].join('')
   const summary = summarizeDeskDiagnosticRecord(day)
 
@@ -800,11 +840,31 @@ describe('the evidence beside faults', () => {
     expect(report).toContain('last frame 3878ms late')
   })
 
-  it('counts crossed books by contract', () => {
+  it('counts crossed books by contract, once each', () => {
     expect(summary.crossings).toEqual([
       { key: 'AKEUSDT', count: 1 },
       { key: 'SKRUSDT', count: 1 },
     ])
     expect(formatDeskDiagnosticSummary(summary)).toContain('Crossed books by contract (2)')
+  })
+
+  it('counts every fault under its phase, the parking apart from the close', () => {
+    expect(summary.faults).toEqual([
+      { key: 'book-recovery CROSSED_ORDER_BOOK', count: 2 },
+      { key: 'stream-close SOCKET_CLOSED', count: 2 },
+      { key: 'book-recovery DEPTH_BOOTSTRAP_NOT_BRIDGED', count: 1 },
+      { key: 'park SOCKET_CLOSED', count: 1 },
+      { key: 'stream CROSSED_ORDER_BOOK', count: 1 },
+    ])
+    const report = formatDeskDiagnosticSummary(summary)
+    expect(report).toContain('Faults by phase (7)')
+    expect(report).toContain('     1  park SOCKET_CLOSED')
+  })
+
+  it('times a lazy wake under its own phase', () => {
+    expect(summary.phases).toEqual([
+      expect.objectContaining({ phase: 'lazy-bootstrap', count: 1, medianMs: 1_240 }),
+    ])
+    expect(formatDeskDiagnosticSummary(summary)).toContain('lazy-bootstrap')
   })
 })

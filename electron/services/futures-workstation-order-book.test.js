@@ -1187,8 +1187,11 @@ describe('what a crossed book leaves behind', () => {
         }
         expect(error).toBeInstanceOf(FuturesWorkstationOrderBookError);
         expect(error.code).toBe('CROSSED_ORDER_BOOK');
+        // `lastUpdateId` is the book's — where it stood before the diff — and
+        // the other three are the diff's. Written from the diff's final id it
+        // was one number stated twice (2026-09-03).
         expect(error.evidence).toEqual({
-            lastUpdateId: '102',
+            lastUpdateId: '100',
             firstUpdateId: '101',
             finalUpdateId: '102',
             previousFinalUpdateId: '100',

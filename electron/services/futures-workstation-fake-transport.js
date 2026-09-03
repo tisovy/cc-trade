@@ -18,6 +18,13 @@ const throwIfAborted = (signal) => {
 
 const FUTURES_WORKSTATION_FAKE_INTERVALS = new Set(['1m', '5m', '15m', '1h', '4h', '1d', '1w']);
 
+// The room the reviewed transport's public read budget has in a quiet minute:
+// nothing spent against its 600. A test that wants a busy minute states one.
+const FUTURES_WORKSTATION_FAKE_READ_BUDGET_ROOM = Object.freeze({
+    usedWeight: 0,
+    maximumWeight: 600,
+});
+
 export const createFuturesWorkstationSystemClock = () => Object.freeze({
     now: () => Date.now(),
     setInterval: (callback, delay) => setInterval(callback, delay),
@@ -135,6 +142,7 @@ export const createFuturesWorkstationFakeTransport = ({
             for (const interval of activeIntervals) clock.clearInterval(interval);
             activeIntervals.clear();
         },
+        readBudgetRoom: () => FUTURES_WORKSTATION_FAKE_READ_BUDGET_ROOM,
         getActiveTimerCount: () => activeIntervals.size,
     });
 };

@@ -835,6 +835,13 @@ export const createFuturesProductionWorkstationReviewedTransport = ({
         loadExchangeInfo,
         readDepthSnapshot,
         readCandleHistory,
+        // How much of the public read budget this minute has spent, for the
+        // service's warmer to decide whether a parked contract can load now.
+        // A reading and nothing else: the budget stays this module's own.
+        readBudgetRoom: () => {
+            const { usedWeight, maximumWeight } = PUBLIC_READ_BUDGET.snapshot();
+            return Object.freeze({ usedWeight, maximumWeight });
+        },
         bootstrapIndependent: options => readBootstrapResources({
             ...options,
             includeHeaderResources: true,

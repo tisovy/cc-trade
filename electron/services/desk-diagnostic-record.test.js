@@ -1652,6 +1652,39 @@ describe('session-scoped faults and timings', () => {
             symbol: '龙虾USDT',
         }).symbol).toBe('龙虾USDT');
     });
+
+    // A background contract that stops on its own account, and the free
+    // minute that loads it again (2026-09-03): two lines the record keeps
+    // under phases of their own, so a day can be asked how many contracts
+    // parked and how long each took to come back.
+    it('keeps a parked contract and a lazy wake as lines', () => {
+        expect(describeDeskDiagnosticEvent('fault', {
+            phase: 'park',
+            code: 'SOCKET_CLOSED',
+            symbol: 'SKRUSDT',
+        })).toEqual({
+            kind: 'fault',
+            phase: 'park',
+            code: 'SOCKET_CLOSED',
+            symbol: 'SKRUSDT',
+        });
+        expect(describeDeskDiagnosticEvent('timing', {
+            phase: 'lazy-bootstrap',
+            durationMs: 1_240,
+            outcome: 'ok',
+            cache: null,
+            code: null,
+            symbol: 'SKRUSDT',
+        })).toEqual({
+            kind: 'timing',
+            phase: 'lazy-bootstrap',
+            durationMs: 1_240,
+            outcome: 'ok',
+            cache: null,
+            code: null,
+            symbol: 'SKRUSDT',
+        });
+    });
 });
 
 // What the renderer says the screen switched to, and when the local link came

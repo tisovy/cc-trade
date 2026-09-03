@@ -853,7 +853,13 @@ export const FuturesWorkstationChart = ({
       hasFittedContentRef.current = true
     }
     requestOrderCoordinateRefreshRef.current()
-  }, [candles])
+    // On the generation as well as on the rows. The layout effect above has
+    // just emptied both series for a new contract or interval, and the rows
+    // handed to the chart may be the same array as before — a series held
+    // through an interval switch is. Keyed on the rows alone, this effect did
+    // not run and the held series reached the canvas only because an
+    // intermediate render happened to change the reference (2026-09-03).
+  }, [candles, measurementGeneration])
 
   // Scrolling into the left edge is the request for more history: the operator
   // is asking to see what came before, and the chart answers by loading it

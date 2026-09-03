@@ -2118,7 +2118,7 @@ describe('FuturesWorkstationChart history loading', () => {
     expect(onLoadHistory).toHaveBeenCalledExactlyOnceWith(START - (80 * MINUTE))
   })
 
-  it('clears both imperative series when a replacement interval commits', () => {
+  it('clears both imperative series when a replacement interval commits, then draws what it holds', () => {
     const rows = series(0, 80)
     const { rerender } = render(<FuturesWorkstationChart
       {...properties(rows)}
@@ -2126,20 +2126,41 @@ describe('FuturesWorkstationChart history loading', () => {
       interval="15m"
     />)
     const [contractSeries, volumeSeries] = chartMock.charts[0].series
+    const fitted = chartMock.charts[0].timeScale().fitContent.mock.calls.length
     contractSeries.setData.mockClear()
     volumeSeries.setData.mockClear()
 
-    // Keep the same row reference deliberately. The ordinary candle effect has
-    // nothing new to draw, so only the selection layout boundary can remove the
-    // retained canvas before it is painted under the new interval label.
+    // Keep the same row reference deliberately. The selection layout boundary
+    // removes the retained canvas before it is painted under the new interval
+    // label — and the rows the chart is still handed are then drawn again in
+    // full, by the generation change and not by an intermediate render. The
+    // view holds the previous series through a switch; keyed on the rows
+    // alone, the draw did not run and the canvas stayed empty (2026-09-03).
     rerender(<FuturesWorkstationChart
       {...properties(rows)}
       symbol="BTCUSDT"
       interval="1m"
     />)
 
-    expect(volumeSeries.setData).toHaveBeenCalledExactlyOnceWith([])
-    expect(contractSeries.setData).toHaveBeenCalledExactlyOnceWith([])
+    expect(volumeSeries.setData.mock.calls[0]).toEqual([[]])
+    expect(contractSeries.setData.mock.calls[0]).toEqual([[]])
+    expect(contractSeries.setData).toHaveBeenCalledTimes(2)
+    expect(volumeSeries.setData).toHaveBeenCalledTimes(2)
+    expect(contractSeries.setData.mock.calls.at(-1)[0]).toHaveLength(rows.length)
+    expect(volumeSeries.setData.mock.calls.at(-1)[0]).toHaveLength(rows.length)
+    // The first draw of a generation fits the viewport, as a first open does.
+    expect(chartMock.charts[0].timeScale().fitContent).toHaveBeenCalledTimes(fitted + 1)
+
+    // The new interval's rows then replace the held ones in full, without
+    // fitting the viewport again under the operator.
+    const replacement = series(-40, 0)
+    rerender(<FuturesWorkstationChart
+      {...properties(replacement)}
+      symbol="BTCUSDT"
+      interval="1m"
+    />)
+    expect(contractSeries.setData.mock.calls.at(-1)[0]).toHaveLength(replacement.length)
+    expect(chartMock.charts[0].timeScale().fitContent).toHaveBeenCalledTimes(fitted + 1)
   })
 
   it('asks again when scrolling reaches the oldest loaded candle', () => {

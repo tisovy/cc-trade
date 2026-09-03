@@ -112,6 +112,14 @@ export const summarizeDeskDiagnosticRecord = (text) => {
   // each one is read for its own lag.
   const closes = []
   const crossings = new Map()
+  // The exchange's own refusals — a request answered 429 or 418 — by route.
+  // The skew headroom of the desk's limiter against the exchange's is a
+  // question this answers from the record rather than from a guess
+  // (2026-09-03); nothing is retuned on the strength of it here.
+  const exchangeRefusals = new Map()
+  // Every fault by its phase and code. The codes alone merge a socket close
+  // with the parking it caused; the phase says which was which.
+  const faults = new Map()
   const sessions = []
   const commands = []
   // How long each kind of command took to answer. Keyed by action and market
@@ -212,12 +220,17 @@ export const summarizeDeskDiagnosticRecord = (text) => {
     if (line.kind === 'evidence' && line.code === 'CROSSED_ORDER_BOOK') {
       bump(crossings, `${line.symbol ?? '-'}`)
     }
+    if (line.kind === 'fault' && typeof line.phase === 'string') {
+      bump(faults, `${phaseFamily(line.phase)} ${line.code ?? '-'}`)
+    }
     if (line.kind === 'request') {
       const route = typeof line.route === 'string' ? line.route : '(unnamed)'
       const observed = routes.get(route) ?? { count: 0, weight: 0 }
       observed.count += 1
       observed.weight += Number(line.chargedWeight) || 0
       routes.set(route, observed)
+      const status = Number(line.status)
+      if (status === 429 || status === 418) bump(exchangeRefusals, `${status} ${route}`)
     }
     if (line.kind === 'answer' && typeof line.action === 'string') {
       // Keyed by market as well as by action, because the same action does not
@@ -401,6 +414,8 @@ export const summarizeDeskDiagnosticRecord = (text) => {
       .sort((left, right) => right.weight - left.weight),
     closes,
     crossings: descending(crossings.entries()),
+    exchangeRefusals: descending(exchangeRefusals.entries()),
+    faults: descending(faults.entries()),
     sessions,
     commands,
     phases,
@@ -545,6 +560,14 @@ export const formatDeskDiagnosticSummary = (summary, { day = null } = {}) => {
     }
   }
 
+  if (Array.isArray(summary.faults) && summary.faults.length > 0) {
+    const faulted = summary.faults.reduce((sum, entry) => sum + entry.count, 0)
+    out.push('', `Faults by phase (${faulted})`)
+    for (const { key, count } of summary.faults) {
+      out.push(`  ${String(count).padStart(6)}  ${key}`)
+    }
+  }
+
   if (Array.isArray(summary.routes) && summary.routes.length > 0) {
     const weight = summary.routes.reduce((total, entry) => total + entry.weight, 0)
     const count = summary.routes.reduce((total, entry) => total + entry.count, 0)
@@ -554,6 +577,15 @@ export const formatDeskDiagnosticSummary = (summary, { day = null } = {}) => {
         `  ${entry.route.padEnd(22)} n=${String(entry.count).padStart(5)}`
         + `  weight ${String(entry.weight).padStart(6)}`,
       )
+    }
+    // Stated whenever there were requests, zero included: a day the exchange
+    // refused nothing is the reading the skew question wants.
+    const refusals = Array.isArray(summary.exchangeRefusals) ? summary.exchangeRefusals : []
+    const refusedByExchange = refusals.reduce((sum, entry) => sum + entry.count, 0)
+    out.push('', `Exchange refusals (${refusedByExchange})`)
+    if (refusals.length === 0) out.push('  (none)')
+    for (const { key, count } of refusals) {
+      out.push(`  ${String(count).padStart(6)}  ${key}`)
     }
   }
 
