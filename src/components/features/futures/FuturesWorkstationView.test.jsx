@@ -470,6 +470,12 @@ describe('pure Futures workstation presentation', () => {
     const headerRule = stylesheet.match(
       /\.futures-workstation-market-header\s*\{(?<declarations>[^}]*)\}/,
     )?.groups?.declarations
+    const symbolTitleRule = stylesheet.match(
+      /\.futures-workstation-symbol-title\s*\{(?<declarations>[^}]*)\}/,
+    )?.groups?.declarations
+    const symbolNameRule = stylesheet.match(
+      /\.futures-workstation-symbol-title strong\s*\{(?<declarations>[^}]*)\}/,
+    )?.groups?.declarations
     const readingsRule = stylesheet.match(
       /\.futures-workstation-market-header dl\s*\{(?<declarations>[^}]*)\}/,
     )?.groups?.declarations
@@ -480,6 +486,14 @@ describe('pure Futures workstation presentation', () => {
     expect(container.querySelector('.futures-workstation-symbol-title')?.nextElementSibling)
       .toBe(header.querySelector('dl'))
     expect(headerRule).toContain('flex-wrap: nowrap;')
+    expect(symbolTitleRule).toContain(
+      'flex: 0 0 calc((var(--fx-ui-scale, 1) * 141px) + 14px);',
+    )
+    expect(symbolTitleRule).toContain(
+      'min-width: calc((var(--fx-ui-scale, 1) * 141px) + 14px);',
+    )
+    expect(symbolNameRule).toContain('min-width: 0;')
+    expect(symbolNameRule).toContain('overflow-wrap: anywhere;')
     expect(readingsRule).toContain('grid-template-rows: repeat(2, minmax(0, auto));')
     expect(readingsRule).toContain('grid-auto-flow: column;')
     expect(readingsRule).toMatch(/grid-template-columns:[\s\S]*minmax\(112px, 1\.2fr\)/)
