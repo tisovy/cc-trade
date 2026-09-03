@@ -1466,3 +1466,39 @@ describe('reviewed environment-specific Futures workstation transports', () => {
             && url.searchParams.get('limit') === '1000')).toBe(true);
     });
 });
+
+// Who ended the connection, and with what. The desk's own rotation names
+// itself; a clean code from the far side is the exchange's; anything else — no
+// code, an abnormal 1006, an error — is the transport between them, which on
+// this desk is a proxy. On 2026-09-02 three closes each followed seconds of a
+// stalled route and read as plain socket closes.
+describe('who closed the socket', () => {
+    it('names the exchange, the desk and the transport apart, with the code', () => {
+        vi.useFakeTimers();
+        const closes = [];
+        const transport = createFuturesProductionWorkstationReviewedTransport();
+        const subscribe = () => transport.connect({
+            symbol: 'BTCUSDT',
+            interval: '1m',
+            onMessage: () => {},
+            onDisconnect: (reason, detail) => closes.push([reason, detail]),
+            onCandleDisconnect: () => {},
+        });
+        // One connection is three sockets; the book and the market sockets
+        // report through `onDisconnect`. The exchange's own clean close on the
+        // first, the proxy dropping the second with an abnormal code.
+        subscribe();
+        socketMock.instances[0].emit('close', 1000);
+        socketMock.instances[1].emit('close', 1006);
+        // And a fresh connection the desk retires on its own schedule.
+        subscribe();
+        advanceWithTraffic(86_400_000);
+        socketMock.instances[3].emit('close', 1000);
+
+        expect(closes).toEqual([
+            ['SOCKET_CLOSED', { closeCode: 1000, closedBy: 'exchange' }],
+            ['SOCKET_CLOSED', { closeCode: 1006, closedBy: 'transport' }],
+            ['CONNECTION_ROTATED', { closeCode: 1000, closedBy: 'desk' }],
+        ]);
+    });
+});

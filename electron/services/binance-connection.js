@@ -5242,12 +5242,20 @@ export function setupBinanceConnection({
                 // book that could not bridge, a recovery, a rejected frame, a
                 // history read that failed. A timing line says a phase ended
                 // badly; only this says what was wrong with it.
-                onInternalError: ({ phase, code, symbol = null }) => {
+                onInternalError: ({ phase, code, symbol = null, ...evidence }) => {
                     logger.warn(
                         `[futures-production-workstation:fault] ${phase} ${code}`
                         + (symbol === null ? '' : ` symbol=${symbol}`),
                     );
                     diagnosticRecord.record('fault', { phase, code, symbol });
+                    // What the fault left behind — a close's code and lag, a
+                    // crossing's identities — goes beside it as its own line,
+                    // so a fault line stays a fault line and the evidence is
+                    // there when there is any. The record keeps only the
+                    // fields it declares.
+                    if (Object.values(evidence).some(value => value !== null && value !== undefined)) {
+                        diagnosticRecord.record('evidence', { phase, code, symbol, ...evidence });
+                    }
                 },
             })
             : null;

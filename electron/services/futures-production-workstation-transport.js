@@ -460,7 +460,7 @@ const createSocket = (
         settleReady(false);
         clearTimeout(lifetime);
         clearInterval(silenceWatch);
-        onDisconnect(reason);
+        onDisconnect(reason, { closeCode: 1000, closedBy: 'desk' });
         try {
             socket.close(1000, 'stream went silent');
         } catch {
@@ -509,18 +509,28 @@ const createSocket = (
         }
         onMessage(raw);
     });
-    socket.once('close', () => {
+    // Who ended the connection, and with what. The desk's own rotation and its
+    // silence rule name themselves; a clean close code from the far side is the
+    // exchange's; anything else — no code, an abnormal 1006, an error — is the
+    // transport between them, which on this desk is a proxy.
+    socket.once('close', (code) => {
         settleReady(false);
         clearInterval(silenceWatch);
         if (closed) return;
         closed = true;
         clearTimeout(lifetime);
-        onDisconnect(rotated ? 'CONNECTION_ROTATED' : 'SOCKET_CLOSED');
+        const closeCode = Number.isSafeInteger(code) && code >= 0 ? code : null;
+        onDisconnect(rotated ? 'CONNECTION_ROTATED' : 'SOCKET_CLOSED', {
+            closeCode,
+            closedBy: rotated
+                ? 'desk'
+                : (closeCode === 1000 || closeCode === 1001 ? 'exchange' : 'transport'),
+        });
     });
     socket.once('error', () => {
         settleReady(false);
         clearInterval(silenceWatch);
-        if (!closed) onDisconnect('SOCKET_ERROR');
+        if (!closed) onDisconnect('SOCKET_ERROR', { closeCode: null, closedBy: 'transport' });
     });
     return Object.freeze({
         ready,

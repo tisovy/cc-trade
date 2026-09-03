@@ -10,6 +10,7 @@ import {
 } from '../../src/utils/futuresWorkstationProtocolShared.js';
 import {
     FUTURES_BOOK_PARSED_DECIMAL_BOUND,
+    FUTURES_BOOK_PARSED_LEVELS_PER_SIDE,
     futuresBookGroupKey,
     groupFuturesBookLevels,
 } from '../../src/utils/futuresOrderBook.js';
@@ -428,148 +429,13 @@ describe('the band a snapshot proves', () => {
         expect(book.toRendererRows().bids.map(row => row.price)).toEqual(['10']);
     });
 
-    it('says whether it still reaches as far as the rows on screen', () => {
-        const book = banded();
-        // Best bid 10, best ask 11; the band runs 9 to 12.
-        expect(book.coversRange('1')).toBe(true);
-        expect(book.coversRange('1.5')).toBe(false);
-        // No range asked for is nothing to fall short of.
-        expect(book.coversRange('0')).toBe(true);
-    });
-
-    // A ratio rather than a verdict, so a step three sizes coarser buys the page
-    // it needs in one read instead of climbing to it one read at a time.
-    it('states how many times deeper it would have to be', () => {
-        const book = banded();
-        expect(book.rangeShortfall('1')).toBe(0);
-        // Each side proved one unit of price past its best; rows reaching six
-        // need six times the page that proved it.
-        expect(book.rangeShortfall('6')).toBeCloseTo(6, 6);
-    });
-
-    // The book the operator brought back: a full ask ladder over seven bid rows,
-    // badged live. Measured on the total span the two sides pay for each other —
-    // a span of 2.1 against a need of 2.1 is sufficient, exactly — and the desk
-    // re-reads the same page, gets the same asymmetry, and the bid side stays
-    // short for the session.
-    it('measures the side that falls short, not the span the two sides make', () => {
-        const book = new FuturesWorkstationOrderBook();
-        book.push(delta({ bids: [], asks: [] }), 200);
-        expect(book.bootstrap(snapshot({
-            bids: [['10.00', '2.0'], ['9.90', '3.0']],
-            asks: [['10.10', '4.0'], ['12.00', '5.0']],
-        })).live).toBe(true);
-        expect(book.coversRange('1')).toBe(false);
-        // The ask side proved 1.9 and reaches; the bid side proved 0.1 and is
-        // ten times short of the reading. Ten is what has to be bought.
-        expect(book.rangeShortfall('1')).toBeCloseTo(10, 6);
-    });
-
-    // A page that did reach the rows on both sides when it was read is not a
-    // page too shallow — the market has walked out from between its edges, and
-    // the same page read again is a band centred where the market is now. A
-    // shortfall of exactly 1 is what says so: short, but not by depth.
-    it('asks for the same page when the market walked out of a wide enough band', () => {
-        const book = new FuturesWorkstationOrderBook();
-        book.push(delta({ bids: [], asks: [] }), 200);
-        expect(book.bootstrap(snapshot({
-            bids: [['10.00', '2.0'], ['9.00', '3.0']],
-            asks: [['10.10', '4.0'], ['11.10', '5.0']],
-        })).live).toBe(true);
-        book.push(delta({
-            firstUpdateId: '102',
-            finalUpdateId: '103',
-            previousFinalUpdateId: '101',
-            bids: [['10.80', '1.0']],
-            asks: [['10.10', '0'], ['10.90', '1.0']],
-        }), 200);
-        // The ask side now reaches 0.2 where the rows need 1 — but the page it
-        // was bought at proved 1, so there is nothing deeper worth buying.
-        expect(book.coversRange('1')).toBe(false);
-        expect(book.rangeShortfall('1')).toBe(1);
-    });
-
-    // A side the walk emptied states no distance to size a page against. It is
-    // still a book that cannot prove its rows, so it still asks for a reading —
-    // one that will have two sides to measure.
-    it('asks for a fresh reading when a side states no distance at all', () => {
-        const book = banded();
-        book.push(delta({
-            firstUpdateId: '102',
-            finalUpdateId: '103',
-            previousFinalUpdateId: '101',
-            bids: [['10.00', '0'], ['9.00', '0']],
-            asks: [],
-        }), 200);
-        expect(book.rangeShortfall('1')).toBe(Number.POSITIVE_INFINITY);
-    });
-
-    // A snapshot that came back with one side empty proves no band, so the book
-    // filters nothing and there is nothing the rows can fall outside of. Reading
-    // the same page again would not produce a band either.
-    it('is short of nothing when there is no band', () => {
-        const book = new FuturesWorkstationOrderBook();
-        expect(book.rangeShortfall('6')).toBe(0);
-    });
-
-    // Whether the band reaches the rows and whether it still holds the market
-    // are two questions. The band this book was bought with proved one unit of
-    // price on each side and the market is resting in the middle of it: short of
-    // rows that reach six, and in no danger of walking out of it.
-    it('holds the market while the market rests inside it', () => {
-        const book = banded();
-        expect(book.holdsMarket()).toBe(true);
-        expect(book.rangeShortfall('6')).toBeCloseTo(6, 6);
-    });
-
-    // The ask side proved one unit of price and has two tenths of it left: every
-    // ask above the ceiling is being dropped, and the side is on its way to empty
-    // while the bid side stays full. That is the one-sided book.
-    it('does not hold a market that has taken most of one side away', () => {
-        const book = banded();
-        book.push(delta({
-            firstUpdateId: '102',
-            finalUpdateId: '103',
-            previousFinalUpdateId: '101',
-            bids: [],
-            asks: [['11.00', '0'], ['11.80', '1.0']],
-        }), 200);
-        expect(book.holdsMarket()).toBe(false);
-    });
-
-    // Not judged at the moment the room runs out: a side re-read then has already
-    // been empty on screen for as long as the read takes. Three tenths of the
-    // proven room left still holds; two tenths does not.
-    it('turns on the share of the room the page proved, not on the room running out', () => {
-        const walkedTo = (price) => {
-            const book = banded();
-            book.push(delta({
-                firstUpdateId: '102',
-                finalUpdateId: '103',
-                previousFinalUpdateId: '101',
-                bids: [],
-                asks: [['11.00', '0'], [price, '1.0']],
-            }), 200);
-            return book.holdsMarket();
-        };
-        expect(walkedTo('11.70')).toBe(true);
-        expect(walkedTo('11.80')).toBe(false);
-    });
-
-    // A snapshot that came back with a side empty proves no band, so there is no
-    // room to measure and nothing a re-read on this account would produce.
-    it('has no room to answer for when there is no band', () => {
-        expect(new FuturesWorkstationOrderBook().holdsMarket()).toBe(true);
-    });
-
     // Where the exchange's book ends, which the panel cannot work out from the
     // levels it was sent: the delivery is trimmed to the range the panel stated,
-    // so measuring it would measure the panel's own step back.
-    it('states how far its page proved, once no deeper page can be bought', () => {
+    // so measuring it would measure the panel's own step back. Stated on every
+    // delivery — there is no deeper page to wait for (2026-09-03).
+    it('states how far it holds on every delivery', () => {
         const book = banded();
-        expect(book.toRendererRows().reach).toBeNull();
-        expect(book.toRendererRows({ atDeepestPage: true }).reach)
-            .toEqual({ below: '1', above: '1' });
+        expect(book.toRendererRows().reach).toEqual({ below: '1', above: '1' });
     });
 
     // A fact about the book on hand, so it follows the book. The market walking
@@ -585,16 +451,14 @@ describe('the band a snapshot proves', () => {
             bids: [],
             asks: [['11.00', '0'], ['11.80', '1.0']],
         }), 200);
-        expect(book.toRendererRows({ atDeepestPage: true }).reach)
-            .toEqual({ below: '1', above: '0.2' });
+        expect(book.toRendererRows().reach).toEqual({ below: '1', above: '0.2' });
     });
 
     // And it grows with the far book, which is the point: the ladder lengthens
     // as the stream names levels further out, with no rung added or moved.
     it('reaches as far as the levels the stream has restated', () => {
         const book = banded();
-        expect(book.toRendererRows({ atDeepestPage: true }).reach)
-            .toEqual({ below: '1', above: '1' });
+        expect(book.toRendererRows().reach).toEqual({ below: '1', above: '1' });
         book.push(delta({
             firstUpdateId: '102',
             finalUpdateId: '103',
@@ -602,42 +466,14 @@ describe('the band a snapshot proves', () => {
             bids: [['4.00', '7.0']],
             asks: [['30.00', '9.0']],
         }), 200);
-        expect(book.toRendererRows({ atDeepestPage: true }).reach)
-            .toEqual({ below: '6', above: '19' });
+        expect(book.toRendererRows().reach).toEqual({ below: '6', above: '19' });
     });
 
-    // A rebuild the desk asks for while the stream is still carrying is a
-    // snapshot centred where the market is now. It is the whole truth inside its
-    // own band and says nothing outside it, so the far book survives it — and
-    // has to, or on the contracts that re-centre most, which are the ones being
-    // traded, it never accumulates at all.
-    it('keeps the far book across a re-centre and drops what the new band no longer names', () => {
-        const book = banded();
-        book.push(delta({
-            firstUpdateId: '102',
-            finalUpdateId: '103',
-            previousFinalUpdateId: '101',
-            bids: [['4.00', '7.0']],
-            asks: [['30.00', '9.0']],
-        }), 200);
-        book.beginBootstrap({ keepFarBook: true });
-        expect(book.bootstrap({
-            lastUpdateId: '200',
-            bids: [['10.50', '2.0'], ['9.50', '3.0']],
-            asks: [['11.50', '4.0'], ['12.50', '5.0']],
-        }).live).toBe(true);
-        const view = book.toRendererRows();
-        // 4 and 30 are outside the new band and are still drawn. So is 9, which
-        // the new page does not reach either. 10 was inside the new band and the
-        // snapshot did not name it, so it has been taken.
-        expect(view.bids.map(row => row.price)).toEqual(['10.5', '9.5', '9', '4']);
-        expect(view.asks.map(row => row.price)).toEqual(['11.5', '12.5', '30']);
-    });
-
-    // Not for a rebuild the stream forced. A gap means diffs were missed, and a
-    // level nobody has heard about since could have been taken — showing
-    // liquidity that is not there is the error worth clearing a book to avoid.
-    it('clears the far book for a rebuild the stream forced', () => {
+    // Every rebuild is one the stream forced — a gap, a crossing, a reconnect
+    // — since the desk stopped re-reading pages of its own accord. Diffs were
+    // missed, and a level nobody has heard about since could have been taken:
+    // the book starts again from the page the snapshot names.
+    it('clears the whole book for every rebuild', () => {
         const book = banded();
         book.push(delta({
             firstUpdateId: '102',
@@ -649,34 +485,27 @@ describe('the band a snapshot proves', () => {
         book.beginBootstrap();
         expect(book.bids.size).toBe(0);
         expect(book.asks.size).toBe(0);
-    });
-
-    // The best price can rest outside the band now that the book keeps what the
-    // stream restates. When it does, the band describes somewhere the market has
-    // left, and nothing around the market is proven by it — so neither question
-    // may be answered from its edges.
-    it('answers neither question from a band the market has traded out of', () => {
-        const book = banded();
-        book.push(delta({
-            firstUpdateId: '102',
-            finalUpdateId: '103',
-            previousFinalUpdateId: '101',
-            // Every level the page proved is taken, and the market re-forms above
-            // the ceiling the page reached.
-            bids: [['10.00', '0'], ['9.00', '0'], ['13.00', '1.0']],
-            asks: [['11.00', '0'], ['12.00', '0'], ['14.00', '1.0']],
-        }), 200);
-        expect(book.coversRange('0.1')).toBe(false);
-        expect(book.holdsMarket()).toBe(false);
+        expect(book.band).toBeNull();
+        expect(book.bootstrap({
+            lastUpdateId: '200',
+            bids: [['10.50', '2.0'], ['9.50', '3.0']],
+            asks: [['11.50', '4.0'], ['12.50', '5.0']],
+        }).live).toBe(true);
+        const view = book.toRendererRows();
+        expect(view.bids.map(row => row.price)).toEqual(['10.5', '9.5']);
+        expect(view.asks.map(row => row.price)).toEqual(['11.5', '12.5']);
     });
 
     it('forgets the band when the book is rebuilt or stopped', () => {
         const book = banded();
-        expect(book.coversRange('1')).toBe(true);
+        expect(book.band).not.toBeNull();
         book.beginBootstrap();
-        expect(book.coversRange('1')).toBe(false);
+        expect(book.band).toBeNull();
+        // Ahead of every diff the stream has shown this book, so it bridges.
+        expect(book.bootstrap(snapshot({ lastUpdateId: '200' })).live).toBe(true);
+        expect(book.band).not.toBeNull();
         book.stop();
-        expect(book.coversRange('1')).toBe(false);
+        expect(book.band).toBeNull();
     });
 });
 
@@ -941,47 +770,28 @@ describe('what the book retains', () => {
     // retention of 20 000 a side against a bound of 32 768, a frame cost 26.5 ms
     // where a bound with room cost 10.1 ms. The cache was the cliff, not the book.
     //
-    // The two numbers cannot reference each other: the retention ceiling lives
-    // here, in the process that owns the book, and the cache lives in the pass
-    // this shares with the panel, which this file already imports. So the tie is
-    // asserted rather than imported, and a retention raised without the cache
-    // fails here instead of quietly costing four times what it used to.
-    //
-    // Both sides, and a quantity beside every price: four strings per level of
-    // one side, and the contract the operator switched from is still in there.
-    //
-    // Against the ceiling *plus its slack*, which is what a side actually holds.
-    // The ceiling is not an exact count — eviction is deferred until a side runs
-    // that far past it, which is the whole reason a diff at the bound costs 332
-    // microseconds instead of 811 — so a tie asserted against the ceiling alone
-    // is short by the slack, and it is the number a side reaches that the cache
-    // has to hold.
-    it('remembers enough parsed decimals to hold the book it retains', () => {
-        const {
-            RETAINED_LEVELS_PER_SIDE,
-            EVICTION_SLACK,
-        } = FUTURES_WORKSTATION_ORDER_BOOK_LIMITS;
+    // The book keeps every level the exchange states (2026-09-03), so there is no
+    // ceiling to tie the cache to; it is sized for the side a session was
+    // measured to reach, with room for both sides, both strings a level, and the
+    // contract the operator switched from.
+    it('remembers enough parsed decimals to hold the book a session reaches', () => {
         expect(FUTURES_BOOK_PARSED_DECIMAL_BOUND)
-            .toBeGreaterThanOrEqual((RETAINED_LEVELS_PER_SIDE + EVICTION_SLACK) * 4);
+            .toBeGreaterThanOrEqual(FUTURES_BOOK_PARSED_LEVELS_PER_SIDE * 2 * 2 * 2);
     });
 
-    // Past the ceiling the furthest levels go first. Evicting from the near edge
-    // would drop exactly what a coarse step is read for, and the ceiling is a
-    // guard against a pathological stream rather than a reading of any market —
-    // measured, a whole contract's book is a few thousand levels a side.
-    it('evicts from the far edge when the retained side passes its ceiling', () => {
-        const { RETAINED_LEVELS_PER_SIDE, DIFF_LEVELS_PER_SIDE } = FUTURES_WORKSTATION_ORDER_BOOK_LIMITS;
+    // The operator's rule: keep everything, show what the interface asks for. A
+    // ceiling of ten thousand a side stood here to bound a per-delivery sort of
+    // the whole side; the side keeps its own order now, and nothing is evicted.
+    it('keeps every level past any former ceiling, nearest and furthest alike', () => {
+        const { DIFF_LEVELS_PER_SIDE } = FUTURES_WORKSTATION_ORDER_BOOK_LIMITS;
         const book = bookFromLevels([['100000.0', '1']], [['100001.0', '1']]);
         let updateId = 100n;
-        // Enough diffs to carry the side past the ceiling, and no more: trimming
-        // holds it there, so a loop waiting for it to grow would never end.
-        const rounds = Math.ceil(RETAINED_LEVELS_PER_SIDE / DIFF_LEVELS_PER_SIDE) + 1;
+        const rounds = Math.ceil(12_000 / DIFF_LEVELS_PER_SIDE);
         for (let pushed = 0; pushed < rounds; pushed += 1) {
             const first = updateId + 1n;
-            const final = updateId + 1n;
             expect(book.push(delta({
                 firstUpdateId: String(first),
-                finalUpdateId: String(final),
+                finalUpdateId: String(first),
                 previousFinalUpdateId: String(updateId),
                 bids: Array.from({ length: DIFF_LEVELS_PER_SIDE }, (_, index) => [
                     `${99999 - (pushed * DIFF_LEVELS_PER_SIDE) - index}.0`,
@@ -989,18 +799,17 @@ describe('what the book retains', () => {
                 ]),
                 asks: [],
             }), 1).applied).toBe(true);
-            updateId = final;
+            updateId = first;
         }
-        // Cut back to the ceiling once the slack above it is crossed, so the
-        // side sits between the two rather than paying an eviction pass per diff.
-        expect(book.bids.size).toBeGreaterThanOrEqual(RETAINED_LEVELS_PER_SIDE);
-        expect(book.bids.size).toBeLessThanOrEqual(
-            RETAINED_LEVELS_PER_SIDE + FUTURES_WORKSTATION_ORDER_BOOK_LIMITS.EVICTION_SLACK,
-        );
-        // The best bid — the level the market is at — survived; the deepest one
-        // pushed did not.
+        expect(book.bids.size).toBe(1 + (rounds * DIFF_LEVELS_PER_SIDE));
         expect(book.bids.has('100000')).toBe(true);
-        expect(book.bids.has(`${99999 - (rounds * DIFF_LEVELS_PER_SIDE) + 1}`)).toBe(false);
+        expect(book.bids.has(`${99999 - (rounds * DIFF_LEVELS_PER_SIDE) + 1}`)).toBe(true);
+        // And the side is still in order, best first, without a sort.
+        const prices = book.bids.sorted.map(entry => entry.price);
+        expect(prices[0]).toBe('100000');
+        expect(prices.at(-1)).toBe(`${99999 - (rounds * DIFF_LEVELS_PER_SIDE) + 1}`);
+        expect(book.toRendererRows({ rows: 3 }).bids.map(row => row.price))
+            .toEqual(['100000', '99999', '99998']);
     });
 
     it('keeps every level a diff adds while the retained side is under its ceiling', () => {
@@ -1119,77 +928,6 @@ describe('the rows say which of them are whole', () => {
 // was wide leaves the whole of one side stranded on the wrong side of the new
 // one, and a bid resting above the asks is not a book, it is a contradiction the
 // book has to fail closed on.
-describe('a re-centre after the market has run', () => {
-    it('retires a carried level that the new market has moved past', () => {
-        const book = new FuturesWorkstationOrderBook();
-        expect(book.bootstrap(snapshot({
-            bids: [['100', '1'], ['99', '1']],
-            asks: [['101', '1'], ['102', '1']],
-        })).live).toBe(true);
-        // The stream reaches further out on both sides than the page did.
-        expect(book.push(delta({
-            firstUpdateId: '101',
-            finalUpdateId: '101',
-            previousFinalUpdateId: '100',
-            bids: [['95', '5']],
-            asks: [['110', '5']],
-        }), 1).applied).toBe(true);
-
-        // The market crashes past everything the old page covered, and the desk
-        // re-reads the page where the market is now, carrying the far book.
-        book.beginBootstrap({ keepFarBook: true });
-        expect(book.bootstrap({
-            lastUpdateId: '200',
-            bids: [['50', '1'], ['49', '1']],
-            asks: [['51', '1'], ['52', '1']],
-        }).live).toBe(true);
-
-        // Every carried bid rested above the asks that exist now, so none of them
-        // could still be resting — including the one at 95, which the old page
-        // never reached and which the crash went straight through. The carried
-        // asks are untouched, and that is the point of the rule being about the
-        // market rather than about the band: 101 and 102 are far above where the
-        // market is now, which is exactly where a resting ask is allowed to be.
-        const view = book.toRendererRows({ rows: 64 });
-        expect(view.bids.map(row => row.price)).toEqual(['50', '49']);
-        expect(view.asks.map(row => row.price)).toEqual(['51', '52', '101', '102', '110']);
-        expect(book.phase).toBe(FUTURES_WORKSTATION_ORDER_BOOK_PHASES.LIVE);
-    });
-
-    // The other direction, and the reason the rule is stated against the
-    // snapshot's own best prices rather than against its band: an ask left below
-    // the market after a run up would cross it just as surely.
-    it('retires a carried ask the market has run above', () => {
-        const book = new FuturesWorkstationOrderBook();
-        expect(book.bootstrap(snapshot({
-            bids: [['100', '1']],
-            asks: [['101', '1']],
-        })).live).toBe(true);
-        expect(book.push(delta({
-            firstUpdateId: '101',
-            finalUpdateId: '101',
-            previousFinalUpdateId: '100',
-            bids: [['90', '5']],
-            asks: [['105', '5']],
-        }), 1).applied).toBe(true);
-
-        book.beginBootstrap({ keepFarBook: true });
-        expect(book.bootstrap({
-            lastUpdateId: '200',
-            bids: [['200', '1']],
-            asks: [['201', '1']],
-        }).live).toBe(true);
-
-        // Both carried asks were below the market that exists now, so neither
-        // could still be resting. The carried bids stay: far below the market is
-        // where a bid belongs.
-        const view = book.toRendererRows({ rows: 64 });
-        expect(view.asks.map(row => row.price)).toEqual(['201']);
-        expect(view.bids.map(row => row.price)).toEqual(['200', '100', '90']);
-        expect(book.phase).toBe(FUTURES_WORKSTATION_ORDER_BOOK_PHASES.LIVE);
-    });
-});
-
 describe('how far the book states it reaches', () => {
     const sideOf = (count, descending, mid = 1_000) => Array.from(
         { length: count },
@@ -1205,7 +943,7 @@ describe('how far the book states it reaches', () => {
         const bids = sideOf(300, true);
         const asks = sideOf(300, false);
         const plain = bookFromLevels(bids, asks)
-            .toRendererRows({ rows: 14, atDeepestPage: true }).reach;
+            .toRendererRows({ rows: 14 }).reach;
         // The same book, plus one order a thousand times away from the market on
         // each side — legal, real, and nothing anybody is trading against.
         const book = bookFromLevels(bids, asks);
@@ -1216,7 +954,7 @@ describe('how far the book states it reaches', () => {
             bids: [['1', '1']],
             asks: [['1000000', '1']],
         }), 1).applied).toBe(true);
-        const reach = book.toRendererRows({ rows: 14, atDeepestPage: true }).reach;
+        const reach = book.toRendererRows({ rows: 14 }).reach;
         // The far order sits 999 away on the bid side and 999 000 away on the
         // ask. The reading does not follow it: one more level in a side moves
         // the boundary out by one level, and by nothing else.
@@ -1231,16 +969,15 @@ describe('how far the book states it reaches', () => {
             [['100', '1'], ['98', '1']],
             [['101', '1'], ['104', '1']],
         );
-        expect(book.toRendererRows({ rows: 14, atDeepestPage: true }).reach)
+        expect(book.toRendererRows({ rows: 14 }).reach)
             .toEqual({ below: '2', above: '3' });
     });
 
-    // Only once no deeper page can be bought: before then a wider near book is
-    // one read away, and a ladder cut here would stop the operator selecting the
-    // step that buys it.
-    it('states nothing while a deeper page can still be bought', () => {
+    // On the first delivery and every one after: there is no deeper page to
+    // wait for, and the ladder is cut against the book the desk holds.
+    it('states the reach on the first delivery', () => {
         const book = bookFromLevels([['100', '1'], ['98', '1']], [['101', '1']]);
-        expect(book.toRendererRows({ rows: 14 }).reach).toBeNull();
+        expect(book.toRendererRows({ rows: 14 }).reach).toEqual({ below: '2', above: '0' });
     });
 });
 
@@ -1289,15 +1026,29 @@ describe('what a side remembers about its own prices', () => {
     // it empties partway through every pass and the next pass re-parses the book
     // it just forgot. The two numbers are set independently here, so this states
     // the relation between them rather than trusting it to stay true.
-    it('remembers more prices than a side can ever hold', () => {
-        const { RETAINED_LEVELS_PER_SIDE, EVICTION_SLACK, DIFF_LEVELS_PER_SIDE } =
-            FUTURES_WORKSTATION_ORDER_BOOK_LIMITS;
-        const book = new FuturesWorkstationOrderBook();
-        // The most a side can hold at once: the ceiling, the slack eviction is
-        // allowed to run past it by, and one diff's worth applied before the
-        // eviction pass runs.
-        const largestSide = RETAINED_LEVELS_PER_SIDE + EVICTION_SLACK + DIFF_LEVELS_PER_SIDE;
-        expect(book.bids.parsedBound).toBeGreaterThan(largestSide);
+    it('remembers more prices than the side holds, however large it grows', () => {
+        const { DIFF_LEVELS_PER_SIDE } = FUTURES_WORKSTATION_ORDER_BOOK_LIMITS;
+        const book = bookFromLevels([['500000.0', '1']], [['500001.0', '1']]);
+        let updateId = 100n;
+        // Past the cache's floor by a wide margin: the bound follows the side.
+        const rounds = Math.ceil(20_000 / DIFF_LEVELS_PER_SIDE);
+        for (let pushed = 0; pushed < rounds; pushed += 1) {
+            const first = updateId + 1n;
+            expect(book.push(delta({
+                firstUpdateId: String(first),
+                finalUpdateId: String(first),
+                previousFinalUpdateId: String(updateId),
+                bids: Array.from({ length: DIFF_LEVELS_PER_SIDE }, (_, index) => [
+                    `${499999 - (pushed * DIFF_LEVELS_PER_SIDE) - index}.0`,
+                    '1',
+                ]),
+                asks: [],
+            }), 1).applied).toBe(true);
+            updateId = first;
+        }
+        expect(book.bids.size).toBeGreaterThan(20_000);
+        expect(book.bids.parsedBound).toBeGreaterThan(book.bids.size);
+        expect(book.bids.parsed.size).toBeGreaterThanOrEqual(book.bids.size);
     });
 
     // The cache is a pure function of a price string, so it can never hold a
@@ -1308,7 +1059,6 @@ describe('what a side remembers about its own prices', () => {
     // A guard: it passes against the tree before this change, where nothing was
     // remembered and so nothing could be forgotten wrongly.
     it('delivers every held level after the market has walked past its remembered prices', () => {
-        const { RETAINED_LEVELS_PER_SIDE } = FUTURES_WORKSTATION_ORDER_BOOK_LIMITS;
         const book = bookFromLevels([['50000.0', '1']], [['50001.0', '1']]);
         let updateId = 100n;
         // Every round names prices the book has never seen and abandons the last
@@ -1330,10 +1080,7 @@ describe('what a side remembers about its own prices', () => {
             updateId = first;
         }
         const held = Array.from(book.bids.keys());
-        expect(held.length).toBe(Math.min(
-            RETAINED_LEVELS_PER_SIDE + FUTURES_WORKSTATION_ORDER_BOOK_LIMITS.EVICTION_SLACK,
-            1 + (rounds * perRound),
-        ));
+        expect(held.length).toBe(1 + (rounds * perRound));
         // Delivered ungrouped, the rows are the levels held, nearest first, and
         // none of them has gone missing behind a forgotten parse.
         const rows = book.toRendererRows({ rows: 64 }).bids.map(row => row.price);
@@ -1342,5 +1089,112 @@ describe('what a side remembers about its own prices', () => {
             .slice(0, 64)
             .map(price => normalizeFuturesWorkstationDecimal(price));
         expect(rows).toEqual(nearest);
+    });
+});
+
+// The side keeps its own order as levels come and go, which is what lets the
+// book keep everything: a delivery walks the order from the best and stops at
+// the rows it draws, where it used to sort the whole side for every delivery.
+describe('a side kept in order', () => {
+    const shuffled = (prices) => {
+        const out = [...prices];
+        let seed = 11;
+        for (let index = out.length - 1; index > 0; index -= 1) {
+            seed = (seed * 48_271) % 2_147_483_647;
+            const swap = seed % (index + 1);
+            [out[index], out[swap]] = [out[swap], out[index]];
+        }
+        return out;
+    };
+
+    it('places every level where a full sort would, at mixed precision and with removals', () => {
+        const book = bookFromLevels([['100', '1']], [['101', '1']]);
+        const bidPrices = shuffled(['99.5', '99.55', '99.500001', '98', '97.25', '99.499999', '90', '99.9']);
+        const askPrices = shuffled(['101.5', '101.55', '101.500001', '102', '103.25', '101.499999', '110', '101.1']);
+        let updateId = 100n;
+        for (const [bid, ask] of bidPrices.map((price, index) => [price, askPrices[index]])) {
+            const first = updateId + 1n;
+            expect(book.push(delta({
+                firstUpdateId: String(first),
+                finalUpdateId: String(first),
+                previousFinalUpdateId: String(updateId),
+                bids: [[bid, '1']],
+                asks: [[ask, '1']],
+            }), 1).applied).toBe(true);
+            updateId = first;
+        }
+        // Then take two out of the middle of each side.
+        const first = updateId + 1n;
+        expect(book.push(delta({
+            firstUpdateId: String(first),
+            finalUpdateId: String(first),
+            previousFinalUpdateId: String(updateId),
+            bids: [['99.5', '0'], ['98', '0']],
+            asks: [['101.5', '0'], ['102', '0']],
+        }), 1).applied).toBe(true);
+        const sortedBids = Array.from(book.bids.keys())
+            .sort((left, right) => -compareFuturesWorkstationDecimals(left, right));
+        const sortedAsks = Array.from(book.asks.keys()).sort(compareFuturesWorkstationDecimals);
+        expect(book.bids.sorted.map(entry => entry.price)).toEqual(sortedBids);
+        expect(book.asks.sorted.map(entry => entry.price)).toEqual(sortedAsks);
+        expect(book.bids.bestPrice()).toBe(sortedBids[0]);
+        expect(book.asks.bestPrice()).toBe(sortedAsks[0]);
+        expect(book.toRendererRows({ rows: 64 }).bids.map(row => row.price)).toEqual(sortedBids);
+        expect(book.toRendererRows({ rows: 64 }).asks.map(row => row.price)).toEqual(sortedAsks);
+    });
+
+    // A quantity that changes moves nothing in the order; only a price arriving
+    // or leaving does.
+    it('leaves the order alone when only a quantity changes', () => {
+        const book = bookFromLevels([['100', '1'], ['99', '1']], [['101', '1'], ['102', '1']]);
+        const before = book.bids.sorted;
+        expect(book.push(delta({
+            firstUpdateId: '101',
+            finalUpdateId: '101',
+            previousFinalUpdateId: '100',
+            bids: [['99', '7']],
+            asks: [],
+        }), 1).applied).toBe(true);
+        expect(book.bids.sorted).toBe(before);
+        expect(book.toRendererRows().bids.map(row => [row.price, row.quantity]))
+            .toEqual([['100', '1'], ['99', '7']]);
+    });
+});
+
+// A correctly chained diff cannot cross the exchange's own book, so a crossing
+// is evidence of something else — and on 2026-09-02 a hundred of them were
+// recorded with nothing to read them by. The refusal carries the identities of
+// the diff that crossed the book and how many levels stand across the market.
+describe('what a crossed book leaves behind', () => {
+    it('names the diff and counts the levels across the market, and no price', () => {
+        const book = bookFromLevels(
+            [['100', '1'], ['99', '1'], ['98', '1']],
+            [['101', '1'], ['102', '1']],
+        );
+        let error = null;
+        try {
+            book.push(delta({
+                firstUpdateId: '101',
+                finalUpdateId: '102',
+                previousFinalUpdateId: '100',
+                // A bid posted above both resting asks: two asks now stand at or
+                // below the best bid, and the bid itself stands above the best ask.
+                bids: [['103', '1']],
+                asks: [],
+            }), 1);
+        } catch (thrown) {
+            error = thrown;
+        }
+        expect(error).toBeInstanceOf(FuturesWorkstationOrderBookError);
+        expect(error.code).toBe('CROSSED_ORDER_BOOK');
+        expect(error.evidence).toEqual({
+            lastUpdateId: '102',
+            firstUpdateId: '101',
+            finalUpdateId: '102',
+            previousFinalUpdateId: '100',
+            crossedLevels: 3,
+        });
+        expect(JSON.stringify(error.evidence)).not.toMatch(/10[0-3]"?,\s*"1"/);
+        expect(book.phase).toBe(FUTURES_WORKSTATION_ORDER_BOOK_PHASES.RESYNC_REQUIRED);
     });
 });

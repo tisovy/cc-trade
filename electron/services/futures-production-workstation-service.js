@@ -90,14 +90,6 @@ export const FUTURES_PRODUCTION_WORKSTATION_BOOK_RECOVERY = Object.freeze({
 // A ceiling the market trips, it trips repeatedly: the frames that reach it come
 // from one burst. The refusal is stated once per window, so the reason line
 // carries the fact rather than a count of it.
-// The recoveries the desk asks for while the stream is still carrying: the page
-// is re-read because it no longer covers the rows or no longer sits under the
-// market, not because anything was missed. Everything else that rebuilds a book
-// rebuilds it because the stream broke.
-export const FUTURES_PRODUCTION_WORKSTATION_RECENTRE_CODES = Object.freeze(
-    new Set(['DEPTH_RANGE_SHORT', 'DEPTH_BAND_WALKED']),
-);
-
 export const FUTURES_PRODUCTION_WORKSTATION_FRAME_REFUSAL = Object.freeze({
     REPORT_COOLDOWN_MS: 5_000,
 });
@@ -139,6 +131,25 @@ const DEPTH_RESYNC_CODES = Object.freeze({
 const depthResyncCode = reason => (
     DEPTH_RESYNC_CODES[reason] ?? 'DEPTH_SEQUENCE_GAP'
 );
+
+// What a crossed book left for the record: the identities of the diff that
+// crossed it and how many levels stand across the market. Identities and
+// counts only — the record refuses a price — and nothing for an error that
+// carries none.
+const bookEvidenceOf = (error) => {
+    const evidence = error?.evidence;
+    if (evidence === null || typeof evidence !== 'object') return {};
+    const identity = value => (typeof value === 'string' && /^\d{1,64}$/.test(value) ? value : null);
+    return {
+        lastUpdateId: identity(evidence.lastUpdateId),
+        firstUpdateId: identity(evidence.firstUpdateId),
+        finalUpdateId: identity(evidence.finalUpdateId),
+        previousFinalUpdateId: identity(evidence.previousFinalUpdateId),
+        crossedLevels: Number.isSafeInteger(evidence.crossedLevels) && evidence.crossedLevels >= 0
+            ? evidence.crossedLevels
+            : null,
+    };
+};
 
 const safeCode = error => (
     typeof error?.code === 'string' && /^[A-Z0-9_-]{1,96}$/.test(error.code)
@@ -295,17 +306,11 @@ export class FuturesProductionWorkstationService {
         this.tapeSettings = FUTURES_WORKSTATION_DEFAULT_TAPE_SETTINGS;
     }
 
-    depthPageLimit(session) {
-        const pages = FUTURES_PRODUCTION_WORKSTATION_DEPTH_PAGES;
-        return pages[Math.min(session.depthPage, pages.length - 1)].limit;
-    }
-
-    // Whether the ladder of pages has anything left above the one this session is
-    // on. What the panel does with the answer is end its grouping ladder where the
-    // exchange's book ends, so it is asked here — the book itself knows nothing
-    // about pages, and the panel knows nothing about either.
-    depthPageExhausted(session) {
-        return session.depthPage >= FUTURES_PRODUCTION_WORKSTATION_DEPTH_PAGES.length - 1;
+    // The one page a book is ever read at: the deepest a single read returns.
+    // It is read once per bootstrap and once per rebuild the stream forced, and
+    // for nothing else (2026-09-03) — the stream carries the book from there.
+    depthPageLimit() {
+        return FUTURES_PRODUCTION_WORKSTATION_DEPTH_PAGES.at(-1).limit;
     }
 
     // Every book that crosses to the renderer is built here. Six paths deliver one
@@ -316,7 +321,6 @@ export class FuturesProductionWorkstationService {
         return session.orderBook.toRendererRows({
             step: session.depthStep,
             rows: session.depthRows,
-            atDeepestPage: this.depthPageExhausted(session),
         });
     }
 
@@ -332,12 +336,11 @@ export class FuturesProductionWorkstationService {
     emitDepthNow(session, {
         state = undefined,
         payload = undefined,
-        shortfall = null,
     } = {}) {
         if (!this.isHeld(session) || !this.isShown(session)) return false;
         const view = payload === undefined ? this.depthView(session) : payload;
         if (view === null || view === undefined) return false;
-        const deliveryState = state ?? this.depthDeliveryState(session, shortfall);
+        const deliveryState = state ?? this.depthDeliveryState(session);
         const emitted = this.emitResource(
             session,
             FUTURES_WORKSTATION_RESOURCES.DEPTH,
@@ -361,27 +364,23 @@ export class FuturesProductionWorkstationService {
         immediate = false,
         state = undefined,
         payload = undefined,
-        shortfall = null,
     } = {}) {
         if (!this.isHeld(session) || !this.isShown(session)) return false;
-        const deliveryState = state ?? this.depthDeliveryState(session, shortfall);
+        const deliveryState = state ?? this.depthDeliveryState(session);
         // Immediacy belongs to the change of state, not to the state's value.
         // The book becoming stale — or live again — is operational news the
         // bound must not sit on. But a book that merely stays stale is not
-        // news, and it is not rare either: a band bought at the deepest page
-        // and short of the rows reports the same shortfall for the rest of the
-        // session, and keying this bypass on the value let exactly that book
-        // skip the bound on every diff — a full-book sort ten times a second,
-        // for as long as the contract stayed open, in the loaded regime the
-        // bound was built for. So a state that matches the one last delivered
-        // rides the routine bound, stale included, and a state that differs
-        // goes out on its own instant.
+        // news, and it is not rare either: a gap being recovered on its
+        // cooldown reports stale for as long as the round takes, and keying
+        // this bypass on the value let a stale book skip the bound on every
+        // diff. So a state that matches the one last delivered rides the
+        // routine bound, stale included, and a state that differs goes out on
+        // its own instant.
         if (immediate || deliveryState !== session.lastDepthDeliveredState) {
             this.clearPendingDepthDelivery(session);
             return this.emitDepthNow(session, {
                 state: deliveryState,
                 payload,
-                shortfall,
             });
         }
 
@@ -394,7 +393,6 @@ export class FuturesProductionWorkstationService {
             return this.emitDepthNow(session, {
                 state: deliveryState,
                 payload,
-                shortfall,
             });
         }
 
@@ -402,7 +400,6 @@ export class FuturesProductionWorkstationService {
             requestId: session.requestId,
             generation: session.generation,
             state: deliveryState,
-            shortfall,
         });
         if (session.pendingDepthTimer !== null) return false;
         session.pendingDepthTimer = this.clock.setTimeout(() => {
@@ -416,26 +413,10 @@ export class FuturesProductionWorkstationService {
                 || session.generation !== pending.generation) return;
             this.deliverDepth(session, {
                 state: pending.state,
-                shortfall: pending.shortfall,
             });
         }, FUTURES_PRODUCTION_WORKSTATION_FRESHNESS.DEPTH_DELIVERY_MS - elapsed);
         session.pendingDepthTimer?.unref?.();
         return false;
-    }
-
-    // Up by however much is short, never back down on its own: a market that
-    // walks out of a band it has already outgrown would otherwise buy the same
-    // page again and again. `factor` is how many times deeper the band has to
-    // be, so a step three sizes coarser buys its page in one read.
-    deepenDepthPage(session, factor = 1) {
-        const pages = FUTURES_PRODUCTION_WORKSTATION_DEPTH_PAGES;
-        if (session.depthPage >= pages.length - 1) return false;
-        const wanted = pages[session.depthPage].limit * Math.max(1, factor);
-        const target = pages.findIndex(page => page.limit >= wanted);
-        session.depthPage = target < 0
-            ? pages.length - 1
-            : Math.max(session.depthPage + 1, target);
-        return true;
     }
 
     async handleRequest(raw, { emit } = {}) {
@@ -588,10 +569,11 @@ export class FuturesProductionWorkstationService {
         }
     }
 
-    // The rows on screen reach this far past the best price. If the book on hand
-    // cannot prove that far, a deeper page is bought and bridged — the operator
-    // asked for the range by choosing the step, so the weight is paid for
-    // something asked for.
+    // The rows on screen reach this far past the best price. The reading bounds
+    // what is delivered and nothing else: the book in hand is the whole book
+    // the stream has stated, and a step that reaches past the page the
+    // snapshot proved draws the levels the stream has restated out there,
+    // marked as such.
     configureDepth(request) {
         const session = this.shown;
         if (!session || !this.isHeld(session) || session.requestId !== request.requestId) {
@@ -599,139 +581,27 @@ export class FuturesProductionWorkstationService {
         }
         applyReading(session, request);
         if (!session.bootstrapped) return;
-        // The reading bounds the delivery, so a new reading is a new delivery —
-        // from the book already in hand, since the trim was never on what is
-        // retained. Waiting for the next diff would answer a coarsened step
-        // within a diff or two on a busy contract and never on a quiet one,
-        // which is the contract most likely to be read at a coarse step.
-        const shortfall = session.orderBook.rangeShortfall(session.depthRange);
-        this.deliverDepth(session, { immediate: true, shortfall });
-        this.ensureDepthCovers(session, shortfall);
+        // A new reading is a new delivery, from the book already in hand.
+        // Waiting for the next diff would answer a coarsened step within a
+        // diff or two on a busy contract and never on a quiet one, which is
+        // the contract most likely to be read at a coarse step.
+        this.deliverDepth(session, { immediate: true });
     }
 
     /**
      * The state a book is delivered in.
      *
-     * A book that cannot prove the rows on screen is not live, whatever the
-     * socket is doing. What came back from the desk was a full ask ladder over
-     * seven bid rows under a green badge: the book was stating correctly that it
-     * could not prove the bid side, and the badge was stating that everything
-     * was fine. The rows it can prove are still delivered — they are the market,
-     * and they are exact — but they are delivered as what they are.
-     *
-     * The shortfall is passed in wherever the caller has already measured it:
-     * one reading per frame, not one per question asked about the frame.
-     *
-     * A book that no longer holds the market is not live either, and that is a
-     * separate question from the reading: with no reading stated the shortfall
-     * is zero by definition, so a book the market had walked out of was being
-     * badged live on exactly the ground that nothing had been asked of it. It
-     * mattered for at most a repair cooldown while the desk held one contract.
-     * It matters for as long as a contract goes unselected now that it holds
-     * eight, because the repair is the shown contract's alone.
+     * A book the stream is carrying is live. It is stale while a gap is being
+     * recovered on its cooldown, or while a bootstrap has not bridged — the
+     * rows it can prove are still delivered, and they are delivered as what
+     * they are. Nothing about the rows on screen makes a book stale any more:
+     * a step that reaches past the snapshot's page draws what the stream has
+     * restated out there, marked per row as beyond the page.
      */
-    depthDeliveryState(session, shortfall = null) {
-        if (session.staleResources.has(FUTURES_WORKSTATION_RESOURCES.DEPTH)) {
-            return FUTURES_WORKSTATION_STATES.STALE;
-        }
-        const short = shortfall === null
-            ? session.orderBook.rangeShortfall(session.depthRange)
-            : shortfall;
-        return short === 0 && session.orderBook.holdsMarket()
-            ? FUTURES_WORKSTATION_STATES.LIVE
-            : FUTURES_WORKSTATION_STATES.STALE;
-    }
-
-    /**
-     * Buy a deeper page, or the same page again, when the book on hand stops
-     * proving the rows on screen.
-     *
-     * Only for the contract that has rows on screen. A reading is a property of
-     * the panel drawing the book, not of the book — a held contract's reading is
-     * whatever the panel last said about it, and the market walking out of that
-     * band costs a REST snapshot every five seconds for a book nobody is
-     * looking at. The desk's own journal is unambiguous about the size of that:
-     * `book-recovery:DEPTH_RANGE_SHORT` is the only fault it recorded on
-     * 2026-08-12 and 2026-08-13 — 33 and 155 of them, peaking at 34 in an hour,
-     * on the one contract the desk held at the time. Multiplied by a pool of
-     * eight, that is the shown contract queueing behind seven books nobody
-     * asked about, on a read budget of 600 a minute whose own sizing note says
-     * it was measured against one contract.
-     *
-     * Nothing is lost by waiting: a selection measures the shortfall and buys
-     * the page then, and until it lands the book is delivered as `stale`, which
-     * is what it is.
-     */
-    ensureDepthCovers(session, shortfall = null) {
-        if (!this.isHeld(session)
-            || !this.isShown(session)
-            || !session.bootstrapped
-            || session.reconnectTimer !== null
-            || session.bookRecovering) return;
-        // Whether the band still holds the market is asked whether or not the
-        // panel has stated a reading: it is the market's question rather than the
-        // step's, and a book no range has been stated for still empties on the
-        // side the market walks toward.
-        const offCentre = !session.orderBook.holdsMarket();
-        const short = session.depthRange === null
-            ? 0
-            : (shortfall === null
-                ? session.orderBook.rangeShortfall(session.depthRange)
-                : shortfall);
-        if (short === 0 && !offCentre) return;
-        // Two different things end up here, and only one of them is worth a
-        // deeper page. A page that falls short of the reading on either side buys
-        // a deeper one — and at the deepest page the exchange publishes there is
-        // none to buy, so the book keeps showing what it can prove rather than
-        // re-reading the same page forever. A page that reached the rows on both
-        // sides when it was read needs no deeper one at all: the market has
-        // walked out from between its edges, and the same page re-read is a band
-        // centred where the market is now. That is the case every page must
-        // answer, the deepest one included — a book that stopped covering its
-        // rows and could not ask again would stay short for the session.
-        //
-        // An unmeasurable shortfall is the second case: a side emptied by the
-        // walk states no distance to size a page against, so it is re-read as it
-        // is and sized on the next reading, which will have both sides.
-        //
-        // And a third, which the shortfall cannot state at all. It measures the
-        // band against the rows on screen, so it says nothing about where inside
-        // the band the market is now — and what it does say is fixed at the
-        // moment the page was read, because it is measured against what that page
-        // proved. A band bought at the deepest page and short of the rows reports
-        // the same shortfall above 1 for the rest of the session, whatever the
-        // market does. Read from that number alone the desk asks for the deeper
-        // page that does not exist, finds none, and returns — and it was
-        // returning from bands the market had walked clean out of, on every diff,
-        // for as long as the contract stayed open. `holdsMarket` is the question
-        // the shortfall was never asking, and it moves when the market does at
-        // every page depth.
-        const deepened = Number.isFinite(short) && short > 1 && this.deepenDepthPage(session, short);
-        if (!offCentre && Number.isFinite(short) && short > 1 && !deepened) return;
-        const now = this.observedNow(session);
-        // Only the re-read is backed off, and for the reason a recovery is:
-        // every diff landing on a book the market has walked out of would ask
-        // for the same page again. A deepening is bounded by the ladder itself —
-        // four rungs, ratcheting one way — so making it wait was making the
-        // operator wait five seconds a rung for a book they were already trading
-        // against.
-        if (!deepened
-            && session.depthDeepenedAt !== null
-            && now - session.depthDeepenedAt
-                < FUTURES_PRODUCTION_WORKSTATION_BOOK_RECOVERY.COOLDOWN_MS) return;
-        session.depthDeepenedAt = now;
-        // The reason line names which of the two questions asked for the read.
-        // A deepening is always the reading's, and a read taken while the band
-        // still covers the rows is always the market's; between them the reading
-        // is named, because a page short of the rows is the condition worth
-        // seeing in the journal. Counting them apart is how the desk's own record
-        // shows whether a book that keeps re-reading is chasing the market or
-        // being read at a step the exchange does not publish deep enough for.
-        void this.recoverBook(
-            session,
-            !deepened && offCentre && short === 0 ? 'DEPTH_BAND_WALKED' : 'DEPTH_RANGE_SHORT',
-            { immediate: deepened },
-        );
+    depthDeliveryState(session) {
+        return session.staleResources.has(FUTURES_WORKSTATION_RESOURCES.DEPTH)
+            ? FUTURES_WORKSTATION_STATES.STALE
+            : FUTURES_WORKSTATION_STATES.LIVE;
     }
 
     configureTape(request) {
@@ -1025,7 +895,6 @@ export class FuturesProductionWorkstationService {
                 );
             }
         }
-        let shortfall = null;
         if (session.bootstrapped) {
             // An interval bootstrap in flight has already emptied the series and
             // will deliver the new one. Sending what is there now would draw an
@@ -1040,8 +909,7 @@ export class FuturesProductionWorkstationService {
                 this.emitCandleSeries(session, 'index', session.indexCandles, candleState);
             }
             if (session.header !== null) this.emitHeader(session, this.observedNow(session));
-            shortfall = session.orderBook.rangeShortfall(session.depthRange);
-            this.deliverDepth(session, { immediate: true, shortfall });
+            this.deliverDepth(session, { immediate: true });
             this.emitTrades(
                 session,
                 session.staleResources.has(FUTURES_WORKSTATION_RESOURCES.TRADES)
@@ -1058,7 +926,6 @@ export class FuturesProductionWorkstationService {
                 session.status.reasonCode,
             );
         }
-        if (session.bootstrapped) this.ensureDepthCovers(session, shortfall);
     }
 
     delay(durationMs) {
@@ -1178,8 +1045,6 @@ export class FuturesProductionWorkstationService {
             depthStep: openingFresh ? null : (previous?.depthStep ?? null),
             depthRows: openingFresh ? null : (previous?.depthRows ?? null),
             depthRange: openingFresh ? null : (previous?.depthRange ?? null),
-            depthPage: openingFresh ? 0 : (previous?.depthPage ?? 0),
-            depthDeepenedAt: null,
             // A rebuild inherits its place in the pool's order. Left at zero, a
             // background contract that reconnected would look like the one the
             // operator had gone longest without and be the first evicted.
@@ -1271,7 +1136,7 @@ export class FuturesProductionWorkstationService {
                 interval: session.interval,
                 signal: session.abortController.signal,
                 onMessage: raw => this.handleStreamFrame(session, raw),
-                onDisconnect: reason => this.handleDisconnect(session, reason),
+                onDisconnect: (reason, detail) => this.handleDisconnect(session, reason, detail),
                 onCandleDisconnect: reason => this.handleCandleDisconnect(session, reason),
                 onFrameRefused: reason => this.handleFrameRefused(session, reason),
             });
@@ -1369,7 +1234,7 @@ export class FuturesProductionWorkstationService {
             const depthValue = await this.transport.readDepthSnapshot({
                 symbol: session.symbol,
                 signal: bootstrapAbort.signal,
-                limit: this.depthPageLimit(session),
+                limit: this.depthPageLimit(),
             });
             if (!this.isHeld(session) || session.reconnectTimer !== null) return;
             session.bootstrapDepthSnapshot = normalizeFuturesWorkstationDepthSnapshot(
@@ -1400,7 +1265,7 @@ export class FuturesProductionWorkstationService {
                     symbol: session.symbol,
                     signal: bootstrapAbort.signal,
                     retryAttempt: depthRetryAttempt,
-                    limit: this.depthPageLimit(session),
+                    limit: this.depthPageLimit(),
                 });
                 if (!this.isHeld(session) || session.reconnectTimer !== null) return;
                 session.bootstrapDepthSnapshot = normalizeFuturesWorkstationDepthSnapshot(
@@ -1419,16 +1284,7 @@ export class FuturesProductionWorkstationService {
             for (const event of session.pendingEvents) this.applyStreamEvent(session, event);
             session.pendingEvents = [];
             if (!this.isHeld(session)) return;
-            if (bookResult.live) {
-                const shortfall = session.orderBook.rangeShortfall(session.depthRange);
-                this.deliverDepth(session, { immediate: true, shortfall });
-                // The reading travelled with the request that opened the
-                // contract, so the page that covers it is bought as soon as the
-                // first band is measured rather than on whichever diff happens
-                // to land first. On a contract quiet enough that none does, the
-                // difference is between half a second and never.
-                this.ensureDepthCovers(session, shortfall);
-            }
+            if (bookResult.live) this.deliverDepth(session, { immediate: true });
             session.reconnectAttempt = 0;
             this.emitStatus(session, FUTURES_WORKSTATION_STATES.LIVE, true, null);
             this.emitAggregateTiming(session, bookResult.live ? 'ok' : 'no-book');
@@ -1637,31 +1493,14 @@ export class FuturesProductionWorkstationService {
                     const recovered = session.staleResources.delete(
                         FUTURES_WORKSTATION_RESOURCES.DEPTH,
                     );
-                    // Asked before the frame is delivered, not after it: the
-                    // state a frame carries is decided by the book that frame
-                    // contains. Asked afterwards, the operator had already read
-                    // a short book badged live by the time the desk worked out
-                    // it was short.
-                    const shortfall = this.isShown(session)
-                        ? session.orderBook.rangeShortfall(session.depthRange)
-                        : null;
-                    // Crossing the book into rows is the one expensive thing a
-                    // diff causes, ten times a second on up to a thousand levels
-                    // a side. A session nobody is looking at does not do it —
-                    // the rows would be built and dropped at the emitter, and
-                    // the book they would be built from is delivered whole the
-                    // moment the contract is selected.
+                    // Crossing the book into rows is the one thing a diff costs
+                    // beyond applying it. A session nobody is looking at does
+                    // not do it — the rows would be built and dropped at the
+                    // emitter, and the book they would be built from is
+                    // delivered whole the moment the contract is selected.
                     if (this.isShown(session)) {
-                        this.deliverDepth(session, {
-                            immediate: recovered,
-                            shortfall,
-                        });
+                        this.deliverDepth(session, { immediate: recovered });
                     }
-                    // The market moves; the band the snapshot proved does not.
-                    // When it stops reaching as far as the rows on screen, the
-                    // answer is a fresh snapshot — not a book extended past what
-                    // it can account for.
-                    this.ensureDepthCovers(session, shortfall);
                 }
                 return;
             }
@@ -1675,14 +1514,19 @@ export class FuturesProductionWorkstationService {
             this.applyStreamEvent(session, event);
         } catch (error) {
             if (!this.isHeld(session)) return;
-            this.onInternalError({ phase: 'stream', code: safeCode(error), symbol: session.symbol });
+            this.onInternalError({
+                phase: 'stream',
+                code: safeCode(error),
+                symbol: session.symbol,
+                ...bookEvidenceOf(error),
+            });
             // The book's own refusal is a book problem wherever the frame came
             // from — the throw already names the resource, and needs no reading
             // of the frame. A depth frame the desk could not read is also only
             // a book problem. Only a frame from the streams the desk actually
             // trades on — price, candles, tape — is worth the whole session.
             if (error instanceof FuturesWorkstationOrderBookError) {
-                void this.recoverBook(session, safeCode(error));
+                void this.recoverBook(session, safeCode(error), { evidence: bookEvidenceOf(error) });
                 return;
             }
             if (isDepthStreamFrame(raw)) {
@@ -1702,19 +1546,13 @@ export class FuturesProductionWorkstationService {
      * so; the desk stays live around it. A recovery that fails leaves the book
      * stale rather than escalating: nothing else on the desk depends on it.
      */
-    async recoverBook(session, reasonCode, { immediate = false } = {}) {
+    async recoverBook(session, reasonCode, { immediate = false, evidence = null } = {}) {
         if (!this.isHeld(session) || session.reconnectTimer !== null) return;
         if (session.bookRecovering) return;
         const now = this.observedNow(session);
         // Backed off between rounds, because every diff arriving on a book that
-        // is not bridged asks for another one.
-        //
-        // A read that buys a rung of the ladder is exempt: the ladder is four
-        // rungs and ratchets one way, so it cannot loop, and the backoff was
-        // costing five seconds a rung on the one book the operator opened the
-        // contract to read. A recovery that failed still backs off — the stamp
-        // below is taken either way, so the next read that is not a rung waits
-        // for it.
+        // is not bridged asks for another one. A recovery that failed still
+        // backs off — the stamp below is taken either way.
         //
         // The cooldown widens while rounds keep failing — doubling from the
         // floor to the ceiling — and one bridged snapshot returns it to the
@@ -1739,23 +1577,25 @@ export class FuturesProductionWorkstationService {
             // Inside the guard: anything that raises out here would leave
             // `bookRecovering` set and the book unable to ask again for the rest
             // of the session.
-            this.onInternalError({ phase: 'book-recovery', code: reasonCode, symbol: session.symbol });
+            this.onInternalError({
+                phase: 'book-recovery',
+                code: reasonCode,
+                symbol: session.symbol,
+                ...(evidence ?? {}),
+            });
             this.markResourceStale(
                 session,
                 FUTURES_WORKSTATION_RESOURCES.DEPTH,
                 session.lastDepthView,
             );
-            // A re-centre is a fresh page for a stream that never stopped, so the
-            // book beyond that page is neither refreshed nor contradicted by it
-            // and is carried over. Any other cause means diffs were missed, and
-            // a level nobody has heard about since could have been taken — that
-            // book is cleared.
-            const keepFarBook = FUTURES_PRODUCTION_WORKSTATION_RECENTRE_CODES.has(reasonCode);
+            // Every rebuild here is one the stream forced: diffs were missed,
+            // and a level nobody has heard about since could have been taken,
+            // so the book starts again from the page the snapshot names.
             for (let attempt = 1;
                 attempt <= FUTURES_PRODUCTION_WORKSTATION_BOOK_RECOVERY.ATTEMPTS;
                 attempt += 1) {
                 if (!this.isHeld(session) || session.reconnectTimer !== null) return;
-                session.orderBook.beginBootstrap({ keepFarBook });
+                session.orderBook.beginBootstrap();
                 await this.delay(
                     FUTURES_PRODUCTION_WORKSTATION_BOOK_RECOVERY.BRIDGE_MS * (2 ** (attempt - 1)),
                 );
@@ -1765,7 +1605,7 @@ export class FuturesProductionWorkstationService {
                         symbol: session.symbol,
                         signal: session.abortController.signal,
                         retryAttempt: attempt,
-                        limit: this.depthPageLimit(session),
+                        limit: this.depthPageLimit(),
                     });
                     if (!this.isHeld(session) || session.reconnectTimer !== null) return;
                     const snapshot = normalizeFuturesWorkstationDepthSnapshot(
@@ -1785,7 +1625,12 @@ export class FuturesProductionWorkstationService {
                         continue;
                     }
                 } catch (error) {
-                    this.onInternalError({ phase: 'book-recovery', code: safeCode(error), symbol: session.symbol });
+                    this.onInternalError({
+                        phase: 'book-recovery',
+                        code: safeCode(error),
+                        symbol: session.symbol,
+                        ...bookEvidenceOf(error),
+                    });
                     continue;
                 }
                 outcome = 'recovered';
@@ -1912,11 +1757,34 @@ export class FuturesProductionWorkstationService {
     // one that names itself can be acted on. The resync carries the reason the
     // socket gave rather than flattening every ending into one code — that flat
     // `SOCKET_DISCONNECTED` is the line the operator was left staring at.
-    handleDisconnect(session, reason) {
+    handleDisconnect(session, reason, detail = null) {
         if (!this.isHeld(session)) return;
         const reasonCode = typeof reason === 'string' && /^[A-Z0-9_]{1,96}$/.test(reason)
             ? reason
             : 'SOCKET_DISCONNECTED';
+        // Who closed it, with what code, and how late the last frame before it
+        // was. On 2026-09-02 three closes each followed four to eight seconds
+        // of upstream lag and the record could not say so: a close that ends a
+        // stalled route reads as what it was. Counts and words, never a price.
+        const marks = session.upstreamMarks;
+        const lastUpstreamMs = marks !== null
+            && Number.isSafeInteger(marks.exchangeAt)
+            && Number.isSafeInteger(marks.receivedAt)
+            && marks.receivedAt >= marks.exchangeAt
+            ? marks.receivedAt - marks.exchangeAt
+            : null;
+        this.onInternalError({
+            phase: 'stream-close',
+            code: reasonCode,
+            symbol: session.symbol,
+            closeCode: Number.isSafeInteger(detail?.closeCode) && detail.closeCode >= 0
+                ? detail.closeCode
+                : null,
+            closedBy: ['exchange', 'desk', 'transport'].includes(detail?.closedBy)
+                ? detail.closedBy
+                : null,
+            lastUpstreamMs,
+        });
         this.emitStatus(session, FUTURES_WORKSTATION_STATES.DISCONNECTED, false, reasonCode);
         this.scheduleResync(session, reasonCode);
     }

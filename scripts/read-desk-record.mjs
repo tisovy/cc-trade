@@ -106,6 +106,12 @@ export const summarizeDeskDiagnosticRecord = (text) => {
   // Charged weight per route, from the request lines. On 2026-09-02 two
   // thousand weight-5 lines could be attributed only by their cadence.
   const routes = new Map()
+  // What a fault left behind: every stream close with who ended it and how
+  // late the last frame before it was, and the crossings by contract. Kept
+  // whole rather than aggregated — there are a handful of closes in a day and
+  // each one is read for its own lag.
+  const closes = []
+  const crossings = new Map()
   const sessions = []
   const commands = []
   // How long each kind of command took to answer. Keyed by action and market
@@ -192,6 +198,19 @@ export const summarizeDeskDiagnosticRecord = (text) => {
         withholdings,
         `${line.code ?? '(unnamed)'}[${typeof line.market === 'string' ? line.market : '-'}]`,
       )
+    }
+    if (line.kind === 'evidence' && line.phase === 'stream-close') {
+      closes.push({
+        at: line.at ?? null,
+        symbol: line.symbol ?? null,
+        code: line.code ?? null,
+        closedBy: line.closedBy ?? null,
+        closeCode: line.closeCode ?? null,
+        lastUpstreamMs: line.lastUpstreamMs ?? null,
+      })
+    }
+    if (line.kind === 'evidence' && line.code === 'CROSSED_ORDER_BOOK') {
+      bump(crossings, `${line.symbol ?? '-'}`)
     }
     if (line.kind === 'request') {
       const route = typeof line.route === 'string' ? line.route : '(unnamed)'
@@ -380,6 +399,8 @@ export const summarizeDeskDiagnosticRecord = (text) => {
     routes: [...routes.entries()]
       .map(([route, observed]) => ({ route, ...observed }))
       .sort((left, right) => right.weight - left.weight),
+    closes,
+    crossings: descending(crossings.entries()),
     sessions,
     commands,
     phases,
@@ -500,6 +521,27 @@ export const formatDeskDiagnosticSummary = (summary, { day = null } = {}) => {
         + `  weight ${String(entry.weight).padStart(6)}`
         + `  resources ${String(entry.resources).padStart(5)}`,
       )
+    }
+  }
+
+  if (Array.isArray(summary.closes) && summary.closes.length > 0) {
+    out.push('', `Stream closes (${summary.closes.length})`)
+    for (const close of summary.closes) {
+      out.push(
+        `  ${close.at ?? '-'}  ${String(close.symbol ?? '-').padEnd(12)}`
+        + ` ${String(close.code ?? '-').padEnd(20)}`
+        + ` by ${String(close.closedBy ?? '?').padEnd(9)}`
+        + ` code ${String(close.closeCode ?? '-').padEnd(4)}`
+        + ` last frame ${close.lastUpstreamMs === null ? '-' : `${close.lastUpstreamMs}ms`} late`,
+      )
+    }
+  }
+
+  if (Array.isArray(summary.crossings) && summary.crossings.length > 0) {
+    const crossed = summary.crossings.reduce((sum, entry) => sum + entry.count, 0)
+    out.push('', `Crossed books by contract (${crossed})`)
+    for (const { key, count } of summary.crossings) {
+      out.push(`  ${String(count).padStart(6)}  ${key}`)
     }
   }
 

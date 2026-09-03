@@ -96,3 +96,17 @@ close. Both reach the `status` line under `SOCKET_CLOSED` and the
   «keep everything» relies on; measured 2026-08-14 (6 197 levels a side by
   ten minutes on AKEUSDT). If a listing ever proves otherwise, the marker
   of D4 is what says so on screen.
+
+## Implemented 2026-09-03 — what changed against this design
+
+- D6/D7 land on a record kind of their own, `evidence`, written beside the
+  fault line rather than widening `fault` (every fault line would otherwise
+  carry eight nulls). The spec delta was amended to say so.
+- The side keeps its own order (`FuturesWorkstationBookSide.sorted`, binary
+  placement and removal); delivery yields levels best-first and the grouping
+  stops one row past the panel's count. Measured at 20 518 levels a side:
+  0.21 ms a diff, 0.08 ms an ungrouped delivery, 0.78 ms a grouped one.
+- Open question the evidence now answers, on the next AKEUSDT-class session:
+  whether the four `stream`-phase crossings of 2026-09-02 were the exchange's
+  (`crossedLevels` and the identities on the evidence line) — the desk no
+  longer re-reads pages, so a crossing that still appears is the stream's.

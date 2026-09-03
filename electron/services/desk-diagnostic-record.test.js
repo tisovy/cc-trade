@@ -1720,3 +1720,64 @@ describe('display and link lines', () => {
         })).toBeNull();
     });
 });
+
+// What a fault leaves behind, beside the fault's own line: a close's code and
+// lag, a crossing's identities and count. Identities and counts, never a price.
+describe('the evidence beside a fault', () => {
+    it('keeps a stream close under its declared fields', () => {
+        expect(describeDeskDiagnosticEvent('evidence', {
+            phase: 'stream-close',
+            code: 'SOCKET_CLOSED',
+            symbol: 'AKEUSDT',
+            closeCode: 1006,
+            closedBy: 'transport',
+            lastUpstreamMs: 3_878,
+        })).toEqual({
+            kind: 'evidence',
+            phase: 'stream-close',
+            code: 'SOCKET_CLOSED',
+            symbol: 'AKEUSDT',
+            closeCode: 1006,
+            closedBy: 'transport',
+            lastUpstreamMs: 3_878,
+            lastUpdateId: null,
+            firstUpdateId: null,
+            finalUpdateId: null,
+            previousFinalUpdateId: null,
+            crossedLevels: null,
+        });
+    });
+
+    it('keeps a crossed book under its declared fields and refuses a price', () => {
+        expect(describeDeskDiagnosticEvent('evidence', {
+            phase: 'book-recovery',
+            code: 'CROSSED_ORDER_BOOK',
+            symbol: 'AKEUSDT',
+            lastUpdateId: '8812345678901',
+            firstUpdateId: '8812345678899',
+            finalUpdateId: '8812345678901',
+            previousFinalUpdateId: '8812345678898',
+            crossedLevels: 3,
+            bestBid: '0.1234',
+        })).toEqual({
+            kind: 'evidence',
+            phase: 'book-recovery',
+            code: 'CROSSED_ORDER_BOOK',
+            symbol: 'AKEUSDT',
+            closeCode: null,
+            closedBy: null,
+            lastUpstreamMs: null,
+            lastUpdateId: '8812345678901',
+            firstUpdateId: '8812345678899',
+            finalUpdateId: '8812345678901',
+            previousFinalUpdateId: '8812345678898',
+            crossedLevels: 3,
+        });
+        // A closer this desk does not have costs the line.
+        expect(describeDeskDiagnosticEvent('evidence', {
+            phase: 'stream-close',
+            code: 'SOCKET_CLOSED',
+            closedBy: 'the proxy',
+        })).toBeNull();
+    });
+});

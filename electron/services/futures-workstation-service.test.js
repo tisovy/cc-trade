@@ -1772,12 +1772,10 @@ describe('production Futures workstation service', () => {
             return render(options);
         });
         const settled = events.length;
-        // The standing regime itself: the deepest page already bought, and a
-        // reading it cannot prove. `ensureDepthCovers` correctly buys nothing —
-        // there is no rung left — so the shortfall, and the stale state it
-        // decides, stand for every diff that follows.
-        session.depthPage = 3;
-        session.orderBook.rangeShortfall = () => 4;
+        // The standing regime itself: a gap being recovered on its cooldown,
+        // so the stale state stands for every diff that follows. Stated at
+        // the one seam that decides it, rather than by arranging a gap.
+        vi.spyOn(runtime.service, 'depthDeliveryState').mockReturnValue('stale');
 
         // The diff on which the book BECOMES stale is operational news and is
         // delivered on its own instant, not behind the bound.
@@ -1861,12 +1859,11 @@ describe('production Futures workstation service', () => {
             observedAt: 1_784_000_001_200,
         });
 
-        // Fifty milliseconds later — deep inside the window — the shortfall
-        // regime sets in and the next diff finds the book stale. That is a
-        // change of delivery state: operational news, delivered now.
+        // Fifty milliseconds later — deep inside the window — a gap recovery
+        // sets in and the next diff finds the book stale. That is a change of
+        // delivery state: operational news, delivered now.
         manual.advance(50);
-        session.depthPage = 3;
-        session.orderBook.rangeShortfall = () => 4;
+        vi.spyOn(runtime.service, 'depthDeliveryState').mockReturnValue('stale');
         subscriber.onMessage(
             FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols.BTCUSDT.streams.makeCycle(2)[0],
         );
@@ -2049,12 +2046,12 @@ describe('production Futures workstation service', () => {
 
             frame(crossingDepthFrame(LISTING_SYMBOL, session.orderBook.lastUpdateId));
 
-            expect(faults).toContainEqual({
+            expect(faults).toContainEqual(expect.objectContaining({
                 phase: 'stream', code: 'CROSSED_ORDER_BOOK', symbol: LISTING_SYMBOL,
-            });
-            expect(faults).toContainEqual({
+            }));
+            expect(faults).toContainEqual(expect.objectContaining({
                 phase: 'book-recovery', code: 'CROSSED_ORDER_BOOK', symbol: LISTING_SYMBOL,
-            });
+            }));
             expect(events.slice(settled).map(event => event.state ?? null))
                 .not.toContain('resynchronizing');
             expect(session.reconnectTimer).toBeNull();
@@ -2121,9 +2118,9 @@ describe('production Futures workstation service', () => {
 
             subscriber.onMessage(crossingDepthFrame('BTCUSDT', session.orderBook.lastUpdateId));
 
-            expect(faults).toContainEqual({
+            expect(faults).toContainEqual(expect.objectContaining({
                 phase: 'book-recovery', code: 'CROSSED_ORDER_BOOK', symbol: 'BTCUSDT',
-            });
+            }));
             expect(events.at(-1)).not.toMatchObject({ state: 'resynchronizing' });
         });
     });
@@ -3312,194 +3309,71 @@ describe('production Futures workstation service', () => {
     });
 });
 
-// Binance charges depth by page: 50 levels cost 2, a thousand cost 20. The desk
-// draws fourteen rows a side, which at the finest step spans fourteen ticks —
-// so it bought the deepest page the coarsest possible step could ever want,
-// on every contract switch, before knowing whether the operator wanted it.
-describe('the book is bought as deep as it is read', () => {
-    const openContract = async (requestId) => {
+// The exchange's protocol reads the book once and maintains it from the diff
+// stream; a REST read again is for a proven gap and nothing else. The desk used
+// to buy the page again when the rows on screen reached past it or the market
+// walked out of it — 34 rebuilds in one evening on AKEUSDT without a single
+// sequence gap (2026-09-02). It reads the deepest page once, and never for the
+// rows.
+describe('the book is one page and then the stream', () => {
+    const openContract = async (requestId, range) => {
         const base = createFuturesProductionWorkstationFakeTransport();
         const readDepthSnapshot = vi.fn(options => base.readDepthSnapshot(options));
         const faults = [];
+        const events = [];
         const runtime = track(createFuturesProductionWorkstationRuntimeForTest({
             transport: { ...base, readDepthSnapshot },
             onInternalError: fault => faults.push(fault),
         }));
-        await runtime.service.handleRequest(productionRequest(requestId), { emit: () => {} });
-        return { runtime, readDepthSnapshot, faults };
-    };
-
-    // What the page proved is fixed at the moment it was read, so a market that
-    // walks is a market eating the room between its best price and the edge of
-    // the band it was bought with. Said here by lengthening what the page proved,
-    // which is the same arithmetic from the other end and does not touch the
-    // question being tested.
-    const walkTheMarketOut = (session) => {
-        const { band } = session.orderBook;
-        session.orderBook.band = {
-            ...band,
-            provenBelow: '1000',
-            provenAbove: '1000',
-        };
-    };
-
-    it('opens a contract on the cheapest page', async () => {
-        const { readDepthSnapshot } = await openContract('depth-page-cheap');
-        expect(readDepthSnapshot).toHaveBeenCalledOnce();
-        expect(readDepthSnapshot.mock.calls[0][0]).toMatchObject({ limit: 50 });
-    });
-
-    it('buys a deeper page when the rows reach past what the snapshot proved', async () => {
-        const { runtime, readDepthSnapshot } = await openContract('depth-page-deepen');
-        // The fixture book spans about ±2.40 around the mid; fourteen rows at a
-        // step this coarse reach five past the best price on each side.
         await runtime.service.handleRequest(
-            productionDepthRequest('depth-page-deepen', '5'),
-            { emit: () => {} },
+            productionRequest(requestId, 'BTCUSDT', '1m', range),
+            { emit: event => events.push(event) },
         );
-        await vi.waitFor(() => expect(readDepthSnapshot.mock.calls.length).toBeGreaterThan(1));
-        expect(readDepthSnapshot.mock.calls.at(-1)[0].limit).toBeGreaterThan(50);
+        return { runtime, readDepthSnapshot, faults, events };
+    };
+    const depthEvents = events => events.filter(event => event.resource === 'depth');
+
+    it('opens a contract at the deepest page one read returns', async () => {
+        const { readDepthSnapshot } = await openContract('one-page-open');
+        expect(readDepthSnapshot).toHaveBeenCalledOnce();
+        expect(readDepthSnapshot.mock.calls[0][0]).toMatchObject({ limit: 1_000 });
     });
 
-    it('asks for nothing when the reading already fits the page it holds', async () => {
-        const { runtime, readDepthSnapshot } = await openContract('depth-page-fits');
+    it('opens at the same page whatever reading is stated', async () => {
+        const { readDepthSnapshot } = await openContract('one-page-reading', '10');
+        await Promise.resolve();
+        expect(readDepthSnapshot).toHaveBeenCalledOnce();
+        expect(readDepthSnapshot.mock.calls[0][0]).toMatchObject({ limit: 1_000 });
+    });
+
+    // The bite of 2026-09-02: fifty `DEPTH_RANGE_SHORT` reads in one evening,
+    // each colliding with the diffs in flight. A coarse step is answered from
+    // the book in hand, live, and asks the exchange for nothing.
+    it('buys nothing when the rows reach past what the snapshot proved', async () => {
+        const { runtime, readDepthSnapshot, faults, events } = await openContract('one-page-coarse');
         await runtime.service.handleRequest(
-            productionDepthRequest('depth-page-fits', '0.5'),
-            { emit: () => {} },
+            productionDepthRequest('one-page-coarse', '5'),
+            { emit: event => events.push(event) },
         );
         await Promise.resolve();
         expect(readDepthSnapshot).toHaveBeenCalledOnce();
+        expect(faults).toEqual([]);
+        expect(depthEvents(events).at(-1)).toMatchObject({ state: 'live' });
+        expect(depthEvents(events).at(-1).payload.bids.length).toBeGreaterThan(0);
     });
 
-    // A band big enough for the rows that the market has walked out of needs the
-    // same page again, centred where the market is now — not a deeper one. Left
-    // to deepen on every walk, a busy contract would climb to the thousand
-    // levels this change exists to stop buying.
-    it('re-reads the page it holds when the market walks out of a band that fits', async () => {
-        const { runtime, readDepthSnapshot } = await openContract('depth-page-walk');
-        const session = runtime.service.shown;
-        session.depthRange = '0.5';
-        session.orderBook.rangeShortfall = () => 1;
-        runtime.service.ensureDepthCovers(session);
-        await vi.waitFor(() => expect(readDepthSnapshot.mock.calls.length).toBe(2));
-        expect(readDepthSnapshot.mock.calls.at(-1)[0]).toMatchObject({ limit: 50 });
-        expect(session.depthPage).toBe(0);
-    });
-
-    // The deepest page has nothing above it to buy. A book that answered a walk
-    // only by buying deeper would, at the top of the ladder, stop answering at
-    // all — and keep dropping every level outside a band it had left for good.
-    it('re-reads at the deepest page too, where there is nothing deeper to buy', async () => {
-        const { runtime, readDepthSnapshot } = await openContract('depth-page-deepest');
-        const session = runtime.service.shown;
-        session.depthPage = 3;
-        session.depthRange = '0.5';
-        session.orderBook.rangeShortfall = () => 1;
-        runtime.service.ensureDepthCovers(session);
-        await vi.waitFor(() => expect(readDepthSnapshot.mock.calls.length).toBe(2));
-        expect(readDepthSnapshot.mock.calls.at(-1)[0]).toMatchObject({ limit: 1_000 });
-    });
-
-    // The state the operator was trading AKEUSDT in. The deepest page the
-    // exchange publishes reaches ±4% of price on that contract; the coarsest step
-    // the panel offers asks for 9% of it. So the shortfall sits above 1 and
-    // cannot come down — what the page proved does not change after it is read —
-    // and the desk asked for the deeper page that does not exist, found none, and
-    // returned. It returned from every band the market walked out of, on every
-    // diff, for as long as the contract stayed open: one side of the book emptied
-    // and stayed empty.
-    it('re-reads a band the market walked out of, though its page never reached the rows', async () => {
-        const { runtime, readDepthSnapshot } = await openContract('depth-page-walked-short');
-        const session = runtime.service.shown;
-        session.depthPage = 3;
-        session.depthRange = '0.5';
-        session.orderBook.rangeShortfall = () => 2.5;
-        walkTheMarketOut(session);
-        runtime.service.ensureDepthCovers(session);
-        await vi.waitFor(() => expect(readDepthSnapshot.mock.calls.length).toBe(2));
-        expect(readDepthSnapshot.mock.calls.at(-1)[0]).toMatchObject({ limit: 1_000 });
-    });
-
-    // And the reason that branch was written: a page short of the rows that no
-    // deeper page can answer must not be read again on that account, or a
-    // contract the exchange publishes no deeper than the reading re-reads the
-    // same page every cooldown for the session. The band still holds the market,
-    // so nothing is asked for.
-    it('reads nothing for a band short of the rows that still holds the market', async () => {
-        const { runtime, readDepthSnapshot } = await openContract('depth-page-short-resting');
-        const session = runtime.service.shown;
-        session.depthPage = 3;
-        session.depthRange = '0.5';
-        session.orderBook.rangeShortfall = () => 2.5;
-        runtime.service.ensureDepthCovers(session);
-        await Promise.resolve();
-        expect(readDepthSnapshot).toHaveBeenCalledOnce();
-    });
-
-    // Nothing is short here: the band covers the rows and the market has walked
-    // to the edge of it anyway. The desk had no path to this read at all, and the
-    // journal names it apart from a page short of the rows — one says the book is
-    // chasing the market, the other says it is being read at a step the exchange
-    // does not publish deep enough for.
-    it('re-centres a band that covers the rows and names the walk as the cause', async () => {
-        const { runtime, readDepthSnapshot, faults } = await openContract('depth-page-recentre');
-        const session = runtime.service.shown;
-        session.depthRange = '0.5';
-        session.orderBook.rangeShortfall = () => 0;
-        walkTheMarketOut(session);
-        runtime.service.ensureDepthCovers(session);
-        await vi.waitFor(() => expect(readDepthSnapshot.mock.calls.length).toBe(2));
-        expect(faults).toContainEqual({
-            phase: 'book-recovery',
-            code: 'DEPTH_BAND_WALKED',
-            symbol: 'BTCUSDT',
-        });
-    });
-
-    // Six paths deliver a book. All of them build it here, so the panel's step
-    // list cannot change with whichever path last ran.
-    it('states the reach on a delivered book only from the deepest page', async () => {
-        const { runtime } = await openContract('depth-page-reach');
-        const session = runtime.service.shown;
-        expect(runtime.service.depthView(session).reach).toBeNull();
-        session.depthPage = 3;
-        const { reach } = runtime.service.depthView(session);
+    it('states the reach on the first delivery', async () => {
+        const { runtime, events } = await openContract('one-page-reach');
+        const { reach } = runtime.service.depthView(runtime.service.shown);
         expect(reach).toMatchObject({ below: expect.any(String), above: expect.any(String) });
         expect(Number(reach.below)).toBeGreaterThan(0);
         expect(Number(reach.above)).toBeGreaterThan(0);
-    });
-
-    // The seam the two halves meet at. The book knows how to carry the far book
-    // through a rebuild and how to clear it; which of the two a rebuild is, is a
-    // fact about why the desk asked for it, and only the service knows that.
-    it('carries the far book through a re-centre and clears it when the stream broke', async () => {
-        const { runtime } = await openContract('depth-page-carry');
-        const session = runtime.service.shown;
-        const asked = [];
-        session.orderBook.beginBootstrap = vi.fn((options) => { asked.push(options); });
-        session.orderBook.bootstrap = vi.fn(() => ({ live: true }));
-        for (const reason of ['DEPTH_BAND_WALKED', 'DEPTH_RANGE_SHORT', 'DEPTH_SEQUENCE_GAP']) {
-            session.bookRecovering = false;
-            session.bookRecoveredAt = null;
-            await runtime.service.recoverBook(session, reason, { immediate: true });
-        }
-        expect(asked).toEqual([
-            { keepFarBook: true },
-            { keepFarBook: true },
-            { keepFarBook: false },
-        ]);
+        expect(depthEvents(events)[0].payload.reach).toEqual(reach);
     });
 
     // A contract the desk is already running is selected, not opened: the book
-    // it holds was correct a moment ago and sits on a page already paid for, so
-    // opening it again on the cheapest page would mean discarding that and
-    // buying something shallower. This test asserted exactly that — the reading
-    // reset and a fresh fifty levels — for as long as the desk could hold only
-    // the contract it was showing, and a second subscription for the same
-    // contract was the nearest thing to another contract there was. The rule it
-    // was written for, that a reading is a distance in the contract's own quote
-    // currency and belongs to no other contract, is now asserted where it
-    // applies: against another contract, in 'a session stops being the service'.
+    // it holds was correct a moment ago, and the exchange is not asked for
+    // anything to show it again.
     it('reads nothing when a contract it already holds is subscribed to again', async () => {
         const { runtime, readDepthSnapshot } = await openContract('depth-page-again');
         await runtime.service.handleRequest(
@@ -3514,8 +3388,6 @@ describe('the book is bought as deep as it is read', () => {
         });
         await Promise.resolve();
 
-        // The new subscription owns the session that was already running, and
-        // the exchange was not asked for anything to make that happen.
         expect(runtime.service.shown).toMatchObject({
             requestId: 'depth-page-again-2',
             depthRange: '0.5',
@@ -3532,37 +3404,27 @@ describe('the book is bought as deep as it is read', () => {
     });
 });
 
-// The screenshot the operator brought back: a full ask ladder over seven bid
-// rows, badged LIVE. The book was right — it could not prove the bid side — and
-// the badge was wrong, and the desk took ten to fifteen seconds to fix either.
-describe('the book states the side it cannot prove', () => {
+// The rows beyond the page say so. A snapshot proves a stretch of price; past
+// it the book holds what the stream has restated and is silent about the rest.
+// The desk used to buy a deeper page for those rows and badge the book stale
+// until it landed. It draws them from the book in hand, live, marked per row.
+describe('the rows beyond the page say so', () => {
     // The deterministic fixture returns the same forty-eight levels whatever page
-    // is asked for, so nothing built on it can tell a page that covered the rows
-    // from one that did not. This one prices its band by the page it is asked
-    // for, which is what the exchange does: fifty levels five cents apart reach
-    // 2.50 past the best price, five hundred reach 25.
+    // is asked for. This one prices its page by the limit it is asked for, which
+    // is what the exchange does: a thousand levels five cents apart reach fifty
+    // past the best price.
     const pagedTransport = () => {
         const base = createFuturesProductionWorkstationFakeTransport();
         const template = JSON.parse(
             FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols.BTCUSDT.depthSnapshot,
         );
         const cents = value => `${value / 100n}.${String(value % 100n).padStart(2, '0')}`;
-        // Centred on the fixture's own book, which is where the diffs this
-        // snapshot is bridged against restate their levels. Twenty-five dollars
-        // away from it, as this was, describes a different contract: the book now
-        // keeps every level the stream restates, so those diffs land as bids far
-        // above the paged asks and the book fails closed on a crossed book —
-        // correctly, and for a reason the fixture invented.
         const mid = 5_844_500n;
         let reads = 0;
         const readDepthSnapshot = vi.fn(async ({ limit } = {}) => {
             reads += 1;
             return JSON.stringify({
                 ...template,
-                // The first read is the fixture's own, so it bridges against the
-                // stream the way the fixture intends. A later one is a fresh
-                // reading of a contract whose diffs have moved on, and states an
-                // update id ahead of them.
                 lastUpdateId: template.lastUpdateId + ((reads - 1) * 1_000_000),
                 bids: Array.from({ length: limit }, (_, index) => [
                     cents(mid - (BigInt(index) + 1n) * 5n),
@@ -3594,86 +3456,27 @@ describe('the book states the side it cannot prove', () => {
 
     const depthEvents = events => events.filter(event => event.resource === 'depth');
 
-    // A short book is still worth reading — the rows it can prove are the market
-    // and they are exact. What it is not is live.
-    it('delivers a book it cannot prove on one side as stale, carrying its rows', async () => {
-        const { runtime, events } = await openContract('short-side-stale');
+    it('draws a coarse step live from the page in hand, every row it can fill whole', async () => {
+        const { runtime, events, pages } = await openContract('beyond-page');
         await runtime.service.handleRequest(
-            productionDepthRequest('short-side-stale', '5'),
+            productionDepthRequest('beyond-page', '5'),
             { emit: event => events.push(event) },
         );
         const delivered = depthEvents(events).at(-1);
-        expect(delivered.state).toBe('stale');
+        expect(pages()).toEqual([1_000]);
+        expect(delivered.state).toBe('live');
         expect(delivered.payload.bids.length).toBeGreaterThan(0);
         expect(delivered.payload.asks.length).toBeGreaterThan(0);
+        // A thousand levels five cents apart reach fifty; rows of five inside
+        // that are whole, and the panel is not asked to wait for a deeper page.
+        expect(delivered.payload.bids.every(row => row.whole === true)).toBe(true);
     });
 
-    // Stated on the request that opens the contract, so the page that covers the
-    // reading is bought against the first band the snapshot proves rather than
-    // after the operator has read a short book for a while. The rung is chosen by
-    // how short it is, so a reading four pages deeper is one read, not four.
-    it('opens a contract at the page its stated reading needs', async () => {
-        const { pages } = await openContract('short-side-open', '10');
-        await vi.waitFor(() => expect(pages()).toHaveLength(2));
-        expect(pages()).toEqual([50, 500]);
-    });
-
-    // And a reading nothing has been stated for opens where it always did.
-    it('opens a contract stating no reading on the cheapest page', async () => {
-        const { pages } = await openContract('short-side-silent');
+    it('reads one page for a contract, whatever its reading, and nothing after', async () => {
+        const { events, pages } = await openContract('beyond-page-open', '10');
         await Promise.resolve();
-        expect(pages()).toEqual([50]);
-    });
-
-    // Without waiting for a status to say so: the state a delivery carries is
-    // decided by the book that delivery contains.
-    it('reads live again on the first delivery that covers both sides', async () => {
-        const { events, pages } = await openContract('short-side-repaired', '10');
-        await vi.waitFor(() => expect(depthEvents(events).at(-1).state).toBe('live'));
-        expect(pages()).toEqual([50, 500]);
-        expect(depthEvents(events).map(event => event.state)).toContain('stale');
-        expect(depthEvents(events).at(-1).payload.bids.length).toBeGreaterThan(0);
-    });
-
-    // Four rungs that ratchet one way cannot loop, so making a deepening wait out
-    // the recovery backoff bought nothing and cost five seconds a rung — on the
-    // one book the operator opened the contract to read.
-    it('buys the rung the rows need without waiting out the recovery backoff', async () => {
-        const { runtime, readDepthSnapshot } = await openContract('short-side-nowait');
-        const session = runtime.service.shown;
-        // A recovery has just run and stamped the backoff every read after it
-        // used to wait for.
-        session.bookRecoveredAt = runtime.service.observedNow(session);
-        session.depthRange = '5';
-        session.orderBook.rangeShortfall = () => 4;
-        runtime.service.ensureDepthCovers(session);
-        await vi.waitFor(() => expect(readDepthSnapshot.mock.calls.length).toBe(2));
-        expect(readDepthSnapshot.mock.calls.at(-1)[0]).toMatchObject({ limit: 500 });
-    });
-
-    // The exemption is for the rung, not for the read. A shortfall that no rung
-    // answers must not become a snapshot read per diff.
-    it('keeps backing off a re-read, and stops asking when the ladder runs out', async () => {
-        const { runtime, readDepthSnapshot } = await openContract('short-side-backoff');
-        const session = runtime.service.shown;
-        session.depthRange = '5';
-        // A band wide enough that the market walked out of it: re-read, no rung.
-        session.orderBook.rangeShortfall = () => 1;
-        runtime.service.ensureDepthCovers(session);
-        await vi.waitFor(() => expect(readDepthSnapshot.mock.calls.length).toBe(2));
-        runtime.service.ensureDepthCovers(session);
-        await Promise.resolve();
-        expect(readDepthSnapshot).toHaveBeenCalledTimes(2);
-
-        // And at the top of the ladder there is no rung to buy, so a shortfall
-        // that only a deeper page could answer stops asking rather than reading
-        // the same page on every diff.
-        session.depthPage = 3;
-        session.depthDeepenedAt = null;
-        session.orderBook.rangeShortfall = () => 4;
-        runtime.service.ensureDepthCovers(session);
-        await Promise.resolve();
-        expect(readDepthSnapshot).toHaveBeenCalledTimes(2);
+        expect(pages()).toEqual([1_000]);
+        expect(depthEvents(events).at(-1).state).toBe('live');
     });
 });
 
@@ -3833,13 +3636,12 @@ describe('a session stops being the service', () => {
         });
     });
 
-    // The page a contract had bought and the reading it was bought against used
-    // to live on the service, where a reconnect kept them by not touching them.
-    // On the session they have to be carried across on purpose, and a reconnect
-    // is the one generation that must: it is the same contract, still on screen,
-    // and making it buy the cheapest page again would put the operator back in
-    // front of a short book they had already paid to fill.
-    it('keeps the page and the reading a contract bought across a reconnect', async () => {
+    // The reading a contract was read at used to live on the service, where a
+    // reconnect kept it by not touching it. On the session it has to be carried
+    // across on purpose, and a reconnect is the one generation that must: it is
+    // the same contract, still on screen. The page is the same page every time
+    // — the deepest one — so nothing about a page is carried at all.
+    it('keeps the reading a contract stated across a reconnect, and reads the one page', async () => {
         const clock = createManualClock();
         const base = createFuturesProductionWorkstationFakeTransport({ clock: clock.clock });
         const readDepthSnapshot = vi.fn(options => base.readDepthSnapshot(options));
@@ -3859,8 +3661,7 @@ describe('a session stops being the service', () => {
             emit: () => {},
         });
         const before = runtime.service.shown;
-        expect(readDepthSnapshot.mock.calls.at(-1)[0]).toMatchObject({ limit: 50 });
-        before.depthPage = 3;
+        expect(readDepthSnapshot.mock.calls.at(-1)[0]).toMatchObject({ limit: 1_000 });
         before.depthRange = '5';
         const readsBeforeReconnect = readDepthSnapshot.mock.calls.length;
 
@@ -3871,16 +3672,16 @@ describe('a session stops being the service', () => {
             readDepthSnapshot.mock.calls.length,
         ).toBeGreaterThan(readsBeforeReconnect));
 
-        expect(runtime.service.shown).toMatchObject({ depthPage: 3, depthRange: '5' });
+        expect(runtime.service.shown).toMatchObject({ depthRange: '5' });
         expect(readDepthSnapshot.mock.calls[readsBeforeReconnect][0])
             .toMatchObject({ limit: 1_000 });
     });
 
-    // The other half of the same rule: another contract inherits neither. A
+    // The other half of the same rule: another contract inherits no reading. A
     // reading is a distance in the contract's own quote currency, so one stated
     // for a contract priced in whole dollars reads as an impossible range on one
-    // priced in ten-thousandths — and buys the deepest page to cover it.
-    it('opens another contract on the cheapest page and no reading at all', async () => {
+    // priced in ten-thousandths.
+    it('opens another contract with no reading at all', async () => {
         const clock = createManualClock();
         const base = createFuturesProductionWorkstationFakeTransport({ clock: clock.clock });
         const readDepthSnapshot = vi.fn(options => base.readDepthSnapshot(options));
@@ -3892,7 +3693,6 @@ describe('a session stops being the service', () => {
         await runtime.service.handleRequest(productionRequest('page-btc', 'BTCUSDT'), {
             emit: () => {},
         });
-        runtime.service.shown.depthPage = 3;
         runtime.service.shown.depthRange = '5';
 
         await runtime.service.handleRequest(productionRequest('page-eth', 'ETHUSDT'), {
@@ -3901,13 +3701,12 @@ describe('a session stops being the service', () => {
 
         expect(runtime.service.shown).toMatchObject({
             symbol: 'ETHUSDT',
-            depthPage: 0,
             depthRange: null,
         });
-        expect(readDepthSnapshot.mock.calls.at(-1)[0]).toMatchObject({ limit: 50 });
-        // And the contract left behind keeps what it bought — it is still
-        // running, and it will be shown again.
-        expect(runtime.service.sessions.get('BTCUSDT')).toMatchObject({ depthPage: 3 });
+        expect(readDepthSnapshot.mock.calls.at(-1)[0]).toMatchObject({ limit: 1_000 });
+        // And the contract left behind keeps its reading — it is still running,
+        // and it will be shown again.
+        expect(runtime.service.sessions.get('BTCUSDT')).toMatchObject({ depthRange: '5' });
     });
 });
 
@@ -4171,14 +3970,10 @@ describe('the pool is bounded', () => {
 
 // The desk's own journal for 2026-08-12 and 2026-08-13 recorded exactly one
 // kind of fault: `book-recovery:DEPTH_RANGE_SHORT`, 33 and 155 of them, peaking
-// at 34 in an hour — each one a REST snapshot, on the one contract the desk
-// held at the time. A pool of eight must not multiply that by eight, because
-// the eight share one read budget of 600 a minute and five concurrent slots,
-// and the contract the operator is trading on would queue behind seven books
-// nobody asked about.
+// at 34 in an hour — each one a REST snapshot. A held book asks the exchange
+// for nothing after its bootstrap now, shown or not: no page is re-read for a
+// market that walked or rows that reach (2026-09-03).
 describe('a held book asks the exchange for nothing', () => {
-    // The real clock: a recovery waits before it re-reads, and a manual clock
-    // would hold that wait open forever rather than let the read happen.
     const openTwo = async () => {
         const base = createFuturesProductionWorkstationFakeTransport();
         const readDepthSnapshot = vi.fn(options => base.readDepthSnapshot(options));
@@ -4195,40 +3990,23 @@ describe('a held book asks the exchange for nothing', () => {
         return { runtime, readDepthSnapshot };
     };
 
-    it('buys no page for a contract nobody is looking at, and still buys one for the shown', async () => {
+    it('reads one page per contract and no more, shown or held', async () => {
         const { runtime, readDepthSnapshot } = await openTwo();
-        const held = runtime.service.sessions.get('BTCUSDT');
         const shown = runtime.service.sessions.get('ETHUSDT');
         expect(runtime.service.shown).toBe(shown);
-
-        // The held contract's band has stopped covering the reading the panel
-        // last stated for it, and its book has walked off the market.
-        held.depthRange = '5';
-        held.orderBook.rangeShortfall = () => 1;
-        held.orderBook.holdsMarket = () => false;
-        const before = readDepthSnapshot.mock.calls.length;
-        runtime.service.ensureDepthCovers(held);
+        expect(readDepthSnapshot).toHaveBeenCalledTimes(2);
+        // The coarsest reading the panel can state buys nothing for the shown
+        // contract, and the held one was never asked for anything.
+        await runtime.service.handleRequest(
+            productionDepthRequest('cost-eth', '5'),
+            { emit: () => {} },
+        );
         await Promise.resolve();
-        expect(readDepthSnapshot).toHaveBeenCalledTimes(before);
-
-        // The same state on the contract being shown does buy a page.
-        shown.depthRange = '5';
-        shown.orderBook.rangeShortfall = () => 1;
-        shown.bookRecoveredAt = null;
-        runtime.service.ensureDepthCovers(shown);
-        await vi.waitFor(() => expect(readDepthSnapshot.mock.calls.length).toBe(before + 1));
+        expect(readDepthSnapshot).toHaveBeenCalledTimes(2);
     });
 
-    // Nothing is lost by waiting — but only because the book says what it is
-    // when it arrives. Delivered live on the ground that nothing had been asked
-    // of it, a book the market had walked out of is the green badge over a
-    // wrong ladder this desk keeps being caught by.
-    it('delivers a book that walked off the market as stale, not as live', async () => {
+    it('delivers a held book live when it is selected', async () => {
         const { runtime } = await openTwo();
-        const held = runtime.service.sessions.get('BTCUSDT');
-        held.depthRange = null;
-        held.orderBook.holdsMarket = () => false;
-
         const back = [];
         await runtime.service.handleRequest(
             JSON.stringify(createFuturesProductionWorkstationSelectSymbolRequest({
@@ -4239,7 +4017,7 @@ describe('a held book asks the exchange for nothing', () => {
             { emit: event => back.push(event) },
         );
 
-        expect(back.find(event => event.resource === 'depth')).toMatchObject({ state: 'stale' });
+        expect(back.find(event => event.resource === 'depth')).toMatchObject({ state: 'live' });
     });
 });
 
@@ -4410,5 +4188,74 @@ describe('a recovery that keeps failing backs off further', () => {
         rig.clock.setNow(recoveredAt + 5_000);
         rig.diff(25);
         expect(rig.session.bookRecovering).toBe(true);
+    });
+});
+
+// On 2026-09-02 three `SOCKET_CLOSED` resynchronizations each followed four to
+// eight seconds of upstream lag, and the record could not say so: a close that
+// ends a stalled route reads as what it was only if the close says who ended
+// it and how late the last frame before it was.
+describe('what a stream close leaves behind', () => {
+    it('states who closed the socket, the code, and the lag of the last frame', async () => {
+        const manual = createManualClock();
+        const base = createFuturesProductionWorkstationFakeTransport({ clock: manual.clock });
+        const faults = [];
+        let subscriber;
+        const runtime = track(createFuturesProductionWorkstationRuntimeForTest({
+            clock: manual.clock,
+            transport: {
+                ...base,
+                connect: (options) => {
+                    subscriber = options;
+                    return base.connect(options);
+                },
+            },
+            onInternalError: fault => faults.push(fault),
+        }));
+        await runtime.service.handleRequest(productionRequest('close-evidence'), {
+            emit: () => {},
+        });
+        // A frame the exchange sent four seconds before the desk received it.
+        const frame = FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols.BTCUSDT.streams.makeCycle(1)[0];
+        const exchangeAt = JSON.parse(frame).data.E;
+        manual.setNow(exchangeAt + 4_000);
+        subscriber.onMessage(frame);
+
+        subscriber.onDisconnect('SOCKET_CLOSED', { closeCode: 1006, closedBy: 'transport' });
+
+        expect(faults).toContainEqual({
+            phase: 'stream-close',
+            code: 'SOCKET_CLOSED',
+            symbol: 'BTCUSDT',
+            closeCode: 1006,
+            closedBy: 'transport',
+            lastUpstreamMs: 4_000,
+        });
+    });
+
+    it('states a close with nothing behind it as exactly that', async () => {
+        const base = createFuturesProductionWorkstationFakeTransport();
+        const faults = [];
+        let subscriber;
+        const runtime = track(createFuturesProductionWorkstationRuntimeForTest({
+            transport: {
+                ...base,
+                connect: (options) => {
+                    subscriber = options;
+                    return base.connect(options);
+                },
+            },
+            onInternalError: fault => faults.push(fault),
+        }));
+        await runtime.service.handleRequest(productionRequest('close-bare'), { emit: () => {} });
+        subscriber.onDisconnect('SOCKET_CLOSED');
+        expect(faults).toContainEqual({
+            phase: 'stream-close',
+            code: 'SOCKET_CLOSED',
+            symbol: 'BTCUSDT',
+            closeCode: null,
+            closedBy: null,
+            lastUpstreamMs: expect.any(Number),
+        });
     });
 });

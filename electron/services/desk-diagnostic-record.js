@@ -137,6 +137,7 @@ const RESOURCE = /^[a-z][a-zA-Z0-9]{0,31}$/;
 // desk's own housekeeping. Two words, because the question the line answers is
 // only ever which of the two was waiting.
 const DEFERRED_STANDING = /^(?:command|urgent|ordinary)$/;
+const CLOSED_BY = /^(?:exchange|desk|transport)$/;
 // The route a physical attempt went on, in the desk's own words — never a
 // path. Two thousand weight-5 lines on 2026-09-02 could be attributed only by
 // their cadence.
@@ -216,6 +217,25 @@ const RECORDED_FIELDS = Object.freeze({
         ['phase', text(PHASE)],
         ['code', text(CODE)],
         ['symbol', optional(text(SYMBOL))],
+    ]),
+    // What a fault left behind to be read by, beside the fault's own line. A
+    // stream close: who closed it, the socket's close code, and how late the
+    // last frame before it was — on 2026-09-02 three closes each followed four
+    // to eight seconds of lag and nothing said so. A crossed book: the
+    // identities of the diff that crossed it and how many levels stand across
+    // the market. Identities and counts, never a price.
+    evidence: Object.freeze([
+        ['phase', text(PHASE)],
+        ['code', text(CODE)],
+        ['symbol', optional(text(SYMBOL))],
+        ['closeCode', optional(count)],
+        ['closedBy', optional(text(CLOSED_BY))],
+        ['lastUpstreamMs', optional(count)],
+        ['lastUpdateId', optional(identity)],
+        ['firstUpdateId', optional(identity)],
+        ['finalUpdateId', optional(identity)],
+        ['previousFinalUpdateId', optional(identity)],
+        ['crossedLevels', optional(count)],
     ]),
     // What the renderer says the screen switched to. The frame lines say what
     // was delivered; only the renderer can say what is being looked at — a

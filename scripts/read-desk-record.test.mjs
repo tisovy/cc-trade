@@ -772,3 +772,39 @@ describe('withholdings and routes', () => {
     expect(report).toContain('history-trades')
   })
 })
+
+// What a fault left behind is read beside it: the closes of 2026-09-02 each
+// followed seconds of lag, and the crossings were a hundred lines with nothing
+// to read them by.
+describe('the evidence beside faults', () => {
+  const day = [
+    line({ at: '2026-09-02T21:44:14.498Z', kind: 'fault', phase: 'stream-close', code: 'SOCKET_CLOSED', symbol: 'AKEUSDT' }),
+    line({ at: '2026-09-02T21:44:14.498Z', kind: 'evidence', phase: 'stream-close', code: 'SOCKET_CLOSED', symbol: 'AKEUSDT', closeCode: 1006, closedBy: 'transport', lastUpstreamMs: 3_878, lastUpdateId: null, firstUpdateId: null, finalUpdateId: null, previousFinalUpdateId: null, crossedLevels: null }),
+    line({ at: '2026-09-02T21:46:24.752Z', kind: 'evidence', phase: 'stream', code: 'CROSSED_ORDER_BOOK', symbol: 'AKEUSDT', closeCode: null, closedBy: null, lastUpstreamMs: null, lastUpdateId: '9', firstUpdateId: '8', finalUpdateId: '9', previousFinalUpdateId: '7', crossedLevels: 2 }),
+    line({ at: '2026-09-02T21:46:25.000Z', kind: 'evidence', phase: 'book-recovery', code: 'CROSSED_ORDER_BOOK', symbol: 'SKRUSDT', closeCode: null, closedBy: null, lastUpstreamMs: null, lastUpdateId: '19', firstUpdateId: '18', finalUpdateId: '19', previousFinalUpdateId: '17', crossedLevels: 1 }),
+  ].join('')
+  const summary = summarizeDeskDiagnosticRecord(day)
+
+  it('lists every stream close with who ended it and how late the last frame was', () => {
+    expect(summary.closes).toEqual([{
+      at: '2026-09-02T21:44:14.498Z',
+      symbol: 'AKEUSDT',
+      code: 'SOCKET_CLOSED',
+      closedBy: 'transport',
+      closeCode: 1006,
+      lastUpstreamMs: 3_878,
+    }])
+    const report = formatDeskDiagnosticSummary(summary)
+    expect(report).toContain('Stream closes (1)')
+    expect(report).toContain('by transport')
+    expect(report).toContain('last frame 3878ms late')
+  })
+
+  it('counts crossed books by contract', () => {
+    expect(summary.crossings).toEqual([
+      { key: 'AKEUSDT', count: 1 },
+      { key: 'SKRUSDT', count: 1 },
+    ])
+    expect(formatDeskDiagnosticSummary(summary)).toContain('Crossed books by contract (2)')
+  })
+})

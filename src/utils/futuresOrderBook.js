@@ -72,13 +72,13 @@ const readAtoms = (value) => {
 // against 10.1 ms with the bound raised: the cache was the cliff, not the book.
 //
 // So it has to hold both sides of a full book, their quantities beside their
-// prices, with room for the contract the operator switched from. Two sides of
-// the retention ceiling is 20 000 strings today; 65 536 leaves that headroom.
-// It is tied to `RETAINED_LEVELS_PER_SIDE` by a test rather than by an import,
-// because the retention ceiling lives in the process that owns the book and
-// importing it here would close a cycle. Raise one and the test asks for the
-// other.
-export const FUTURES_BOOK_PARSED_DECIMAL_BOUND = 65_536
+// prices, with room for the contract the operator switched from. The book keeps
+// every level the exchange states (2026-09-03, no retention ceiling); measured
+// 2026-08-14 a side climbs past 6 000 levels in ten minutes and keeps climbing,
+// so this is sized for 32 000 a side — two sides, two strings a level, and the
+// contract switched from — and the order-book test asks the two to agree.
+export const FUTURES_BOOK_PARSED_LEVELS_PER_SIDE = 32_000
+export const FUTURES_BOOK_PARSED_DECIMAL_BOUND = 262_144
 const parsedDecimals = new Map()
 
 // How many decimals are remembered right now. Exported for the test that keeps

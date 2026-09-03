@@ -1,5 +1,4 @@
 import {
-    addFuturesWorkstationDecimals,
     compareFuturesWorkstationDecimals,
     isFuturesWorkstationDecimal,
     isNonNegativeFuturesWorkstationDecimal,
@@ -23,67 +22,19 @@ export const FUTURES_WORKSTATION_ORDER_BOOK_LIMITS = Object.freeze({
     // stream restates levels far outside it, and those are what the desk draws
     // beyond the band.
     SNAPSHOT_LEVELS_PER_SIDE: 1_000,
-    // How much of the book is kept, which is not the same question as how much a
-    // page proves. Measured by applying `@depth@100ms` without the band filter:
-    // a page is a thousand levels a side and holds 7% to 18% of a contract's
-    // resting value. So a thousand was never a bound on cost — it was most of
-    // the book, thrown away.
+    // How much of the book is kept: all of it. Every level the exchange states
+    // is held until the exchange states it gone (2026-09-03 — the operator's
+    // rule: «хранить ВСЁ, показывать только то, что указано в интерфейсе»).
+    // What a page proves is recorded (`band`), what a delivery costs is bounded
+    // by the rows it draws, and nothing is evicted. A retention ceiling of ten
+    // thousand a side stood here from 2026-08-14 to bound a per-delivery sort of
+    // the whole side; the side now keeps its own order and the sort is gone.
     //
-    // What the whole book is depends entirely on how long you watch. Measured
-    // 2026-08-14, levels a side:
+    // Measured 2026-08-14, levels a side, still climbing at ten minutes:
     //
     //           1 min   3 min   5 min   10 min
     //   AKEUSDT  1658    2403    4017     6197
     //   BTCUSDT  1580    2689    4157     6270
-    //
-    // It was still climbing at ten minutes, so there is no number here that
-    // means "the whole book" — a desk left open passes any bound eventually and
-    // then sits on it. Which makes the bound a cost decision and nothing else.
-    //
-    // It cost more than expected, and not where expected. The sort was assumed
-    // to be the price of the ceiling; measured, it was a quarter of it. Two
-    // thirds was the same decimal strings being parsed again every frame — the
-    // levels nobody had touched. Remembered, in the grouping pass this shares
-    // with the panel, a frame at four thousand fell from 5.7 ms to 1.6 ms, and
-    // ten thousand became cheaper than four thousand had been. Measured
-    // 2026-08-14 on a book sitting at the bound, at ten frames and ten diffs a
-    // second on the shown contract:
-    //
-    //   bound   frame     diff     per second   was
-    //    4000    1.6 ms   0.6 ms      22 ms      87 ms
-    //   10000    4.4 ms   1.3 ms      58 ms     222 ms
-    //   20000   10.1 ms   2.7 ms     128 ms     348 ms
-    //
-    // Ten thousand covers both books measured at ten minutes with room over, for
-    // a third of what four thousand cost before. Twenty thousand buys nothing
-    // that has been observed and costs an eighth of a core for one contract's
-    // book, so the ceiling stops where the evidence stops rather than where the
-    // arithmetic still allows.
-    //
-    // Raising it further wants grouping that fills buckets in one pass instead
-    // of sorting the whole side — buckets are a few hundred where levels are
-    // thousands — and that is a change to how rows are built, not to a number.
-    // It also wants `FUTURES_BOOK_PARSED_DECIMAL_BOUND` raised alongside: a
-    // cache smaller than the book it serves empties mid-pass and costs more than
-    // no cache at all. A test asks for the two together rather than leaving that
-    // to be rediscovered as a cliff.
-    RETAINED_LEVELS_PER_SIDE: 10_000,
-    // How far past the ceiling a side may run before it is cut back to it, and
-    // the whole cost of having a ceiling at all.
-    //
-    // Not zero. Evicting the moment the bound is passed means sorting the entire
-    // side on every applied diff for as long as the book stays full — which,
-    // measured on a real contract, is from about eight minutes in and then for
-    // the rest of the session. A stream naming twenty new far prices a diff
-    // crosses this slack every twenty-five diffs instead, so one sort every
-    // couple of seconds does the work of a hundred: measured, an applied diff at
-    // the bound went from 811 to 332 microseconds.
-    //
-    // What it costs is that a side may hold this many levels more than the
-    // ceiling names. Nothing reads the ceiling as an exact count — what crosses
-    // to the panel is rows, and what the bound protects is memory and per-frame
-    // work, each of which moves by an eighth here.
-    EVICTION_SLACK: 500,
     // Shared with the renderer's own bound so the two can never drift apart: a
     // delivered book larger than the protocol accepts is dropped whole. This is
     // the ceiling on a delivery, not the delivery — what crosses is the rows the
@@ -212,16 +163,81 @@ const validateDelta = (delta) => {
 // and their entries would otherwise accumulate for the life of the session.
 // Rebuilding from the keys actually held costs one pass and happens rarely.
 const PARSED_PRICE_CACHE_SLACK = 2;
+const PARSED_PRICE_CACHE_FLOOR = 8_192;
 
 // A side of the book, which remembers what its own prices parse to. One cache
 // per side rather than one for the desk, so a contract nobody is looking at
 // cannot push the shown one's prices out of it.
 class FuturesWorkstationBookSide extends Map {
-    constructor() {
+    constructor(descending = false) {
         super();
+        this.descending = descending === true;
         this.parsed = new Map();
-        this.parsedBound = FUTURES_WORKSTATION_ORDER_BOOK_LIMITS.RETAINED_LEVELS_PER_SIDE
-            * PARSED_PRICE_CACHE_SLACK;
+        this.parsedBound = PARSED_PRICE_CACHE_FLOOR;
+        // The side in price order, best first, kept as levels come and go:
+        // a new price is placed by binary search, a removed one spliced out,
+        // a quantity change touches nothing here. Delivery walks it from the
+        // best and stops at the rows it draws, so a side of twenty thousand
+        // levels costs a delivery what a side of forty does. The whole side
+        // used to be sorted for every delivery, which is what a retention
+        // ceiling was bounding — and the ceiling is gone (2026-09-03): the
+        // book keeps every level the exchange states.
+        this.sorted = [];
+    }
+
+    set(price, quantity) {
+        const held = super.has(price);
+        super.set(price, quantity);
+        if (!held) this.placeSorted(price);
+        return this;
+    }
+
+    delete(price) {
+        const removed = super.delete(price);
+        if (removed) this.removeSorted(price);
+        return removed;
+    }
+
+    clear() {
+        super.clear();
+        this.sorted = [];
+    }
+
+    // Where a price belongs in the side's order. Best first: the largest bid,
+    // the smallest ask.
+    placeSorted(price) {
+        const decimal = this.decimalOf(price);
+        let low = 0;
+        let high = this.sorted.length;
+        while (low < high) {
+            const mid = (low + high) >>> 1;
+            const comparison = compareParsedDecimals(this.sorted[mid].decimal, decimal);
+            const before = this.descending ? comparison > 0 : comparison < 0;
+            if (before) low = mid + 1;
+            else high = mid;
+        }
+        this.sorted.splice(low, 0, Object.freeze({ price, decimal }));
+    }
+
+    removeSorted(price) {
+        const decimal = this.decimalOf(price);
+        let low = 0;
+        let high = this.sorted.length;
+        while (low < high) {
+            const mid = (low + high) >>> 1;
+            const comparison = compareParsedDecimals(this.sorted[mid].decimal, decimal);
+            if (comparison === 0) {
+                this.sorted.splice(mid, 1);
+                return;
+            }
+            const before = this.descending ? comparison > 0 : comparison < 0;
+            if (before) low = mid + 1;
+            else high = mid;
+        }
+    }
+
+    bestPrice() {
+        return this.sorted.length === 0 ? null : this.sorted[0].price;
     }
 
     decimalOf(price) {
@@ -233,60 +249,47 @@ class FuturesWorkstationBookSide extends Map {
         return decimal;
     }
 
-    // Prices leave the book as the market walks and as the far edge is evicted,
-    // and what they parsed to would otherwise be remembered for the life of the
-    // session. Dropping only what the side no longer holds keeps the levels that
-    // are about to be walked again, where emptying the whole cache would make
-    // the next frame re-parse the entire book.
+    // Prices leave the book as the market walks, and what they parsed to would
+    // otherwise be remembered for the life of the session. Dropping only what
+    // the side no longer holds keeps the levels that are about to be walked
+    // again, where emptying the whole cache would make the next frame re-parse
+    // the entire book.
     forgetPricesNotHeld() {
         for (const price of this.parsed.keys()) {
             if (!this.has(price)) this.parsed.delete(price);
         }
-        // Still full of prices the book is actually holding: the bound is below
-        // what this side legitimately needs, so it is the bound that gives.
-        if (this.parsed.size >= this.parsedBound) this.parsed.clear();
+        // Still full of prices the book is actually holding: the side has
+        // outgrown the bound, and it is the bound that gives — the book keeps
+        // every level the exchange states, so the cache follows the book.
+        if (this.parsed.size >= this.parsedBound) {
+            this.parsedBound = (this.size * PARSED_PRICE_CACHE_SLACK) + PARSED_PRICE_CACHE_FLOOR;
+        }
     }
 }
 
-// A thousand-level side is sorted several times a second, and comparing two
-// decimals re-parses both strings. Sorting through the comparator would parse
-// every price twenty-odd times per pass; parsing each price once and ordering
-// on the parsed value is the same order, exactly, for a fraction of the work.
-const sortedByPrice = (side, descending) => {
-    const entries = [];
-    let scale = 0;
-    for (const [price, quantity] of side) {
-        const decimal = side.decimalOf(price);
-        if (decimal.scale > scale) scale = decimal.scale;
-        entries.push({ price, quantity, decimal, key: 0n });
+// The same levels, yielded rather than materialized: the grouping stops one
+// row past the panel's count, so a delivery walks a few dozen levels of a side
+// that may hold twenty thousand.
+function* levelsBestFirst(side) {
+    for (const entry of side.sorted) {
+        yield { price: entry.price, quantity: side.get(entry.price) };
     }
-    // A contract quotes every price at one precision, so the common side needs
-    // no rescaling at all and the coefficients are already comparable.
-    for (const entry of entries) {
-        entry.key = entry.decimal.scale === scale
-            ? entry.decimal.coefficient
-            : entry.decimal.coefficient * (10n ** BigInt(scale - entry.decimal.scale));
-    }
-    const direction = descending ? -1n : 1n;
-    entries.sort((left, right) => {
-        if (left.key === right.key) return 0;
-        return Number((left.key < right.key ? -1n : 1n) * direction);
-    });
-    return entries;
-};
+}
 
-// Past the ceiling, the levels furthest from the market go first. Nearest-first
-// retention is what the operator zooms out *against*, so evicting from the near
-// edge would drop exactly what a coarse step is read for; and a level far from
-// the market is the one whose absence a row can best survive, because rows out
-// there are wide.
-const trimSide = (side, descending) => {
-    const { RETAINED_LEVELS_PER_SIDE, EVICTION_SLACK } = FUTURES_WORKSTATION_ORDER_BOOK_LIMITS;
-    if (side.size <= RETAINED_LEVELS_PER_SIDE + EVICTION_SLACK) return;
-    const sorted = sortedByPrice(side, descending);
-    for (const entry of sorted.slice(RETAINED_LEVELS_PER_SIDE)) {
-        side.delete(entry.price);
+// How many levels rest at or beyond the opposite side's best — the evidence
+// a crossed book leaves for the record. Walked from the best inward and
+// stopped at the first level that does not cross, so it costs what it counts.
+const countCrossedLevels = (side, opposite) => {
+    const against = opposite.sorted[0]?.decimal;
+    if (against === undefined) return 0;
+    let crossed = 0;
+    for (const entry of side.sorted) {
+        const comparison = compareParsedDecimals(entry.decimal, against);
+        const crosses = side.descending ? comparison >= 0 : comparison <= 0;
+        if (!crosses) break;
+        crossed += 1;
     }
+    return crossed;
 };
 
 // A level the exchange restates is applied wherever it rests. The exchange named
@@ -350,15 +353,6 @@ const bandOfSnapshot = (snapshot) => {
     });
 };
 
-// How little room a side may have left inside the band before the page is read
-// again, as a share of what that side's page proved when it was bought.
-//
-// Not zero. A side re-read once it has run out has already been empty on the
-// screen the operator is trading from, for as long as the read takes — and a
-// read takes a bridge plus a round trip to the exchange. Re-read with a quarter
-// of the room still there and the side has rows to draw throughout.
-export const FUTURES_WORKSTATION_BAND_ROOM_SHARE = 0.25;
-
 // Two parsed decimals in the order their prices are in, without going back to
 // the strings. Equal scales are the whole of the live case — a contract quotes
 // every price at its own precision — so the exponentiation is only paid on a
@@ -385,24 +379,7 @@ const compareParsedDecimals = (left, right) => {
 // second, over a side that is now thousands of levels deep rather than the
 // nearest thousand. Measured on a 4000-level side, parsing once took a diff from
 // 2.9 ms to 0.6 ms.
-const bestPrice = (side, descending) => {
-    let best = null;
-    let bestDecimal = null;
-    for (const price of side.keys()) {
-        const decimal = side.decimalOf(price);
-        if (best === null) {
-            best = price;
-            bestDecimal = decimal;
-            continue;
-        }
-        const comparison = compareParsedDecimals(decimal, bestDecimal);
-        if (descending ? comparison > 0 : comparison < 0) {
-            best = price;
-            bestDecimal = decimal;
-        }
-    }
-    return best;
-};
+const bestPrice = side => side.bestPrice();
 
 /**
  * The rows the panel draws, grouped where the book is.
@@ -472,13 +449,13 @@ const reachOfEntries = (entries, descending) => {
         : subtractFuturesWorkstationDecimals(far, best);
 };
 
-const groupSide = (side, descending, step, rows, band) => {
-    const entries = sortedByPrice(side, descending);
+const groupSide = (side, step, rows, band) => {
+    const { descending } = side;
     return {
-        best: entries.length > 0 ? entries[0].price : null,
-        reach: reachOfEntries(entries, descending),
+        best: side.bestPrice(),
+        reach: reachOfEntries(side.sorted, descending),
         rows: Object.freeze(groupFuturesBookLevels({
-            levels: entries,
+            levels: levelsBestFirst(side),
             side: descending ? 'bid' : 'ask',
             step,
             limit: rows,
@@ -496,8 +473,8 @@ export class FuturesWorkstationOrderBook {
     constructor() {
         this.phase = FUTURES_WORKSTATION_ORDER_BOOK_PHASES.BUFFERING;
         this.lastUpdateId = null;
-        this.bids = new FuturesWorkstationBookSide();
-        this.asks = new FuturesWorkstationBookSide();
+        this.bids = new FuturesWorkstationBookSide(true);
+        this.asks = new FuturesWorkstationBookSide(false);
         this.buffer = [];
         this.bufferedBytes = 0;
         this.band = null;
@@ -514,155 +491,22 @@ export class FuturesWorkstationOrderBook {
     /**
      * Start a rebuild.
      *
-     * `keepFarBook` is for the rebuild the desk asks for while the stream is
-     * still carrying: a snapshot centred where the market is now. The snapshot
-     * is authoritative for the stretch of price it covers and says nothing about
-     * anything else, so the levels beyond it are neither refreshed nor
-     * contradicted by it — and clearing them on every re-centre means the book
-     * beyond the page never accumulates at all on the contracts that re-centre
-     * most, which are exactly the ones the operator is trading.
-     *
-     * It is not for a rebuild the stream forced. A sequence gap or a reconnect
-     * means diffs were missed, and a level nobody has heard about since could
-     * have been taken. Showing liquidity that is no longer there is the one
-     * error worth clearing a book to avoid.
+     * Every rebuild is one the stream forced — a sequence gap, a crossed book,
+     * a reconnect — since the desk stopped re-reading pages of its own accord
+     * (2026-09-03). Diffs were missed, and a level nobody has heard about since
+     * could have been taken: showing liquidity that is no longer there is the
+     * one error worth clearing a book to avoid, so the book starts again from
+     * the page the snapshot names and the stream fills it back in.
      */
-    beginBootstrap({ keepFarBook = false } = {}) {
+    beginBootstrap() {
         this.phase = FUTURES_WORKSTATION_ORDER_BOOK_PHASES.BUFFERING;
         this.lastUpdateId = null;
-        if (!keepFarBook) {
-            this.bids.clear();
-            this.asks.clear();
-        }
+        this.bids.clear();
+        this.asks.clear();
         this.buffer = [];
         this.bufferedBytes = 0;
         this.band = null;
         this.awaitingBridge = false;
-    }
-
-    /**
-     * Whether the band still reaches `range` past the best price on both sides.
-     *
-     * The rows on screen — how many, times the step they are grouped by — are
-     * what has to be covered. When the market walks far enough that it is not,
-     * the answer is a fresh snapshot, not a book extended past what it proves.
-     */
-    coversRange(range) {
-        if (this.band === null) return false;
-        if (typeof range !== 'string' || !isPositiveFuturesWorkstationDecimal(range)) return true;
-        const bid = bestPrice(this.bids, true);
-        const ask = bestPrice(this.asks, false);
-        if (bid === null || ask === null) return false;
-        // The best price can now rest outside the band: the book keeps every
-        // level the stream restates, and the market can trade its way out of the
-        // page that was read. When it has, the band describes somewhere the
-        // market no longer is, and the rows around the market are proven by
-        // nothing — whatever arithmetic its edges would satisfy.
-        if (!this.band.contains(bid) || !this.band.contains(ask)) return false;
-        return compareFuturesWorkstationDecimals(
-            subtractFuturesWorkstationDecimals(bid, range),
-            this.band.floor,
-        ) >= 0 && compareFuturesWorkstationDecimals(
-            addFuturesWorkstationDecimals(ask, range),
-            this.band.ceiling,
-        ) <= 0;
-    }
-
-    /**
-     * How many times deeper the band would have to be to cover `range`; 0 when
-     * it already does.
-     *
-     * A ratio rather than a verdict, so a step three sizes coarser buys the page
-     * it needs in one read instead of climbing to it one read at a time. Read as
-     * ordinary numbers on purpose: it decides how much to ask for, never what
-     * anything is worth.
-     *
-     * Measured on each side against its own edge and reported as the worse of
-     * the two. Exactly 1 means no side's page is short and the market has walked
-     * out from between them, which the same page re-read answers.
-     */
-    rangeShortfall(range) {
-        // No band at all — a snapshot that came back with a side empty. Nothing
-        // is being dropped, so there is nothing the rows can fall outside of,
-        // and reading the same page again would not produce a band either.
-        if (this.band === null) return 0;
-        if (this.coversRange(range)) return 0;
-        const bid = bestPrice(this.bids, true);
-        const ask = bestPrice(this.asks, false);
-        if (bid === null || ask === null) return Number.POSITIVE_INFINITY;
-        const needed = Number(range);
-        if (!Number.isFinite(needed) || needed <= 0) return 0;
-        // Each side is sized against its own edge, never against the total span.
-        // Measured on the span, a side reaching far past the rows pays for one
-        // that falls short of them: bids from 10 down to 9.9 and asks from 10.1
-        // up to 12, read at a range of 1, state a span of 2.1 against a need of
-        // 2.1 — sufficient, exactly — and buy nothing, while the bid side stays
-        // short by nine tenths of the reading. For the whole session, because
-        // every re-read of that page returns the same asymmetry.
-        let deepest = 0;
-        for (const proven of [this.band.provenBelow, this.band.provenAbove]) {
-            const reach = Number(proven);
-            // This side's page did reach the rows when it was read, so the
-            // market has walked rather than the page being short: a deeper one
-            // buys nothing this side needs.
-            if (Number.isFinite(reach) && reach >= needed) continue;
-            // A side that proved no distance at all cannot be sized — one
-            // distinct price is not a spacing to multiply. Re-read as it is and
-            // sized on the next reading, which will have a side to measure.
-            if (!Number.isFinite(reach) || reach <= 0) return Number.POSITIVE_INFINITY;
-            deepest = Math.max(deepest, needed / reach);
-        }
-        // Both pages reach far enough and the market has simply walked out from
-        // between them: the same page, read again, is a band centred where the
-        // market is now.
-        return Math.max(1, deepest);
-    }
-
-    /**
-     * Whether the band still has room for the market to move in on both sides.
-     *
-     * A different question from `rangeShortfall`, and deliberately not asked in
-     * the same terms. That one asks whether the band reaches the rows on screen,
-     * which is about the step the operator chose and is answered by a deeper
-     * page. This one asks whether the page is still centred on the market, which
-     * no page depth answers: every level past the edge of the band is dropped,
-     * so the side the market walks toward stops receiving levels and empties
-     * while its twin stays full. The only answer is the same page, read again,
-     * where the market is now.
-     *
-     * Judged against what each side's page proved when it was read, never
-     * against the stated range. What a page proved is fixed at the moment of
-     * reading, so a band that fell short of the rows would go on falling short
-     * of them for the session — and a band judged by that measure would never be
-     * found to have moved at all.
-     */
-    holdsMarket(share = FUTURES_WORKSTATION_BAND_ROOM_SHARE) {
-        if (this.band === null) return true;
-        const bid = bestPrice(this.bids, true);
-        const ask = bestPrice(this.asks, false);
-        // A side emptied outright states no best price to measure room from. It
-        // is the shortfall's case — unmeasurable, and re-read on its own account
-        // — not this one.
-        if (bid === null || ask === null) return true;
-        // Traded clean out of the page: no room left to measure, only a band the
-        // market has left behind.
-        if (!this.band.contains(bid) || !this.band.contains(ask)) return false;
-        const sides = [
-            [subtractFuturesWorkstationDecimals(bid, this.band.floor), this.band.provenBelow],
-            [subtractFuturesWorkstationDecimals(this.band.ceiling, ask), this.band.provenAbove],
-        ];
-        for (const [room, proven] of sides) {
-            const reach = Number(proven);
-            // A side whose page proved no distance at all — one distinct price —
-            // is not a spacing to take a share of. Left to the shortfall.
-            if (!Number.isFinite(reach) || reach <= 0) continue;
-            const left = Number(room);
-            if (!Number.isFinite(left)) continue;
-            // Ordinary numbers on purpose, as the shortfall is: this decides
-            // whether to read a page, never what anything is worth.
-            if (left < reach * share) return false;
-        }
-        return true;
     }
 
     /**
@@ -676,12 +520,8 @@ export class FuturesWorkstationOrderBook {
      * Built from the sides already sorted for the rows, so it costs nothing.
      */
     reachOfBook() {
-        const edge = (side, descending) => reachOfEntries(
-            sortedByPrice(side, descending),
-            descending,
-        );
-        const below = edge(this.bids, true);
-        const above = edge(this.asks, false);
+        const below = reachOfEntries(this.bids.sorted, true);
+        const above = reachOfEntries(this.asks.sorted, false);
         if (below === null || above === null) return null;
         return Object.freeze({ below, above });
     }
@@ -764,44 +604,11 @@ export class FuturesWorkstationOrderBook {
             return Object.freeze({ live: false, reason: 'snapshot-not-bridged', resync: true });
         }
 
+        // What the page proves — the stretch every level of which the snapshot
+        // named — is recorded for the rows to say whether they are whole. It
+        // drives no read: the book is built from this one page and then from
+        // the stream (2026-09-03).
         this.band = bandOfSnapshot(snapshot);
-        // The snapshot is the whole truth inside its own band, so a level carried
-        // over from before that the snapshot does not name has been taken, and
-        // goes. Outside the band it says nothing, and what is there stays —
-        // except on the wrong side of the market it states.
-        //
-        // That exception is not a refinement, it is the difference between a book
-        // and a contradiction. Carrying the far book through a re-centre means
-        // carrying levels the new page never mentions, and when the market has
-        // moved further than the old band was wide, the levels left behind are on
-        // the other side of it: a bid from before a crash rests above the asks
-        // that exist now. The book fails closed on that, correctly, and rebuilds
-        // — which is how it showed up, as `CROSSED_ORDER_BOOK` in the operator's
-        // own journal, 20 times on the day the far book landed and 13 the next,
-        // against none in the three days before it.
-        //
-        // A resting bid cannot be at or above the best ask: it would have matched
-        // instead of resting. So the snapshot's own best prices retire it,
-        // wherever it sits.
-        if (this.band !== null) {
-            const named = new Set([
-                ...snapshot.bids.map(([price]) => price),
-                ...snapshot.asks.map(([price]) => price),
-            ]);
-            const stale = (price, side) => {
-                if (this.band.contains(price)) return !named.has(price);
-                const against = side === this.bids ? this.band.bestAsk : this.band.bestBid;
-                if (against === null) return false;
-                return side === this.bids
-                    ? compareFuturesWorkstationDecimals(price, against) >= 0
-                    : compareFuturesWorkstationDecimals(price, against) <= 0;
-            };
-            for (const side of [this.bids, this.asks]) {
-                for (const price of side.keys()) {
-                    if (stale(price, side)) side.delete(price);
-                }
-            }
-        }
         applyLevels(this.bids, snapshot.bids);
         applyLevels(this.asks, snapshot.asks);
         this.lastUpdateId = snapshot.lastUpdateId;
@@ -827,14 +634,28 @@ export class FuturesWorkstationOrderBook {
     applyDelta(delta) {
         applyLevels(this.bids, delta.bids);
         applyLevels(this.asks, delta.asks);
-        trimSide(this.bids, true);
-        trimSide(this.asks, false);
         this.lastUpdateId = delta.finalUpdateIdBigInt;
-        const bestBid = bestPrice(this.bids, true);
-        const bestAsk = bestPrice(this.asks, false);
+        const bestBid = bestPrice(this.bids);
+        const bestAsk = bestPrice(this.asks);
         if (bestBid && bestAsk && compareFuturesWorkstationDecimals(bestBid, bestAsk) >= 0) {
             this.phase = FUTURES_WORKSTATION_ORDER_BOOK_PHASES.RESYNC_REQUIRED;
-            fail('CROSSED_ORDER_BOOK');
+            // A correctly chained diff cannot cross the exchange's own book, so
+            // a crossing is evidence of something else — a level the book should
+            // have dropped, or a diff the exchange should not have sent. The
+            // refusal carries what the record needs to read it: the identities
+            // and how many levels stand across the market. Identities and
+            // counts only, never a price. On 2026-09-02 a hundred crossings were
+            // recorded with nothing to read them by.
+            const error = new FuturesWorkstationOrderBookError('CROSSED_ORDER_BOOK');
+            error.evidence = Object.freeze({
+                lastUpdateId: delta.finalUpdateId,
+                firstUpdateId: delta.firstUpdateId,
+                finalUpdateId: delta.finalUpdateId,
+                previousFinalUpdateId: delta.previousFinalUpdateId,
+                crossedLevels: countCrossedLevels(this.bids, this.asks)
+                    + countCrossedLevels(this.asks, this.bids),
+            });
+            throw error;
         }
     }
 
@@ -855,7 +676,7 @@ export class FuturesWorkstationOrderBook {
      * whose quoted prices disagree with its own tick filter: aligning there
      * would merge two real levels into a price neither of them rests at.
      */
-    toRendererRows({ step = null, rows = null, atDeepestPage = false } = {}) {
+    toRendererRows({ step = null, rows = null } = {}) {
         if (this.phase !== FUTURES_WORKSTATION_ORDER_BOOK_PHASES.LIVE
             || this.lastUpdateId === null) return null;
         const ceiling = FUTURES_WORKSTATION_ORDER_BOOK_LIMITS.RENDERER_ROWS_PER_SIDE;
@@ -866,8 +687,8 @@ export class FuturesWorkstationOrderBook {
             && isPositiveFuturesWorkstationDecimal(step)
             ? step
             : null;
-        const bids = groupSide(this.bids, true, grouped, drawn, this.band);
-        const asks = groupSide(this.asks, false, grouped, drawn, this.band);
+        const bids = groupSide(this.bids, grouped, drawn, this.band);
+        const asks = groupSide(this.asks, grouped, drawn, this.band);
         return Object.freeze({
             lastUpdateId: this.lastUpdateId.toString(),
             // The step these rows were actually grouped by, which is not always
@@ -903,10 +724,9 @@ export class FuturesWorkstationOrderBook {
             // hundredth of each side, because the very furthest level is one
             // resting order nobody trades against. See `reachOfEntries`.
             //
-            // Stated only once no deeper page can be bought. Before then a wider
-            // near book is one read away, and a ladder cut here would stop the
-            // operator selecting the step that buys it.
-            reach: atDeepestPage && bids.reach !== null && asks.reach !== null
+            // Stated on every delivery: there is no deeper page to wait for,
+            // and the book the desk holds is the book the ladder is cut against.
+            reach: bids.reach !== null && asks.reach !== null
                 ? Object.freeze({ below: bids.reach, above: asks.reach })
                 : null,
         });
