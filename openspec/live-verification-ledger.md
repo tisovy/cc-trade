@@ -1014,3 +1014,17 @@ operator's sitting closes them; my journal read follows it.
 | `load-the-rest-in-a-free-minute` | 5.3 | `OUTSTANDING` | — | Production | `3cea882` or later | Select a parked contract: it rebuilds at once (1–2 s) and takes the screen; the journal shows its bootstrap and nothing for the rest. |
 | `load-the-rest-in-a-free-minute` | 5.4 | `OUTSTANDING` | — | Production | `3cea882` or later | Journal read after a session (`node scripts/read-desk-record.mjs`): `Crossed books` equals the number of `stream` evidence lines; `Exchange refusals` is zero, or says which route was refused. |
 | `load-the-rest-in-a-free-minute` | 5.5 | `OUTSTANDING` | — | Production | `3cea882` or later | Leave a reconnecting contract: select another while the shown one is on its ladder; the journal shows one `park` fault for it under the ladder's reason and no bootstrap after. |
+
+## Outstanding — veil the chart during interval switch, 2026-09-03
+
+The interval switch keeps the last series drawn beneath a dark veil and a
+ring (`veil-the-chart-during-interval-switch`, `7e389bc`/`769208e`), and
+keeps it drawn under the link's state when the local connection drops
+before the new series lands (audit fix `732371b`). Archived the same day
+with its live steps carried here; the operator's sitting closes them, my
+journal read follows it.
+
+| Change | Task | Status | Observation date | Account | Desk revision | Evidence |
+|---|---:|---|---|---|---|---|
+| `veil-the-chart-during-interval-switch` | 3.1 | `OUTSTANDING` | — | Production | `769208e` or later | Switch intervals on a live chart: the held chart is visibly darkened while the ring turns, stays readable and takes a gesture, and returns to its normal background when the new series lands. |
+| `veil-the-chart-during-interval-switch` | 3.2 | `OUTSTANDING` | — | Production | `732371b` or later | Save any `electron/**` file while a switch is waiting (the main process restarts, the local link closes): the chart keeps its last series under `DISCONNECTED chart`, no veil, no «No candle has arrived» notice; when the desk subscribes again the chart comes back on the selected interval. |
