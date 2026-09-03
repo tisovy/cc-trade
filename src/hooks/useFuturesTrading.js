@@ -75,6 +75,7 @@ const OPEN_ORDER_STATUSES = new Set(['NEW', 'PARTIALLY_FILLED'])
 // nobody told the desk about is half a minute of staleness rather than a
 // permanent one.
 const ACCOUNT_RECONCILE_INTERVAL_MS = 30_000
+const NO_CANCELS_IN_FLIGHT = Object.freeze([])
 
 // How long a caller waits for the exchange's answer before the silence itself
 // becomes the answer. The backend states an ambiguous outcome immediately and
@@ -1770,13 +1771,72 @@ const useFuturesTrading = ({
     reduceOnly,
   })), [sendCommand])
 
-  const cancelOrder = useCallback(({ symbol: orderSymbol, orderId, origClientOrderId }) => (
-    sendCommand(createFuturesCancelOrderCommand({
-      symbol: orderSymbol ?? symbolRef.current,
-      orderId,
-      origClientOrderId,
-    }))
-  ), [sendCommand])
+  // A command the renderer withheld — for readiness, for a leg it could not
+  // resolve, for a cancel already in flight — never reaches the main process,
+  // and on 2026-09-02 left no line while the operator could not get out. The
+  // report rides the same link as the display transitions: validated by the
+  // record, reaching no exchange, blocking nothing.
+  const reportWithheld = useCallback(({ command, code, symbol: orderSymbol = null, identity = null }) => {
+    if (!enabled || !isOpenSocket(wsConnection) || typeof wsConnection?.send !== 'function') return
+    try {
+      wsConnection.send(JSON.stringify({
+        action: 'report_withheld_command',
+        command,
+        code,
+        market: 'futures',
+        symbol: orderSymbol ?? symbolRef.current ?? null,
+        identity,
+      }))
+    } catch {
+      // Reporting only: the desk never waits on its own diagnostics.
+    }
+  }, [enabled, wsConnection])
+
+  // One cancel in flight per order. Four cancellations of one order left the
+  // renderer in six seconds on 2026-09-02 — nothing on the row said one was
+  // already out — and three came back `-2011`. The key is released by the
+  // answer, the refusal, the unresolved report or the answer watcher.
+  const cancelsInFlightRef = useRef(new Map())
+  const [cancellingOrderIds, setCancellingOrderIds] = useState(NO_CANCELS_IN_FLIGHT)
+  const cancelKeyOf = (orderSymbol, orderId, origClientOrderId) => (
+    `${orderSymbol}:${orderId ?? ''}:${origClientOrderId ?? ''}`
+  )
+  const syncCancelling = useCallback(() => {
+    const ids = [...cancelsInFlightRef.current.values()]
+    setCancellingOrderIds(previous => (
+      previous.length === ids.length && previous.every((id, index) => id === ids[index])
+        ? previous
+        : Object.freeze(ids)
+    ))
+  }, [])
+
+  const cancelOrder = useCallback(({ symbol: orderSymbol, orderId, origClientOrderId }) => {
+    const symbol = orderSymbol ?? symbolRef.current
+    const key = cancelKeyOf(symbol, orderId, origClientOrderId)
+    if (cancelsInFlightRef.current.has(key)) {
+      reportWithheld({
+        command: 'trade.cancelOrder',
+        code: 'CANCEL_IN_FLIGHT',
+        symbol,
+        identity: orderId ?? origClientOrderId ?? null,
+      })
+      return false
+    }
+    const command = createFuturesCancelOrderCommand({ symbol, orderId, origClientOrderId })
+    cancelsInFlightRef.current.set(key, String(orderId ?? origClientOrderId ?? ''))
+    syncCancelling()
+    const release = () => {
+      cancelsInFlightRef.current.delete(key)
+      syncCancelling()
+    }
+    awaitCommandOutcome(command, {
+      kind: 'cancel',
+      symbol,
+      orderId: orderId ?? null,
+      clientOrderId: origClientOrderId ?? null,
+    }).then(release, release)
+    return true
+  }, [awaitCommandOutcome, reportWithheld, syncCancelling])
 
   // Atomic reprice, for the surface that reprices by typing: a rejected
   // amendment leaves the original order untouched on the exchange. The chart
@@ -2348,6 +2408,9 @@ const useFuturesTrading = ({
     modifyOrder,
     cancelOrder,
     cancelOrderAndConfirm,
+    // The orders whose cancel has left the renderer and not yet answered.
+    cancellingOrderIds,
+    reportWithheld,
     cancelAll,
     closePosition,
     adjustPositionMargin,
@@ -2363,6 +2426,8 @@ const useFuturesTrading = ({
     cancelAll,
     cancelOrder,
     cancelOrderAndConfirm,
+    cancellingOrderIds,
+    reportWithheld,
     closePosition,
     feeReserve,
     loadHistory,

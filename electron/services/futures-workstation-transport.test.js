@@ -2,6 +2,10 @@ import { EventEmitter } from 'node:events';
 import https from 'node:https';
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { FUTURES_PRODUCTION_WORKSTATION_FIXTURE } from './futures-production-workstation-fixtures.js';
+import {
+    FUTURES_EXCHANGE_WEIGHT_LIMIT,
+    FUTURES_REST_ACCOUNT_WEIGHT_CEILING,
+} from './binance-connection.js';
 
 const socketMock = vi.hoisted(() => ({ instances: [] }));
 
@@ -1435,10 +1439,12 @@ describe('reviewed environment-specific Futures workstation transports', () => {
             FUTURES_PRODUCTION_WORKSTATION_READ_BUDGET.MAXIMUM_WEIGHT / contractSwitch,
         )).toBeGreaterThanOrEqual(20);
         // Binance answers USDⓈ-M public reads against 2400 weight a minute per
-        // address; the account reader claims at most 800 of it. Both readers at
-        // their ceilings must still leave the exchange's minute unspent.
-        expect(FUTURES_PRODUCTION_WORKSTATION_READ_BUDGET.MAXIMUM_WEIGHT + 800)
-            .toBeLessThan(2_400);
+        // address; the account reader claims at most its stated ceiling. Both
+        // readers at their ceilings must still leave the exchange's minute
+        // unspent.
+        expect(FUTURES_PRODUCTION_WORKSTATION_READ_BUDGET.MAXIMUM_WEIGHT
+            + FUTURES_REST_ACCOUNT_WEIGHT_CEILING)
+            .toBeLessThan(FUTURES_EXCHANGE_WEIGHT_LIMIT);
         expect(Object.isFrozen(FUTURES_PRODUCTION_WORKSTATION_READ_BUDGET)).toBe(true);
     });
 

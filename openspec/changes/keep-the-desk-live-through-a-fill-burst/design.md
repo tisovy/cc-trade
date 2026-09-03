@@ -82,7 +82,10 @@ basis where it is set, as the mark window does.
 
 Rejected: *preempting sleepers* — sleepers already release the admission
 slot (2026-08-22 fix); the window itself is spent, there is nothing to
-preempt. *Raising the ceiling* — the ceiling is the exchange's. *Making
+preempt. *Raising the ceiling* — the ceiling is the exchange's. **Corrected
+2026-09-03:** it was not — the exchange allows 2 400 and the desk had chosen
+800; `let-the-exit-leave-the-desk-first` raises the ceilings to 1 200/1 700
+and takes commands off them entirely. *Making
 background reads urgent-aware case by case* — the 2026-08-23 residual
 (dedup inherits ordinary standing) shows how that leaks; capacity reserve
 covers every current and future urgent caller at one seam.

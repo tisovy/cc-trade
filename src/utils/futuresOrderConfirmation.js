@@ -124,9 +124,12 @@ export const describeFuturesOrderConfirmation = ({
         message: 'There is no position to close — the exchange will reject a reduce-only order.',
       }
     } else if (isExit && targetQuantity !== null && Math.abs(delta) > targetQuantity) {
+      // The desk proves a reduce-only order against the leg it holds and
+      // refuses one that exceeds it — nothing is cut to fit. Said here, with
+      // the leg, before the confirmation rather than after the refusal.
       warning = {
         code: 'LARGER_THAN_POSITION',
-        message: 'Larger than the position — only what is open will be closed.',
+        message: `Larger than the open ${action.positionSide} leg (${targetQuantity}) — the desk will not send it. Size to the leg.`,
       }
     }
   }
@@ -142,6 +145,9 @@ export const describeFuturesOrderConfirmation = ({
     side: action.side,
     positionSide: action.positionSide,
     positionEffect: action.positionEffect,
+    // The leg an exit is measured against, in contracts, as the desk holds it
+    // now — null for an entry or when no leg is held.
+    openLegQuantity: isExit ? targetQuantity : null,
     tone: action.side === 'BUY' ? 'buy' : 'sell',
     symbol,
     price,

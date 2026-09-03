@@ -10629,8 +10629,10 @@ describe('setupBinanceConnection user-data orchestration', () => {
         expect(moduleMocks.futuresAdapter.placeOrder).toHaveBeenCalledOnce();
         expect(moduleMocks.futuresAdapter.findOrder).toHaveBeenCalledOnce();
         expect(diagnostics.filter(entry => entry.kind === 'request')).toEqual([
+            // The mutation is the operator's command; the read that settles it
+            // is a read the command waits on.
             expect.objectContaining({
-                standing: 'urgent',
+                standing: 'command',
                 attempts: 1,
                 chargedWeight: 1,
                 networkRetries: 0,
@@ -11386,6 +11388,16 @@ describe('setupBinanceConnection user-data orchestration', () => {
             'QUANTITY_EXCEEDS_LEG',
             'SIDE_MISMATCH',
         ]);
+        // A quantity refusal states both numbers to the operator and their
+        // ratio to the record: 11 asked against a leg of 10. On 2026-09-02 two
+        // exits were refused by name and nothing said by how much.
+        expect(unproved[3].command_rejected.message).toContain('Requested 11, open leg 10.');
+        expect(unproved[3].command_rejected.details).toMatchObject({
+            requestedQuantity: 11,
+            openQuantity: 10,
+            requestedToLegBps: 11_000,
+        });
+        expect(unproved[0].command_rejected.details.requestedToLegBps).toBeUndefined();
     });
 
     // The 2026-08-24 episode, distilled: the desk displayed the position from
@@ -13003,6 +13015,93 @@ describe('setupBinanceConnection user-data orchestration', () => {
             expect(emitted().some(payload => payload.command_rejected)).toBe(false);
         });
 
+        // 2026-09-02, 21:40:40Z: the margin command answered in 24 362 ms
+        // because its handler awaited the whole account pass behind it, and
+        // every command on the contract queued behind that. The read still
+        // runs; the answer no longer waits for it.
+        it('answers when the exchange answers, with the account read behind it, not in front', async () => {
+            let passStarted = false;
+            // The bootstrap pass answers; every pass after it hangs, as the
+            // 90-weight command pass did behind a full window.
+            const loadPositions = vi.fn()
+                .mockResolvedValueOnce({ futures_positions: [] })
+                .mockImplementation(() => {
+                    passStarted = true;
+                    return new Promise(() => {});
+                });
+            moduleMocks.futuresAdapter.getAccountRefreshOperations.mockReturnValue([{
+                type: 'positions',
+                weight: 5,
+                errorLabel: 'positions',
+                loadPayload: loadPositions,
+            }]);
+            await connectRenderer();
+            await vi.advanceTimersByTimeAsync(2_000);
+            await flushMicrotasks();
+            passStarted = false;
+
+            const pending = adjust({ clientOrderId: 'margin-answer-1' });
+            await vi.advanceTimersByTimeAsync(2_000);
+            await flushMicrotasks();
+            // The handler resolved although the read behind it never will.
+            await expect(Promise.race([
+                pending.then(() => 'answered'),
+                new Promise(resolve => setTimeout(() => resolve('held'), 0)),
+            ])).resolves.toBe('answered');
+            expect(moduleMocks.futuresAdapter.adjustPositionMargin).toHaveBeenCalledOnce();
+            expect(passStarted).toBe(true);
+            expect(emitted().some(payload => payload.command_rejected)).toBe(false);
+        });
+
+        // A command the renderer withheld never reaches a handler, and on
+        // 2026-09-02 left no line while the operator could not get out. The
+        // renderer reports it over the link and the record keeps it as an
+        // outcome of its own.
+        it('is recorded as a withheld outcome with the condition named, and nothing is sent', async () => {
+            const diagnosticRecord = {
+                directory: '/desk/diagnostics',
+                record: vi.fn(() => true),
+                observeOutbound: vi.fn(() => false),
+                observeCommand: vi.fn(() => false),
+                close: vi.fn(),
+            };
+            setupBinanceConnection({
+                localWebSocketAccess: { host: '127.0.0.1' },
+                diagnosticRecord,
+            });
+            moduleMocks.websocketServerHandlers.request({
+                origin: 'http://localhost:5174',
+                accept: vi.fn(() => moduleMocks.rendererConnection),
+            });
+
+            await moduleMocks.rendererHandlers.message({
+                type: 'utf8',
+                utf8Data: JSON.stringify({
+                    action: 'report_withheld_command',
+                    command: 'trade.placeOrder',
+                    code: 'POSITION_UNCONFIRMED',
+                    market: 'futures',
+                    symbol: 'AKEUSDT',
+                    identity: null,
+                    price: '0.123',
+                    quantity: '500',
+                }),
+            });
+
+            expect(diagnosticRecord.record).toHaveBeenCalledWith('outcome', {
+                action: 'trade.placeOrder',
+                result: 'withheld',
+                code: 'POSITION_UNCONFIRMED',
+                market: 'futures',
+                symbol: 'AKEUSDT',
+                identity: null,
+                cause: null,
+                exchangeCode: null,
+                requestedToLegBps: null,
+            });
+            expect(moduleMocks.futuresAdapter.placeOrder).not.toHaveBeenCalled();
+        });
+
         // The ceiling measures what an order puts at risk. Adding margin lowers
         // the risk on a position that already exists.
         it('does not measure a margin transfer against the order cap', async () => {
@@ -13943,3 +14042,4 @@ describe('setupBinanceConnection user-data orchestration', () => {
     });
 
 });
+

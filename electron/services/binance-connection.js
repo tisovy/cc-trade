@@ -399,21 +399,64 @@ const waitForPromise = (promise, signal) => {
 const MAX_ADMISSION_PASSES = 8;
 const MAX_BINANCE_RETRY_AFTER_MS = 3 * 24 * 60 * 60 * 1000;
 
+// What the exchange allows one address in one minute of USDⓈ-M REST, and how
+// far short of it a trading command stops. The desk's own ceilings below are
+// fractions of this; a command is refused capacity by none of them, only by
+// the exchange's number less this margin — a cancel at 2 390 would be the
+// request that turns a full minute into a `429`.
+export const FUTURES_EXCHANGE_WEIGHT_LIMIT = 2400;
+export const FUTURES_EXCHANGE_WEIGHT_MARGIN = 20;
+
+// The account reader's own ceiling, stated against the exchange's rather than
+// as a fraction chosen once. It was 800 — a third of the allowance — and on
+// 2026-09-02 (desk-2026-09-02-000.jsonl) the desk stopped itself at 760–809
+// with the operator unable to leave a position, while the exchange had 1 600
+// unspent. The public reader keeps 600 (`FUTURES_PRODUCTION_WORKSTATION_READ_BUDGET`);
+// 1 700 + 600 stays below 2 400 with the margin above to spare.
+export const FUTURES_REST_ACCOUNT_WEIGHT_CEILING = 1700;
+
 // The slice of the minute window that ordinary work may not book, held back
-// for urgent standing — the operator's commands and the reads they wait on.
-// Urgency alone reorders the queue but confers no capacity, and a window the
-// desk's own reads have filled makes the queue order moot: measured
-// 2026-08-30 (desk-2026-08-30-002.jsonl), ordinary reads pinned the window
-// at 796–800 of 800 for whole minutes and urgent weight-1 cancellations
-// waited 23–35 s behind them, which the renderer's fifteen-second answer
-// deadline turned into false "Cancellation NOT confirmed" warnings. Forty is
-// sized from the same session: a burst's whole urgent traffic — one
-// placement, one replacement, six cancellations at weight 1, a handful of
-// weight-5 reads and one memoized weight-30 position-mode warm — fits inside
-// it, at five percent of the window. Backpressure the exchange itself
-// imposes is not shortened by the reserve; only the desk's own capacity
-// arithmetic consults it.
-export const FUTURES_COMMAND_WEIGHT_RESERVE = 40;
+// for urgent standing — the reads the operator's command waits on. Urgency
+// alone reorders the queue but confers no capacity, and a window the desk's
+// own reads have filled makes the queue order moot: measured 2026-08-30
+// (desk-2026-08-30-002.jsonl), ordinary reads pinned the window at 796–800 of
+// 800 for whole minutes and urgent weight-1 cancellations waited 23–35 s
+// behind them. Forty was sized from that session's urgent traffic and was
+// smaller than the read it had to admit: on 2026-09-02 a position-margin
+// command's consequence pass — two order lists at 40 and two account reads
+// at 5, ninety in all — waited 19 314 ms in urgent standing at 766 of 800.
+// Five hundred is that pass, the proof read a close may need (5) and a
+// contract's configuration read (5 + 1), with room for all three at once.
+// Ordinary standing therefore stops at 1 200 of the 1 700 above — the
+// operator's stated floor. Backpressure the exchange itself imposes is not
+// shortened by the reserve; only the desk's own capacity arithmetic consults
+// it.
+export const FUTURES_COMMAND_WEIGHT_RESERVE = 500;
+
+// A request's standing decides which ceiling it is measured against and who
+// it may pass in the queue. `command` is the operator's trading command
+// itself; `urgent` a read that command waits on; `ordinary` the desk's own
+// housekeeping. A boolean is the older `urgent` flag, kept for every caller
+// that still states it.
+const REQUEST_STANDINGS = new Set(['command', 'urgent', 'ordinary']);
+const normalizeRequestStanding = (standing, urgent = false) => {
+    if (REQUEST_STANDINGS.has(standing)) return standing;
+    if (standing === true || urgent === true) return 'urgent';
+    return 'ordinary';
+};
+
+// The route a physical attempt was sent on, in the record's closed vocabulary.
+// A logical operation may touch the clock before its own route; the clock is
+// never the operation's route unless it was the whole of it.
+const PHYSICAL_ROUTE = /^[a-z][a-z-]{0,31}$/;
+const preferredPhysicalRoute = (held, candidate) => {
+    const next = typeof candidate === 'string' && PHYSICAL_ROUTE.test(candidate)
+        ? candidate
+        : null;
+    if (next === null) return held;
+    if (held === null || held === 'time') return next;
+    return held;
+};
 
 const addBoundedCount = (left, right = 1) => Math.min(
     Number.MAX_SAFE_INTEGER,
@@ -460,6 +503,8 @@ export class RateLimiter {
             onOperation = null,
             physicalAttempts = false,
             commandWeightReserve = 0,
+            exchangeWeightLimit = null,
+            exchangeWeightMargin = 0,
         } = {},
     ) {
         this.maxWeight = maxWeight;        // Max weight per window (conservative)
@@ -471,6 +516,17 @@ export class RateLimiter {
         this.commandWeightReserve = Number.isSafeInteger(commandWeightReserve)
             && commandWeightReserve > 0
             ? commandWeightReserve
+            : 0;
+        // Stated only by the budget that meters trading commands. Absent, a
+        // command is measured like urgent work — the legacy Spot limiter and
+        // every stand that never states it keep their old arithmetic.
+        this.exchangeWeightLimit = Number.isSafeInteger(exchangeWeightLimit)
+            && exchangeWeightLimit > 0
+            ? exchangeWeightLimit
+            : null;
+        this.exchangeWeightMargin = Number.isSafeInteger(exchangeWeightMargin)
+            && exchangeWeightMargin >= 0
+            ? exchangeWeightMargin
             : 0;
         this.requests = [];                // Track { timestamp, weight }
         this.lastRequestTime = 0;          // Last request timestamp for spacing
@@ -544,7 +600,7 @@ export class RateLimiter {
      * received after a boundary can only describe the interval it arrived in or
      * an older one, so the interval stamp never releases spend early; the desk's
      * clock is trusted to the boundary the way every signed request already
-     * trusts it, and the 800-of-2400 ceiling absorbs sub-second skew.
+     * trusts it, and the ceiling's distance from 2400 absorbs sub-second skew.
      */
     reconcilePhysicalResponse(
         { status, usedWeight, retryAfterMs } = {},
@@ -604,16 +660,16 @@ export class RateLimiter {
         }
     }
 
-    reservationWait(weight, urgent = false) {
+    reservationWait(weight, standing = 'ordinary') {
         const now = Date.now();
         const spent = this.getCurrentWeight();
         const backpressureMs = Math.max(0, this.backpressureUntil - now);
         // Ordinary standing may not book into the command reserve; urgent
-        // standing may spend the window to its true ceiling. The exchange's
-        // own backpressure is taken before this arithmetic either way.
-        const ceiling = urgent === true
-            ? this.maxWeight
-            : this.maxWeight - this.commandWeightReserve;
+        // standing may spend the window to its true ceiling; a command is
+        // refused by nothing of the desk's own and stops only short of the
+        // exchange's limit. The exchange's own backpressure is taken before
+        // this arithmetic either way.
+        const ceiling = this.ceilingFor(normalizeRequestStanding(standing));
         const capacityMs = spent + weight > ceiling && this.requests.length > 0
             ? Math.max(
                 0,
@@ -622,8 +678,20 @@ export class RateLimiter {
             : 0;
         return {
             spent,
+            ceiling,
             sleepFor: Math.max(backpressureMs, capacityMs),
         };
+    }
+
+    ceilingFor(standing) {
+        if (standing === 'command') {
+            return this.exchangeWeightLimit === null
+                ? this.maxWeight
+                : this.exchangeWeightLimit - this.exchangeWeightMargin;
+        }
+        return standing === 'urgent'
+            ? this.maxWeight
+            : this.maxWeight - this.commandWeightReserve;
     }
 
     /**
@@ -654,6 +722,12 @@ export class RateLimiter {
      * urgent request would skip, not only whichever entry is now at the head.
      */
     nextAdmission() {
+        // A command goes first, uncounted: the overtake bound exists so that
+        // housekeeping is not starved by a stream of urgent reads, and a
+        // cancel is not a stream. On 2026-09-02 four cancels took their turn
+        // behind a thirty-entry drain at the minute boundary.
+        const command = this.waiting.findIndex(entry => entry.standing === 'command');
+        if (command >= 0) return command;
         const head = this.waiting[0];
         if (head.urgent) return 0;
         const urgent = this.waiting.findIndex(entry => entry.urgent);
@@ -689,8 +763,14 @@ export class RateLimiter {
      * reservation: a request the window has no room for gives it back and asks
      * again rather than sleeping on it.
      */
-    async takeAdmission(signal, urgent, passes = 0) {
-        const entry = { urgent: urgent === true, passes, admit: null };
+    async takeAdmission(signal, standing, passes = 0) {
+        const requestStanding = normalizeRequestStanding(standing);
+        const entry = {
+            standing: requestStanding,
+            urgent: requestStanding !== 'ordinary',
+            passes,
+            admit: null,
+        };
         const turn = new Promise(resolve => {
             entry.admit = resolve;
         });
@@ -720,8 +800,8 @@ export class RateLimiter {
      * What does *not* happen under the slot is the waiting.
      *
      * It waits outside the slot because it used to wait inside it, and that
-     * stopped the queue dead rather than slowing it. This budget is 800 a minute
-     * against the 2400 the exchange allows; when a start spends it, the request
+     * stopped the queue dead rather than slowing it. This budget was 800 a minute
+     * against the 2400 the exchange allows; when a start spent it, the request
      * at the head slept out the rest of the window holding the slot, and nothing
      * behind it moved — including a one-weight command from the operator that
      * the remaining budget had room for. `urgent` cannot help there: it decides
@@ -736,9 +816,11 @@ export class RateLimiter {
      * passes already counted against it. Capacity backpressure changes its queue
      * position, not how much urgent overtaking it has already endured.
      */
-    async reserve(weight, signal, { urgent = false, isCurrent = null } = {}) {
+    async reserve(weight, signal, { urgent = false, standing = null, isCurrent = null } = {}) {
+        const requestStanding = normalizeRequestStanding(standing, urgent);
         let deferredFrom = null;
         let spentWhenHeld = 0;
+        let ceilingWhenHeld = this.maxWeight;
         let admission;
         // Carried across the re-queue rather than restarted with it. The bound on
         // urgent overtaking is counted against whoever has waited longest, and a
@@ -747,12 +829,12 @@ export class RateLimiter {
         // another eight times for every window it waits, which is not a bound.
         let passes = 0;
         for (;;) {
-            const entry = await this.takeAdmission(signal, urgent, passes);
+            const entry = await this.takeAdmission(signal, requestStanding, passes);
             let sleepFor = 0;
             let booked = false;
             try {
                 throwIfAborted(signal);
-                let wait = this.reservationWait(weight, urgent);
+                let wait = this.reservationWait(weight, requestStanding);
                 if (wait.sleepFor === 0) {
                     await this.enforceDelay(signal);
                     throwIfAborted(signal);
@@ -760,7 +842,7 @@ export class RateLimiter {
                     // exchange-used-weight sample while this admission is in
                     // its spacing delay. Recheck before booking rather than
                     // admitting against the stale lower reading.
-                    if (this.physicalAttempts) wait = this.reservationWait(weight, urgent);
+                    if (this.physicalAttempts) wait = this.reservationWait(weight, requestStanding);
                     if (!this.physicalAttempts || wait.sleepFor === 0) {
                         if (typeof isCurrent === 'function') {
                             let stillCurrent = false;
@@ -794,6 +876,13 @@ export class RateLimiter {
                     if (deferredFrom === null) {
                         deferredFrom = Date.now();
                         spentWhenHeld = wait.spent;
+                        // The line states the window for a read — the reserve
+                        // is arithmetic inside it, not a second smaller window
+                        // — and the exchange's own limit for a command, which
+                        // is the only ceiling a command is ever held at.
+                        ceilingWhenHeld = requestStanding === 'command'
+                            ? wait.ceiling
+                            : this.maxWeight;
                     }
                     sleepFor = wait.sleepFor;
                     logger.debug(`Rate limiter: waiting ${sleepFor}ms (current weight: ${wait.spent}/${this.maxWeight})`);
@@ -807,11 +896,11 @@ export class RateLimiter {
                 // weight has no business holding the queue while it does.
                 if (deferredFrom !== null) {
                     this.noteDeferred({
-                        standing: urgent === true ? 'urgent' : 'ordinary',
+                        standing: requestStanding,
                         waitedMs: Date.now() - deferredFrom,
                         weight,
                         spent: spentWhenHeld,
-                        ceiling: this.maxWeight,
+                        ceiling: ceilingWhenHeld,
                     });
                 }
                 return admission;
@@ -846,12 +935,15 @@ export class RateLimiter {
         {
             signal,
             urgent = false,
+            standing = null,
             onAccounting = null,
             onAttemptAdmitted = null,
             isCurrent = null,
         } = {},
     ) {
+        const requestStanding = normalizeRequestStanding(standing, urgent);
         const accounting = this.physicalAttempts ? {
+            route: null,
             attempts: 0,
             chargedWeight: 0,
             observedWeight: null,
@@ -874,11 +966,12 @@ export class RateLimiter {
         };
         const context = accounting === null ? null : {
             signal: signal ?? null,
-            admit: async (overrideWeight) => {
+            admit: async (overrideWeight, route = null) => {
                 if (!ownsAttempt()) throw createAbortError();
                 const admittedWeight = physicalAttemptWeight(overrideWeight, declaredWeight);
+                accounting.route = preferredPhysicalRoute(accounting.route, route);
                 const admission = await this.reserve(admittedWeight, signal, {
-                    urgent,
+                    standing: requestStanding,
                     isCurrent: ownsAttempt,
                 });
                 accounting.attempts = addBoundedCount(accounting.attempts);
@@ -941,7 +1034,7 @@ export class RateLimiter {
         // part of the one SDK operation the legacy limiter admitted. Futures
         // installs the physical context below and every low-level HTTP send
         // reserves itself, so it must not pre-reserve here.
-        if (context === null) await this.reserve(weight, signal, { urgent });
+        if (context === null) await this.reserve(weight, signal, { standing: requestStanding });
 
         const executeAttempts = async () => {
             let lastError;
@@ -996,7 +1089,8 @@ export class RateLimiter {
             throw error;
         } finally {
             const summary = Object.freeze({
-                standing: urgent === true ? 'urgent' : 'ordinary',
+                standing: requestStanding,
+                route: accounting.route,
                 attempts: accounting.attempts,
                 chargedWeight: accounting.chargedWeight,
                 observedWeight: accounting.observedWeight,
@@ -1410,10 +1504,14 @@ export function setupBinanceConnection({
     // fapi allows 2400 weight/min, and the spacing this is given carries its own
     // reasoning where it is defined — including what else is sized off it.
     const futuresRestLimiter = new RateLimiter(
-        800,
+        FUTURES_REST_ACCOUNT_WEIGHT_CEILING,
         60000,
         FUTURES_REST_ADMISSION_SPACING_MS,
         {
+            // A trading command is measured against the exchange's own limit,
+            // less the margin; every ceiling of the desk's own is for reads.
+            exchangeWeightLimit: FUTURES_EXCHANGE_WEIGHT_LIMIT,
+            exchangeWeightMargin: FUTURES_EXCHANGE_WEIGHT_MARGIN,
             // Futures retries that really send again live below this logical
             // call. Physical mode lets that low-level boundary reserve each
             // send once; Spot's separate limiter deliberately remains logical.
@@ -5725,9 +5823,42 @@ export function setupBinanceConnection({
                 return refusal('SIDE_MISMATCH');
             }
             if (requested > Math.abs(openQuantity)) {
-                return refusal('QUANTITY_EXCEEDS_LEG');
+                // Both numbers travel with the refusal: on 2026-09-02 two exits
+                // were refused by name and nothing said by how much.
+                return {
+                    confirmed: false,
+                    cause: 'QUANTITY_EXCEEDS_LEG',
+                    requested,
+                    open: Math.abs(openQuantity),
+                };
             }
             return { confirmed: true, cause: null };
+        };
+
+        // The refusal's words and its details, from the verdict. A quantity
+        // refusal states the size asked for and the leg held; the record gets
+        // their ratio in basis points — a count, not an amount.
+        const describeFuturesReductionRefusal = (verdict, order) => {
+            const detail = {
+                marketType: FUTURES_MARKET_TYPE,
+                symbol: order.symbol,
+                positionSide: order.positionSide ?? null,
+                cause: verdict.cause,
+            };
+            let message = FUTURES_REDUCTION_REFUSALS[verdict.cause];
+            if (verdict.cause === 'QUANTITY_EXCEEDS_LEG'
+                && Number.isFinite(verdict.requested)
+                && Number.isFinite(verdict.open)
+                && verdict.open > 0) {
+                message = `${message} Requested ${verdict.requested}, open leg ${verdict.open}.`;
+                detail.requestedQuantity = verdict.requested;
+                detail.openQuantity = verdict.open;
+                detail.requestedToLegBps = Math.min(
+                    Number.MAX_SAFE_INTEGER,
+                    Math.floor((verdict.requested / verdict.open) * 10_000),
+                );
+            }
+            return { message, detail };
         };
 
         // Operator ruling, 2026-08-24: closing is never blocked by market-data
@@ -5828,16 +5959,12 @@ export function setupBinanceConnection({
                     }
                 }
                 if (!verdict.confirmed) {
+                    const refusal = describeFuturesReductionRefusal(verdict, order);
                     emit(createCommandRejection(
                         TRADING_COMMAND_ACTIONS.PLACE_ORDER,
                         'FUTURES_REDUCTION_NOT_CONFIRMED',
-                        FUTURES_REDUCTION_REFUSALS[verdict.cause],
-                        {
-                            marketType: FUTURES_MARKET_TYPE,
-                            symbol: order.symbol,
-                            positionSide: order.positionSide ?? null,
-                            cause: verdict.cause,
-                        },
+                        refusal.message,
+                        refusal.detail,
                     ));
                     return;
                 }
@@ -5867,7 +5994,7 @@ export function setupBinanceConnection({
                     () => futuresTradingAdapter.placeOrder(order),
                     1,
                     0,
-                    { urgent: true },
+                    { standing: 'command' },
                 );
                 noteFuturesMutation();
                 emit({ futures_execution_update: report });
@@ -7252,7 +7379,7 @@ export function setupBinanceConnection({
                     () => futuresTradingAdapter.modifyOrder(amendment),
                     1,
                     0,
-                    { urgent: true },
+                    { standing: 'command' },
                 );
                 noteFuturesMutation();
                 emit({ futures_execution_update: report });
@@ -7290,7 +7417,7 @@ export function setupBinanceConnection({
                     () => futuresTradingAdapter.cancelOrder(command),
                     1,
                     0,
-                    { urgent: true },
+                    { standing: 'command' },
                 );
                 noteFuturesMutation();
                 emit({ futures_execution_update: report });
@@ -7345,7 +7472,7 @@ export function setupBinanceConnection({
                         () => futuresTradingAdapter.cancelAllOrders(command.symbol),
                         1,
                         0,
-                        { urgent: true },
+                        { standing: 'command' },
                     ),
                 },
                 {
@@ -7355,7 +7482,7 @@ export function setupBinanceConnection({
                         () => futuresTradingAdapter.cancelAllAlgoOrders(command.symbol),
                         1,
                         0,
-                        { urgent: true },
+                        { standing: 'command' },
                     ),
                 },
             ];
@@ -7463,11 +7590,21 @@ export function setupBinanceConnection({
                     () => futuresTradingAdapter.adjustPositionMargin(adjustment),
                     1,
                     0,
-                    { urgent: true },
+                    { standing: 'command' },
                 );
                 noteFuturesMutation();
-                // The row shows the exchange's figure, not the requested one.
-                await refreshFuturesAccountState({ reason: 'command' });
+                // The row shows the exchange's figure, not the requested one —
+                // read behind the answer, never in front of it. On 2026-09-02
+                // this read was awaited and held the answer 24 362 ms behind a
+                // 90-weight pass the budget had no room for, with every
+                // command on the contract queued behind it. With the stream
+                // carrying the account, the position and the wallet are the
+                // two things a transfer moves; without it, the whole pass
+                // still runs, and still not in front of the answer.
+                void refreshFuturesAccountState(futuresStreamCarriesOrders()
+                    ? { resources: ['positions', 'balances'], reason: 'command' }
+                    : { reason: 'command' })
+                    .catch(error => reportDetachedFuturesAccountRefreshFailure('command', error));
             } catch (error) {
                 // A margin transfer carries no client id Binance would echo, so
                 // there is nothing to reconcile by: re-reading the account is
@@ -8586,6 +8723,25 @@ export function setupBinanceConnection({
                     symbol: data.symbol ?? null,
                     from: data.from ?? null,
                     cause: data.cause ?? null,
+                });
+                return;
+            }
+            // A command the renderer withheld — for readiness, for a leg it
+            // could not resolve, for a cancel already in flight — never
+            // reaches the handlers below and used to leave no line at all.
+            // On 2026-09-02 the operator's exits were withheld for twenty-four
+            // seconds and the record showed four cancels and a blank.
+            if (data.action === 'report_withheld_command') {
+                diagnosticRecord.record('outcome', {
+                    action: data.command,
+                    result: 'withheld',
+                    code: data.code,
+                    market: data.market ?? null,
+                    symbol: data.symbol ?? null,
+                    identity: data.identity ?? null,
+                    cause: null,
+                    exchangeCode: null,
+                    requestedToLegBps: null,
                 });
                 return;
             }

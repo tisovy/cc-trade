@@ -676,6 +676,9 @@ export const FuturesPortfolioDock = ({
   feeReserve = null,
   onClosePosition,
   onCancelOrder,
+  // Orders whose cancel has left and not yet answered: the row says so instead
+  // of offering a second cancel of the same order.
+  cancellingOrderIds = EMPTY_ROWS,
   onOrderEdit,
   onMarginEdit,
   onLeverageEdit,
@@ -1306,14 +1309,18 @@ export const FuturesPortfolioDock = ({
                       <button
                         type="button"
                         className="futures-workstation-dock-cancel"
-                        aria-label={`Cancel ${order.symbol} ${intent.side} order at ${order.price}`}
-                        disabled={typeof onCancelOrder !== 'function'}
+                        aria-label={cancellingOrderIds.includes(String(order.orderId))
+                          ? `Cancelling ${order.symbol} ${intent.side} order at ${order.price}`
+                          : `Cancel ${order.symbol} ${intent.side} order at ${order.price}`}
+                        aria-busy={cancellingOrderIds.includes(String(order.orderId))}
+                        disabled={typeof onCancelOrder !== 'function'
+                          || cancellingOrderIds.includes(String(order.orderId))}
                         onClick={(event) => {
                           event.stopPropagation()
                           onCancelOrder?.({ symbol: order.symbol, orderId: order.orderId })
                         }}
                       >
-                        Cancel
+                        {cancellingOrderIds.includes(String(order.orderId)) ? 'Cancelling…' : 'Cancel'}
                       </button>
                     )}
                   </span>

@@ -753,3 +753,35 @@ describe('production RateLimiter cancellation', () => {
         await expect(held).resolves.toBe('account-pass');
     });
 });
+
+// The record names a request's route — the desk's own word for where the
+// attempt went, never a path — and a command's standing. On 2026-09-02 two
+// thousand weight-5 lines could be attributed only by their cadence.
+describe('production RateLimiter route and standing on the request line', () => {
+    it('carries the route the physical attempt named, preferring the operation over the clock', async () => {
+        const summaries = [];
+        const limiter = new RateLimiter(800, 60_000, 0, {
+            physicalAttempts: true,
+            onOperation: summary => summaries.push(summary),
+        });
+        await limiter.execute(async () => {
+            // A signed read syncs the clock first; the clock is not the route.
+            await admitBinancePhysicalAttempt(1, 'time');
+            await admitBinancePhysicalAttempt(5, 'history-trades');
+            return 'ok';
+        }, 5, 0, { standing: 'command' });
+        await limiter.execute(async () => {
+            await admitBinancePhysicalAttempt(30, 'income');
+            return 'ok';
+        }, 30, 0);
+        await limiter.execute(async () => {
+            await admitBinancePhysicalAttempt(5);
+            return 'ok';
+        }, 5, 0, { urgent: true });
+        expect(summaries.map(summary => [summary.standing, summary.route, summary.chargedWeight])).toEqual([
+            ['command', 'history-trades', 6],
+            ['ordinary', 'income', 30],
+            ['urgent', null, 5],
+        ]);
+    });
+});

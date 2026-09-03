@@ -205,7 +205,11 @@ export const deriveFuturesReadiness = ({
       balanceResource.error?.message || 'Futures balance is unavailable. Retry account synchronization.',
     )
   }
-  if (balanceStatus === 'stale') {
+  // A stale balance bounds what may be opened, not what may be closed: an
+  // exit releases margin, and the leg it closes is proved by the main process
+  // against its own newest reading. On 2026-09-02 an exit was withheld on a
+  // reading the desk was in the middle of re-confirming.
+  if (balanceStatus === 'stale' && exposureIncreasing) {
     return result(
       FUTURES_READINESS_CODES.ACCOUNT_STALE,
       'attention',

@@ -64,9 +64,12 @@ export const FUTURES_PRODUCTION_WORKSTATION_BOOTSTRAP_CONCURRENCY = 5;
 export const FUTURES_PRODUCTION_WORKSTATION_RESOURCE_RETRIES = 2;
 
 // Binance answers USDⓈ-M public reads against 2400 weight per minute per
-// address, of which the account reader claims at most 800 (`RateLimiter` in
-// `binance-connection.js`). A quarter of the exchange's minute leaves a
-// thousand of it unspent with both readers at their ceilings.
+// address, of which the account reader claims at most 1700
+// (`FUTURES_REST_ACCOUNT_WEIGHT_CEILING` in `binance-connection.js`; it was
+// 800 until 2026-09-03). A quarter of the exchange's minute here leaves a
+// hundred of it unspent with both readers at their ceilings — and the
+// operator's trading commands are measured against the exchange's own
+// number, not against either ceiling.
 //
 // Sized against what the desk costs rather than left at a bare default: one
 // contract switch is 24 — a 1000-level book at 20 and four reads at 1 — and a

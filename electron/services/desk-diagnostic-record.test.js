@@ -188,6 +188,7 @@ describe('describeDeskDiagnosticEvent', () => {
         })).toEqual({
             kind: 'request',
             standing: 'urgent',
+            route: null,
             attempts: 4,
             chargedWeight: 62,
             observedWeight: 781,
@@ -1055,6 +1056,110 @@ describe('the events the desk states to the renderer', () => {
             identity: 'f-m9x2k1-4a7bd0e2',
             cause: null,
             exchangeCode: null,
+            requestedToLegBps: null,
+        });
+    });
+
+    // 2026-09-02: two exits refused for exceeding the leg, and the record said
+    // by name and not by how much. The ratio rides the line as a count; the
+    // sizes themselves never do.
+    it('carries the requested-to-leg ratio of a quantity refusal, and no size', () => {
+        expect(readDeskDiagnosticOutboundEvent({
+            command_rejected: {
+                request: 'trade.placeOrder',
+                code: 'FUTURES_REDUCTION_NOT_CONFIRMED',
+                message: 'The requested quantity exceeds the open leg. Requested 120, open leg 100.',
+                details: {
+                    marketType: 'futures',
+                    symbol: 'AKEUSDT',
+                    cause: 'QUANTITY_EXCEEDS_LEG',
+                    requestedQuantity: 120,
+                    openQuantity: 100,
+                    requestedToLegBps: 12_000,
+                },
+                timestamp: AT,
+            },
+        })).toEqual({
+            kind: 'outcome',
+            action: 'trade.placeOrder',
+            result: 'rejected',
+            code: 'FUTURES_REDUCTION_NOT_CONFIRMED',
+            market: 'futures',
+            symbol: 'AKEUSDT',
+            identity: null,
+            cause: 'QUANTITY_EXCEEDS_LEG',
+            exchangeCode: null,
+            requestedToLegBps: 12_000,
+        });
+    });
+
+    // A command the renderer withheld is an outcome of its own, so an exit
+    // that never left the renderer is a line and not a blank.
+    it('keeps a withheld command under the outcome fields', () => {
+        expect(describeDeskDiagnosticEvent('outcome', {
+            action: 'trade.placeOrder',
+            result: 'withheld',
+            code: 'FUTURES_POSITION_UNCONFIRMED',
+            market: 'futures',
+            symbol: 'AKEUSDT',
+            identity: null,
+            cause: null,
+            exchangeCode: null,
+            requestedToLegBps: null,
+        })).toEqual({
+            kind: 'outcome',
+            action: 'trade.placeOrder',
+            result: 'withheld',
+            code: 'FUTURES_POSITION_UNCONFIRMED',
+            market: 'futures',
+            symbol: 'AKEUSDT',
+            identity: null,
+            cause: null,
+            exchangeCode: null,
+            requestedToLegBps: null,
+        });
+    });
+
+    // The route a physical attempt went on — a word of the desk's own, never a
+    // path. A route this record will not repeat costs the route and not the
+    // line, exactly as an exchange code does.
+    it('names a request\'s route and refuses a path in its place', () => {
+        const request = route => describeDeskDiagnosticEvent('request', {
+            standing: 'ordinary',
+            route,
+            attempts: 1,
+            chargedWeight: 5,
+            observedWeight: 700,
+            backpressureMs: 0,
+            connectionRetries: 0,
+            networkRetries: 0,
+            timestampRetries: 0,
+            rateLimitResponses: 0,
+            outcome: 'ok',
+            status: 200,
+            code: null,
+        });
+        expect(request('history-trades')).toMatchObject({ kind: 'request', route: 'history-trades' });
+        expect(request('/fapi/v1/userTrades?symbol=AKEUSDT')).toMatchObject({ kind: 'request', route: null });
+        expect(request(undefined)).toMatchObject({ kind: 'request', route: null });
+    });
+
+    // A command held by the exchange's own limit is the one wait line a command
+    // can produce; the desk's ceilings hold no command.
+    it('keeps a command\'s wait under its own standing', () => {
+        expect(describeDeskDiagnosticEvent('deferred', {
+            standing: 'command',
+            waitedMs: 1_803,
+            weight: 1,
+            spent: 2_380,
+            ceiling: 2_380,
+        })).toEqual({
+            kind: 'deferred',
+            standing: 'command',
+            waitedMs: 1_803,
+            weight: 1,
+            spent: 2_380,
+            ceiling: 2_380,
         });
     });
 

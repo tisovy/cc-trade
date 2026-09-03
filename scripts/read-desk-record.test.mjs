@@ -728,3 +728,47 @@ describe('where the record lives', () => {
       .toBe('/Users/desk/Library/Application Support/cc-trade/diagnostics')
   })
 })
+
+// 2026-09-02: an exit withheld by the renderer left no line, and two thousand
+// weight-5 request lines could be attributed only by their cadence. The
+// summary now counts what the renderer withheld apart from what was refused,
+// and charges each route with the weight its attempts cost.
+describe('withholdings and routes', () => {
+  const day = [
+    line({ at: '2026-09-02T21:40:45.000Z', kind: 'outcome', action: 'trade.placeOrder', result: 'withheld', code: 'FUTURES_POSITION_UNCONFIRMED', market: 'futures', symbol: 'AKEUSDT', identity: null, cause: null, exchangeCode: null, requestedToLegBps: null }),
+    line({ at: '2026-09-02T21:40:48.000Z', kind: 'outcome', action: 'trade.cancelOrder', result: 'withheld', code: 'CANCEL_IN_FLIGHT', market: 'futures', symbol: 'AKEUSDT', identity: '2348556301', cause: null, exchangeCode: null, requestedToLegBps: null }),
+    line({ at: '2026-09-02T21:40:49.000Z', kind: 'outcome', action: 'trade.cancelOrder', result: 'withheld', code: 'CANCEL_IN_FLIGHT', market: 'futures', symbol: 'AKEUSDT', identity: '2348556301', cause: null, exchangeCode: null, requestedToLegBps: null }),
+    line({ at: '2026-09-02T21:46:03.000Z', kind: 'outcome', action: 'trade.placeOrder', result: 'rejected', code: 'FUTURES_REDUCTION_NOT_CONFIRMED', market: 'futures', symbol: 'AKEUSDT', identity: null, cause: 'QUANTITY_EXCEEDS_LEG', exchangeCode: null, requestedToLegBps: 11_000 }),
+    line({ at: '2026-09-02T21:48:00.000Z', kind: 'request', standing: 'ordinary', route: 'history-trades', attempts: 1, chargedWeight: 5, observedWeight: 700, backpressureMs: 0, connectionRetries: 0, networkRetries: 0, timestampRetries: 0, rateLimitResponses: 0, outcome: 'ok', status: 200, code: null }),
+    line({ at: '2026-09-02T21:48:01.000Z', kind: 'request', standing: 'ordinary', route: 'history-trades', attempts: 1, chargedWeight: 5, observedWeight: 705, backpressureMs: 0, connectionRetries: 0, networkRetries: 0, timestampRetries: 0, rateLimitResponses: 0, outcome: 'ok', status: 200, code: null }),
+    line({ at: '2026-09-02T21:48:02.000Z', kind: 'request', standing: 'ordinary', route: 'income', attempts: 1, chargedWeight: 30, observedWeight: 735, backpressureMs: 0, connectionRetries: 0, networkRetries: 0, timestampRetries: 0, rateLimitResponses: 0, outcome: 'ok', status: 200, code: null }),
+    line({ at: '2026-09-02T21:48:03.000Z', kind: 'request', standing: 'command', route: 'cancel', attempts: 1, chargedWeight: 1, observedWeight: 736, backpressureMs: 0, connectionRetries: 0, networkRetries: 0, timestampRetries: 0, rateLimitResponses: 0, outcome: 'ok', status: 200, code: null }),
+    line({ at: '2026-09-02T21:48:04.000Z', kind: 'request', standing: 'ordinary', attempts: 1, chargedWeight: 5, observedWeight: 741, backpressureMs: 0, connectionRetries: 0, networkRetries: 0, timestampRetries: 0, rateLimitResponses: 0, outcome: 'ok', status: 200, code: null }),
+  ].join('')
+  const summary = summarizeDeskDiagnosticRecord(day)
+
+  it('counts what the renderer withheld apart from what was refused', () => {
+    expect(summary.withholdings).toEqual([
+      { key: 'CANCEL_IN_FLIGHT[futures]', count: 2 },
+      { key: 'FUTURES_POSITION_UNCONFIRMED[futures]', count: 1 },
+    ])
+    expect(summary.refusals).toEqual([
+      { key: 'QUANTITY_EXCEEDS_LEG[futures]', count: 1 },
+    ])
+    const report = formatDeskDiagnosticSummary(summary)
+    expect(report).toContain('Withheld by the renderer (3)')
+    expect(report).toContain('Refusals by cause (1)')
+  })
+
+  it('charges each route with the weight its attempts cost', () => {
+    expect(summary.routes).toEqual([
+      { route: 'income', count: 1, weight: 30 },
+      { route: 'history-trades', count: 2, weight: 10 },
+      { route: '(unnamed)', count: 1, weight: 5 },
+      { route: 'cancel', count: 1, weight: 1 },
+    ])
+    const report = formatDeskDiagnosticSummary(summary)
+    expect(report).toContain('Requests by route (5 attempts, weight 46)')
+    expect(report).toContain('history-trades')
+  })
+})

@@ -240,6 +240,42 @@ export const parseFuturesUserStreamJson = source => JSON.parse(
     preserveFuturesCompactIdentifierTokens(String(source)),
 );
 
+// The record's name for a route, from the method and the path and nothing
+// else: no host, no query, no identifier. Closed on purpose — a route the desk
+// has not named reads `other` rather than carrying the path.
+const FUTURES_ROUTES = Object.freeze([
+    ['GET', '/fapi/v1/time', 'time'],
+    ['GET', '/fapi/v1/exchangeInfo', 'exchange-info'],
+    ['GET', '/fapi/v1/klines', 'klines'],
+    ['GET', '/fapi/v3/balance', 'balance'],
+    ['GET', '/fapi/v3/positionRisk', 'positions'],
+    ['GET', '/fapi/v1/openOrders', 'orders'],
+    ['GET', '/fapi/v1/openAlgoOrders', 'algo-orders'],
+    ['GET', '/fapi/v1/order', 'order-lookup'],
+    ['POST', '/fapi/v1/order', 'order'],
+    ['PUT', '/fapi/v1/order', 'replace'],
+    ['DELETE', '/fapi/v1/order', 'cancel'],
+    ['DELETE', '/fapi/v1/allOpenOrders', 'cancel-all'],
+    ['DELETE', '/fapi/v1/algoOpenOrders', 'cancel-all'],
+    ['POST', '/fapi/v1/positionMargin', 'margin'],
+    ['GET', '/fapi/v1/income', 'income'],
+    ['GET', '/fapi/v1/allOrders', 'history-orders'],
+    ['GET', '/fapi/v1/userTrades', 'history-trades'],
+    ['GET', '/fapi/v1/symbolConfig', 'symbol-config'],
+    ['GET', '/fapi/v1/leverageBracket', 'leverage-bracket'],
+    ['POST', '/fapi/v1/leverage', 'leverage'],
+    ['POST', '/fapi/v1/marginType', 'margin-type'],
+    ['GET', '/fapi/v1/positionSide/dual', 'position-mode'],
+    ['POST', '/fapi/v1/listenKey', 'listen-key'],
+    ['PUT', '/fapi/v1/listenKey', 'listen-key'],
+    ['DELETE', '/fapi/v1/listenKey', 'listen-key'],
+]);
+export const describeFuturesRoute = (method, path) => {
+    const verb = String(method ?? '').toUpperCase();
+    const route = FUTURES_ROUTES.find(([m, p]) => m === verb && p === path);
+    return route ? route[2] : 'other';
+};
+
 const httpsJsonRequestOnce = async ({
     materializeRequest,
     method,
@@ -247,8 +283,9 @@ const httpsJsonRequestOnce = async ({
     agent,
     recordEvent,
     weight = null,
+    route = null,
 }) => {
-    const physicalAttempt = await admitBinancePhysicalAttempt(weight);
+    const physicalAttempt = await admitBinancePhysicalAttempt(weight, route);
     // A signed envelope starts ageing against recvWindow as soon as its
     // timestamp is minted. Physical admission can wait much longer than that,
     // so compose it only after this attempt owns capacity and immediately before
@@ -1168,6 +1205,7 @@ export class FuturesTradingAdapter {
                 ...(useBody ? { 'Content-Type': 'application/x-www-form-urlencoded' } : {}),
             },
             weight,
+            route: describeFuturesRoute(method, path),
         });
     }
 

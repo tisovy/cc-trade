@@ -99,6 +99,13 @@ export const summarizeDeskDiagnosticRecord = (text) => {
   const durations = new Map()
   const resynchronizations = []
   const refusals = new Map()
+  // Commands the renderer withheld before they left it — an exit refused for a
+  // readiness condition, a second cancel of an order whose cancel was in
+  // flight. Counted apart from refusals: nothing was asked of the exchange.
+  const withholdings = new Map()
+  // Charged weight per route, from the request lines. On 2026-09-02 two
+  // thousand weight-5 lines could be attributed only by their cadence.
+  const routes = new Map()
   const sessions = []
   const commands = []
   // How long each kind of command took to answer. Keyed by action and market
@@ -179,6 +186,19 @@ export const summarizeDeskDiagnosticRecord = (text) => {
         `${line.cause ?? line.exchangeCode ?? '(the exchange stated none)'}`
         + `[${typeof line.market === 'string' ? line.market : '-'}]`,
       )
+    }
+    if (line.kind === 'outcome' && line.result === 'withheld') {
+      bump(
+        withholdings,
+        `${line.code ?? '(unnamed)'}[${typeof line.market === 'string' ? line.market : '-'}]`,
+      )
+    }
+    if (line.kind === 'request') {
+      const route = typeof line.route === 'string' ? line.route : '(unnamed)'
+      const observed = routes.get(route) ?? { count: 0, weight: 0 }
+      observed.count += 1
+      observed.weight += Number(line.chargedWeight) || 0
+      routes.set(route, observed)
     }
     if (line.kind === 'answer' && typeof line.action === 'string') {
       // Keyed by market as well as by action, because the same action does not
@@ -356,6 +376,10 @@ export const summarizeDeskDiagnosticRecord = (text) => {
     codes: descending(codes.entries()),
     resynchronizations,
     refusals: descending(refusals.entries()),
+    withholdings: descending(withholdings.entries()),
+    routes: [...routes.entries()]
+      .map(([route, observed]) => ({ route, ...observed }))
+      .sort((left, right) => right.weight - left.weight),
     sessions,
     commands,
     phases,
@@ -425,6 +449,14 @@ export const formatDeskDiagnosticSummary = (summary, { day = null } = {}) => {
     }
   }
 
+  if (Array.isArray(summary.withholdings) && summary.withholdings.length > 0) {
+    const withheld = summary.withholdings.reduce((sum, entry) => sum + entry.count, 0)
+    out.push('', `Withheld by the renderer (${withheld})`)
+    for (const { key, count } of summary.withholdings) {
+      out.push(`  ${String(count).padStart(6)}  ${key}`)
+    }
+  }
+
   out.push('', 'Slowest phases')
   if (summary.phases.length === 0) out.push('  (none)')
   for (const phase of summary.phases.slice(0, SLOWEST_PHASES)) {
@@ -467,6 +499,18 @@ export const formatDeskDiagnosticSummary = (summary, { day = null } = {}) => {
         `  ${entry.reason.padEnd(22)} n=${String(entry.count).padStart(5)}`
         + `  weight ${String(entry.weight).padStart(6)}`
         + `  resources ${String(entry.resources).padStart(5)}`,
+      )
+    }
+  }
+
+  if (Array.isArray(summary.routes) && summary.routes.length > 0) {
+    const weight = summary.routes.reduce((total, entry) => total + entry.weight, 0)
+    const count = summary.routes.reduce((total, entry) => total + entry.count, 0)
+    out.push('', `Requests by route (${count} attempts, weight ${weight})`)
+    for (const entry of summary.routes) {
+      out.push(
+        `  ${entry.route.padEnd(22)} n=${String(entry.count).padStart(5)}`
+        + `  weight ${String(entry.weight).padStart(6)}`,
       )
     }
   }

@@ -605,6 +605,7 @@ export const FuturesProductionWorkstation = ({
       tradeRoundIndex={executionState?.tradeRoundIndex}
       onClosePosition={handlePositionClose}
       onCancelOrder={executionState?.cancelOrder}
+      cancellingOrderIds={executionState?.cancellingOrderIds}
       onOrderEdit={handleOrderEdit}
       onMarginEdit={handleMarginEdit}
       onLeverageEdit={handleLeverageEdit}

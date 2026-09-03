@@ -4322,3 +4322,100 @@ describe('useFuturesTrading BNB fee valuation', () => {
     expect(result.current.feeReserve.worth).toBeLessThan(50)
   })
 })
+
+// 2026-09-02, 21:40:45–51Z: four cancellations of one order left the renderer
+// in six seconds while the first was still unanswered, and three came back
+// `-2011`. One cancel in flight per order; the second is withheld and said so.
+describe('useFuturesTrading one cancel in flight per order', () => {
+  const renderTrading = (socket) => renderHook(() => useFuturesTrading({
+    enabled: true,
+    symbol: 'BTCUSDT',
+    wsConnection: socket,
+  }))
+
+  it('withholds a second cancel of an order whose cancel has not answered, and reports it', async () => {
+    const socket = createSocket()
+    const { result } = renderTrading(socket)
+
+    let first
+    let second
+    act(() => {
+      first = result.current.cancelOrder({ symbol: 'BTCUSDT', orderId: 11 })
+      second = result.current.cancelOrder({ symbol: 'BTCUSDT', orderId: 11 })
+    })
+    expect(first).toBe(true)
+    expect(second).toBe(false)
+    const cancels = socket.sent.filter(frame => frame.action === 'trade.cancelOrder')
+    expect(cancels).toHaveLength(1)
+    expect(cancels[0]).toMatchObject({ symbol: 'BTCUSDT', orderId: 11 })
+    // The withheld one is a line in the record, not a blank.
+    expect(socket.sent.at(-1)).toMatchObject({
+      action: 'report_withheld_command',
+      command: 'trade.cancelOrder',
+      code: 'CANCEL_IN_FLIGHT',
+      market: 'futures',
+      symbol: 'BTCUSDT',
+      identity: 11,
+    })
+    expect(result.current.cancellingOrderIds).toEqual(['11'])
+
+    // Another order's cancel is its own key.
+    act(() => {
+      result.current.cancelOrder({ symbol: 'BTCUSDT', orderId: 12 })
+    })
+    expect(socket.sent.filter(frame => frame.action === 'trade.cancelOrder')).toHaveLength(2)
+    expect(result.current.cancellingOrderIds).toEqual(['11', '12'])
+
+    // The exchange's answer releases the key, and a further cancel may go.
+    await act(async () => {
+      socket.receive({
+        futures_execution_update: { symbol: 'BTCUSDT', orderId: 11, status: 'CANCELED' },
+      })
+    })
+    expect(result.current.cancellingOrderIds).toEqual(['12'])
+    act(() => {
+      result.current.cancelOrder({ symbol: 'BTCUSDT', orderId: 11 })
+    })
+    expect(socket.sent.filter(frame => frame.action === 'trade.cancelOrder')).toHaveLength(3)
+  })
+
+  it('releases the key on a refusal too', async () => {
+    const socket = createSocket()
+    const { result } = renderTrading(socket)
+    act(() => {
+      result.current.cancelOrder({ symbol: 'BTCUSDT', orderId: 11 })
+    })
+    expect(result.current.cancellingOrderIds).toEqual(['11'])
+    await act(async () => {
+      socket.receive({
+        command_rejected: {
+          request: 'trade.cancelOrder',
+          code: 'FUTURES_API_ERROR',
+          message: 'Unknown order sent.',
+          details: { marketType: 'futures', symbol: 'BTCUSDT', orderId: 11 },
+        },
+      })
+    })
+    expect(result.current.cancellingOrderIds).toEqual([])
+  })
+
+  it('reports a withheld placement through the link with the condition named', () => {
+    const socket = createSocket()
+    const { result } = renderTrading(socket)
+    act(() => {
+      result.current.reportWithheld({
+        command: 'trade.placeOrder',
+        code: 'POSITION_UNCONFIRMED',
+        symbol: 'AKEUSDT',
+      })
+    })
+    expect(socket.sent.at(-1)).toEqual({
+      action: 'report_withheld_command',
+      command: 'trade.placeOrder',
+      code: 'POSITION_UNCONFIRMED',
+      market: 'futures',
+      symbol: 'AKEUSDT',
+      identity: null,
+    })
+  })
+})

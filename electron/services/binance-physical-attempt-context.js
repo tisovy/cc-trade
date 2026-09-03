@@ -48,11 +48,15 @@ export const runWithBinancePhysicalAttemptContext = (context, operation) => {
 // Called immediately before one low-level HTTP send. Outside the Futures
 // limiter's physical mode it is deliberately a no-op: isolated adapter callers
 // and the legacy Spot path keep their existing behavior.
-export const admitBinancePhysicalAttempt = async (weight = null) => {
+export const admitBinancePhysicalAttempt = async (weight = null, route = null) => {
     const context = attemptContext.getStore();
     if (typeof context?.admit !== 'function') return NO_PHYSICAL_ATTEMPT_CONTEXT;
 
-    const admission = await context.admit(weight);
+    // The route rides beside the weight only when the adapter named one; a
+    // caller that states none keeps the one-argument admission it always had.
+    const admission = route === null || route === undefined
+        ? await context.admit(weight)
+        : await context.admit(weight, route);
     return Object.freeze({
         signal: context.signal ?? null,
         // Response observations are accounting hints, never part of whether the

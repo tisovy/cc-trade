@@ -8,6 +8,7 @@ import {
     FUTURES_STREAM_ORIGIN,
     FuturesTradingAdapter,
     describeFuturesApiError,
+    describeFuturesRoute,
     futuresUserDataStreamUrl,
     normalizeFuturesAlgoOrder,
     normalizeFuturesBalances,
@@ -2250,5 +2251,30 @@ describe('getFeeValuationKlines', () => {
         await expect(adapter.getFeeValuationKlines({
             symbol: 'BNBUSDT', interval: '1m', startTime: 0, endTime: 1, limit: 1,
         })).rejects.toMatchObject({ name: 'FuturesApiError' });
+    });
+});
+
+// The route a request goes on, in the record's closed vocabulary: from the
+// method and the path, never carrying either. A route the desk has not named
+// reads `other` rather than a path.
+describe('describeFuturesRoute', () => {
+    it('names every endpoint the adapter sends on', () => {
+        expect(describeFuturesRoute('GET', '/fapi/v1/userTrades')).toBe('history-trades');
+        expect(describeFuturesRoute('GET', '/fapi/v1/allOrders')).toBe('history-orders');
+        expect(describeFuturesRoute('GET', '/fapi/v1/income')).toBe('income');
+        expect(describeFuturesRoute('GET', '/fapi/v3/positionRisk')).toBe('positions');
+        expect(describeFuturesRoute('GET', '/fapi/v3/balance')).toBe('balance');
+        expect(describeFuturesRoute('GET', '/fapi/v1/openOrders')).toBe('orders');
+        expect(describeFuturesRoute('POST', '/fapi/v1/order')).toBe('order');
+        expect(describeFuturesRoute('DELETE', '/fapi/v1/order')).toBe('cancel');
+        expect(describeFuturesRoute('PUT', '/fapi/v1/order')).toBe('replace');
+        expect(describeFuturesRoute('POST', '/fapi/v1/positionMargin')).toBe('margin');
+        expect(describeFuturesRoute('GET', '/fapi/v1/time')).toBe('time');
+    });
+
+    it('reads other for a route it does not name, and never the path', () => {
+        expect(describeFuturesRoute('GET', '/fapi/v1/somethingNew')).toBe('other');
+        expect(describeFuturesRoute('PATCH', '/fapi/v1/order')).toBe('other');
+        expect(describeFuturesRoute(undefined, undefined)).toBe('other');
     });
 });

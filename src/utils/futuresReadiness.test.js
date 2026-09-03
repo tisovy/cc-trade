@@ -120,3 +120,31 @@ describe('deriveFuturesReadiness', () => {
     })
   })
 })
+
+// A stale balance bounds what may be opened, not what may be closed. On
+// 2026-09-02 an exit was withheld on a reading the desk was in the middle of
+// re-confirming, and the operator reloaded the window to get out.
+describe('a stale balance and an exit', () => {
+  const stale = {
+    ...readyInput,
+    balanceResource: { status: 'stale', error: { message: 'x' }, lastSuccessfulAt: 100 },
+  }
+
+  it('still holds an entry', () => {
+    expect(deriveFuturesReadiness({ ...stale, exposureIncreasing: true }))
+      .toMatchObject({ code: 'ACCOUNT_STALE', ready: false })
+  })
+
+  it('lets an exit through', () => {
+    expect(deriveFuturesReadiness({ ...stale, exposureIncreasing: false }))
+      .toMatchObject({ ready: true })
+  })
+
+  it('still holds an exit on a failed reading', () => {
+    expect(deriveFuturesReadiness({
+      ...readyInput,
+      balanceResource: { status: 'error', error: { message: 'x' }, lastSuccessfulAt: 100 },
+      exposureIncreasing: false,
+    })).toMatchObject({ code: 'ACCOUNT_ERROR', ready: false })
+  })
+})

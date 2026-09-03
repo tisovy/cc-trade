@@ -90,7 +90,10 @@ const PARTIAL_KIND = /^(?:debt-only|short)$/;
 // while it is revalidated. Only reads that have a cache carry it; the rest
 // state nothing.
 const CACHE = /^(?:hit|miss|shared|stale)$/;
-const RESULT = /^(?:rejected|unresolved|resolved)$/;
+// `withheld` is the renderer's: a command that never left it, with the
+// condition that stopped it, so an exit that was never sent is a line and not
+// a blank.
+const RESULT = /^(?:rejected|unresolved|resolved|withheld)$/;
 // The exchange's own name for a refusal. Binance answers with a small signed
 // integer (-2019, "insufficient margin"); a request that never reached an answer
 // carries the transport's uppercase name instead (ECONNRESET, ETIMEDOUT).
@@ -133,7 +136,11 @@ const RESOURCE = /^[a-z][a-zA-Z0-9]{0,31}$/;
 // Whether the request this budget held back was the operator's business or the
 // desk's own housekeeping. Two words, because the question the line answers is
 // only ever which of the two was waiting.
-const DEFERRED_STANDING = /^(?:urgent|ordinary)$/;
+const DEFERRED_STANDING = /^(?:command|urgent|ordinary)$/;
+// The route a physical attempt went on, in the desk's own words — never a
+// path. Two thousand weight-5 lines on 2026-09-02 could be attributed only by
+// their cadence.
+const REQUEST_ROUTE = /^[a-z][a-z-]{0,31}$/;
 const VERSION = /^[0-9][0-9A-Za-z.+-]{0,31}$/;
 const ESTIMATE_VALUE = new RegExp(`^(?:${FUTURES_MARGIN_ESTIMATE_VALUES.join('|')})$`);
 
@@ -368,6 +375,7 @@ const RECORDED_FIELDS = Object.freeze({
     // message, credential or amount.
     request: Object.freeze([
         ['standing', text(DEFERRED_STANDING)],
+        ['route', tolerated(text(REQUEST_ROUTE))],
         ['attempts', count],
         ['chargedWeight', count],
         ['observedWeight', optional(count)],
@@ -491,6 +499,9 @@ const RECORDED_FIELDS = Object.freeze({
         // is. This is the exchange's own, and it is the difference between an
         // evening of refusals being one cause or five.
         ['exchangeCode', tolerated(exchangeCode)],
+        // For a quantity refusal: the size asked for over the leg held, in
+        // basis points. A count; neither amount is written.
+        ['requestedToLegBps', optional(count)],
     ]),
 });
 
@@ -575,6 +586,9 @@ export const readDeskDiagnosticOutboundEvent = (payload) => {
             // Present on every envelope the exchange itself refused; absent on
             // the desk's own refusals, which never asked it anything.
             exchangeCode: details?.binanceCode ?? null,
+            requestedToLegBps: Number.isSafeInteger(details?.requestedToLegBps)
+                ? details.requestedToLegBps
+                : null,
         });
     }
     return null;

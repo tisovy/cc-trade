@@ -313,9 +313,12 @@ const FuturesTradingTicket = ({
     : positionsResource.status === 'ready'
       || (positionsResource.status === 'loading'
         && Number.isFinite(positionsResource.lastSuccessfulAt))
-  const positionCommandReady = positionsResource === null
-    ? Array.isArray(safeState.positions)
-    : positionsResource.status === 'ready'
+  // The same question sizing asks: a reading being re-confirmed over a prior
+  // success is still the reading on screen. The main process proves the leg
+  // against its own newest reading; the ticket withholding an exit on
+  // `ready` alone is what kept the operator in a position for the twenty-four
+  // seconds an account pass took on 2026-09-02.
+  const positionCommandReady = positionSizingReady
   const positionSnapshotUpdatedAt = Number.isSafeInteger(positionsResource?.updatedAt)
     ? positionsResource.updatedAt
     : null
@@ -473,6 +476,38 @@ const FuturesTradingTicket = ({
   })
   const canSubmitAction = action => deriveSubmissionReadiness(action, orderDraft).ready
 
+  // The condition, as a code for the record, beside the words for the operator.
+  // A command withheld here never reaches the main process, so this is the only
+  // place a line about it can come from.
+  const resolveSubmitBlockCode = (
+    action,
+    draft,
+    sizeUsdt = notionalUsdt,
+    orderSymbol = selectedSymbol,
+  ) => {
+    if (!readiness.ready) return readiness.code
+    if (!sizingReady) return 'SIZING_UNCONFIRMED'
+    if (!isExactPositiveDecimal(sizeUsdt)) return 'SIZE_UNSET'
+    if (!draft.ok) return `DRAFT_${String(draft.reason ?? 'INVALID').toUpperCase()}`
+    const submissionReadiness = deriveSubmissionReadiness(action, draft, sizeUsdt)
+    if (!submissionReadiness.ready) return submissionReadiness.code
+    if (action.positionEffect === 'EXIT' && (
+      !positionCommandReady
+      || findCurrentExitPosition(positions, orderSymbol, action.positionSide) === null
+    )) {
+      return 'POSITION_UNCONFIRMED'
+    }
+    return 'SEND_FAILED'
+  }
+  const reportWithheld = (action, code, orderSymbol = selectedSymbol) => {
+    safeState.reportWithheld?.({
+      command: 'trade.placeOrder',
+      code,
+      symbol: orderSymbol,
+      label: action?.label ?? null,
+    })
+  }
+
   const resolveSubmitBlockReason = (
     action,
     draft,
@@ -515,6 +550,7 @@ const FuturesTradingTicket = ({
       || (action.positionEffect === 'EXIT' && currentExitPosition === null)
     ) {
       const reason = resolveSubmitBlockReason(action, draft, sizeUsdt, orderSymbol)
+      reportWithheld(action, resolveSubmitBlockCode(action, draft, sizeUsdt, orderSymbol), orderSymbol)
       setFeedback({
         tone: 'ignored',
         title: `${action.label} NOT sent`,
@@ -562,6 +598,7 @@ const FuturesTradingTicket = ({
     if (pendingOrder.symbol !== selectedSymbol) {
       setPendingOrder(null)
       setUnsentConfirmation(null)
+      reportWithheld(pendingOrder.action, 'CONTRACT_CHANGED', pendingOrder.symbol)
       setFeedback({
         tone: 'ignored',
         title: `${pendingOrder.action.label} NOT sent`,
@@ -699,6 +736,7 @@ const FuturesTradingTicket = ({
     // on confirmation: the operator learns the reason while the price is fresh.
     if (!draft.ok || !deriveSubmissionReadiness(action, draft).ready) {
       setPendingOrder(null)
+      reportWithheld(action, resolveSubmitBlockCode(action, draft))
       setFeedback({
         tone: 'ignored',
         title: `${action.label} NOT sent`,

@@ -2703,3 +2703,71 @@ describe('the margin mode on the futures ticket', () => {
     expect(panel).not.toHaveTextContent('ISO')
   })
 })
+
+// 2026-09-02, 21:40:41–55Z: the ticket withheld every exit for the
+// twenty-four seconds an account pass took, with the leg on screen the whole
+// time, because the positions resource read `loading` over a prior success.
+// The main process proves the leg; the ticket asks the sizing question only.
+describe('an exit while the positions reading is being re-read', () => {
+  it('sends the exit and reports nothing withheld', () => {
+    const position = {
+      symbol: 'BTCUSDT', positionSide: 'LONG', quantity: '0.5', entryPrice: '58000', markPrice: '58445',
+    }
+    const state = createState({
+      positions: [position],
+      reportWithheld: vi.fn(),
+      accountResources: {
+        ...createState().accountResources,
+        positions: { status: 'loading', data: [position], updatedAt: 100, lastSuccessfulAt: 100, error: null },
+      },
+    })
+    const props = {
+      state, selectedSymbol: 'BTCUSDT', selectedContract: contract, draftPrice: '58445.0',
+    }
+    const { rerender } = render(<FuturesTradingTicket {...props} />)
+    sizeTo(25)
+    rerender(<FuturesTradingTicket
+      {...props}
+      gestureRequest={{
+        id: 801,
+        side: 'SELL',
+        positionSide: 'LONG',
+        positionEffect: 'EXIT',
+        price: '58445.0',
+      }}
+    />)
+
+    confirmStagedOrder()
+    expect(state.placeOrder).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      symbol: 'BTCUSDT', side: 'SELL', positionSide: 'LONG', reduceOnly: true,
+    }))
+    expect(state.reportWithheld).not.toHaveBeenCalled()
+  })
+
+  it('reports an exit it withholds for a leg it cannot resolve', () => {
+    const state = createState({ reportWithheld: vi.fn() })
+    const props = {
+      state, selectedSymbol: 'BTCUSDT', selectedContract: contract, draftPrice: '58445.0',
+    }
+    const { rerender } = render(<FuturesTradingTicket {...props} />)
+    sizeTo(25)
+    rerender(<FuturesTradingTicket
+      {...props}
+      gestureRequest={{
+        id: 802,
+        side: 'SELL',
+        positionSide: 'LONG',
+        positionEffect: 'EXIT',
+        price: '58445.0',
+      }}
+    />)
+
+    confirmStagedOrder()
+    expect(state.placeOrder).not.toHaveBeenCalled()
+    expect(state.reportWithheld).toHaveBeenCalledWith(expect.objectContaining({
+      command: 'trade.placeOrder',
+      code: 'POSITION_UNCONFIRMED',
+      symbol: 'BTCUSDT',
+    }))
+  })
+})
