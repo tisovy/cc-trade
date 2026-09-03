@@ -7,6 +7,10 @@ const failures = [];
 
 const PRODUCTION_TRANSPORT = 'electron/services/futures-production-workstation-transport.js';
 const NETWORK_GUARD = 'electron/futures-workstation-node-network-guard.js';
+// The second reviewed network module: the machine's own candle store, read
+// over loopback with one GET (2026-09-03). Held to its shape below.
+const CANDLE_STORE = 'electron/services/futures-workstation-candle-store.js';
+const CANDLE_STORE_ORIGIN = 'http://127.0.0.1:8765';
 const PRODUCTION_COMPOSITION = 'electron/services/futures-production-workstation-composition.js';
 const PRODUCTION_VERIFICATION_COMPOSITION = 'electron/services/futures-production-workstation-verification-composition.js';
 const PRODUCTION_PROTOCOL = 'src/utils/futuresProductionWorkstationProtocol.js';
@@ -97,6 +101,7 @@ const sources = new Map(workstationFiles.map(file => [relative(file), fs.readFil
 for (const required of [
     PRODUCTION_TRANSPORT,
     NETWORK_GUARD,
+    CANDLE_STORE,
     PRODUCTION_COMPOSITION,
     PRODUCTION_VERIFICATION_COMPOSITION,
     PRODUCTION_PROTOCOL,
@@ -105,7 +110,7 @@ for (const required of [
     if (!workstationNames.has(required)) fail(`Missing required isolated workstation module ${required}`);
 }
 
-for (const [origin, owner] of EXACT_ORIGINS) {
+for (const [origin, owner] of [...EXACT_ORIGINS, [CANDLE_STORE_ORIGIN, CANDLE_STORE]]) {
     const owners = [];
     let occurrences = 0;
     for (const [name, source] of sources) {
@@ -121,12 +126,15 @@ for (const [origin, owner] of EXACT_ORIGINS) {
 for (const [name, source] of sources) {
     const isReviewedTransport = name === PRODUCTION_TRANSPORT;
     const isNetworkGuard = name === NETWORK_GUARD;
+    const isCandleStore = name === CANDLE_STORE;
     const isLocalWorkstationConnector = name === LOCAL_WORKSTATION_CONNECTOR;
 
     for (const specifier of readModuleSpecifiers(source)) {
-        if (NETWORK_MODULES.has(topLevelModule(specifier))
+        const module = topLevelModule(specifier);
+        if (NETWORK_MODULES.has(module)
             && !isReviewedTransport
-            && !isNetworkGuard) {
+            && !isNetworkGuard
+            && !(isCandleStore && module === 'http')) {
             fail(`${name} imports forbidden network module ${specifier}`);
         }
     }
@@ -207,16 +215,34 @@ for (const transportName of [PRODUCTION_TRANSPORT]) {
     }
 }
 
+// The store: loopback, one GET, the USD-M venue, and never a top-up — a span
+// the store does not cover must fall through to the desk's own exchange read,
+// not to `hunter` reading Binance from the same IP outside the limiter.
+const candleStore = sources.get(CANDLE_STORE) ?? '';
+if ([...candleStore.matchAll(/\bhttp\.request\s*\(/g)].length !== 1
+    || !/\bmethod\s*:\s*['"]GET['"]/.test(candleStore)
+    || !/LOOPBACK_HOSTS\.has\(url\.hostname\)/.test(candleStore)
+    || !/url\.protocol !== ['"]http:['"]/.test(candleStore)
+    || !/market:\s*['"]usdm['"]/.test(candleStore)
+    || !/topup:\s*['"]false['"]/.test(candleStore)
+    || !/STORE_PATH_PREFIX = ['"]\/api\/candles\/['"]/.test(candleStore)
+    || !/normalizeFuturesWorkstationKlines\(/.test(candleStore)
+    || /\b(?:headers|agent|auth|dispatcher|proxy)\s*:/.test(candleStore)
+    || /\bhttps\b/.test(candleStore.replace(/^\s*(?:\/\/|\*).*$/gm, ''))) {
+    fail(`${CANDLE_STORE} is not the one reviewed loopback GET over the store's candles route`);
+}
+
 const productionComposition = sources.get(PRODUCTION_COMPOSITION) ?? '';
 if (!/export const FUTURES_PRODUCTION_WORKSTATION_PUBLIC_READ_AUTHORIZED\s*=\s*true\s*;/.test(productionComposition)
     || !/createFuturesProductionWorkstationReviewedTransport\(\{ onTiming \}\)/.test(productionComposition)
+    || !/createFuturesWorkstationCandleStore\(\{ onTiming \}\)/.test(productionComposition)
     || /FakeTransport|deterministic-fake/.test(productionComposition)) {
     fail('Normal Production operator composition must be source-pinned to reviewed public reads');
 }
 const productionVerificationComposition = sources.get(PRODUCTION_VERIFICATION_COMPOSITION) ?? '';
 if (!/FUTURES_PRODUCTION_WORKSTATION_DETERMINISTIC_VERIFICATION\s*=\s*true\s*;/.test(productionVerificationComposition)
     || !/createFuturesProductionWorkstationFakeTransport\(\)/.test(productionVerificationComposition)
-    || /ReviewedTransport|reviewed-public-read/.test(productionVerificationComposition)) {
+    || /ReviewedTransport|reviewed-public-read|CandleStore|candle-store/.test(productionVerificationComposition)) {
     fail('Production verification composition must be source-pinned to its deterministic fake');
 }
 const allCompositions = [

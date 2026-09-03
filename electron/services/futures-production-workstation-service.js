@@ -11,6 +11,11 @@ import {
     FUTURES_WORKSTATION_STATES,
 } from '../../src/utils/futuresWorkstationProtocolShared.js';
 import {
+    FUTURES_CANDLE_STORE_INTERVAL_MS,
+    futuresCandleStoreWindow,
+    isFuturesCandleStoreBucketAligned,
+} from './futures-workstation-candle-store.js';
+import {
     FUTURES_PRODUCTION_WORKSTATION_DEPTH_PAGES,
 } from './futures-production-workstation-transport.js';
 import {
@@ -296,6 +301,9 @@ const wakeHoldMs = lazyWakes => (lazyWakes === 0
 export class FuturesProductionWorkstationService {
     constructor({
         transport,
+        // The machine's own closed minutes, asked before the exchange is
+        // (`read-candles-from-the-nearest-source`). Null is a desk without one.
+        candleStore = null,
         clock = systemClock,
         onInternalError = () => {},
         onTiming = () => {},
@@ -320,10 +328,23 @@ export class FuturesProductionWorkstationService {
             || typeof clock.setTimeout !== 'function'
             || typeof clock.clearTimeout !== 'function'
             || typeof onInternalError !== 'function'
-            || typeof onTiming !== 'function') {
+            || typeof onTiming !== 'function'
+            || (candleStore !== null
+                && (typeof candleStore !== 'object'
+                    || typeof candleStore.readCandles !== 'function'
+                    || typeof candleStore.enabled !== 'boolean'))) {
             throw new FuturesProductionWorkstationServiceError('INVALID_SERVICE_COMPOSITION');
         }
         this.transport = transport;
+        this.candleStore = candleStore;
+        // A store that is off, or whose address was refused, is stated once
+        // with its code — so a day's record without store lines can say why.
+        if (candleStore !== null && !candleStore.enabled) {
+            onInternalError({
+                phase: 'candle-store',
+                code: candleStore.errorCode ?? 'CANDLE_STORE_OFF',
+            });
+        }
         this.clock = clock;
         this.onInternalError = onInternalError;
         this.onTiming = onTiming;
@@ -542,6 +563,18 @@ export class FuturesProductionWorkstationService {
             throw new FuturesProductionWorkstationServiceError('CANDLE_HISTORY_UNSUPPORTED');
         }
         const { endTime, interval } = request;
+        // The nearest source first. The store answers the page whole or not
+        // at all, and a page it served costs the exchange nothing; anything
+        // less falls through to the exchange's own read below.
+        const storeRows = await this.readStorePage(session, request);
+        if (storeRows !== null) {
+            if (!this.isHeld(session)
+                || session.requestId !== request.requestId
+                || session.symbol !== request.symbol
+                || session.interval !== interval) return;
+            this.emitCandleHistory(session, { endTime, interval, rows: storeRows });
+            return;
+        }
         let rows;
         try {
             rows = normalizeFuturesWorkstationKlines(await this.transport.readCandleHistory({
@@ -712,6 +745,12 @@ export class FuturesProductionWorkstationService {
         session.indexCandles = Object.freeze([]);
         session.pendingCandleEvents = [];
         session.intervalBootstrapping = true;
+        // The new interval's window from the local store, drawn beneath the
+        // veil while the socket and the exchange's window take their second.
+        void this.emitStoreWindow(session, {
+            intervalEpoch,
+            signal: intervalAbortController.signal,
+        });
         // The session stays live: an interval change touches the candles and
         // nothing else. It used to publish LOADING for the whole session here
         // — forty-five times in one evening on 2026-09-02, each one two
@@ -1189,6 +1228,13 @@ export class FuturesProductionWorkstationService {
         applyReading(session, request);
         this.sessions.set(session.symbol, session);
         if (takesTheScreen) this.showSession(session);
+        // The contract's window from the local store, on the chart before the
+        // exchange has been asked. Read only for the session on screen: a
+        // parked contract waking in a free minute reads nothing anywhere.
+        void this.emitStoreWindow(session, {
+            intervalEpoch: session.intervalEpoch,
+            signal: session.abortController.signal,
+        });
         // An attempt past the ceiling does not get to call itself loading. By
         // then the operator is reading a notice that says the feed stopped and
         // is still being retried, with the retry beside it, and `loading` takes
@@ -1429,6 +1475,78 @@ export class FuturesProductionWorkstationService {
                 rows: toRendererCandleRows(rows),
             }),
         );
+    }
+
+    // The store's window of the session's interval, under `loading`, while the
+    // exchange's window and socket are on their way — D4 of
+    // `read-candles-from-the-nearest-source`. The rows are the renderer's
+    // picture and nothing else: `session.candles` stays what it was, so the
+    // kline events queued through the bootstrap are folded onto the exchange's
+    // rows as before. An answer that lands after the exchange's window is
+    // dropped; a session that has left the screen, changed interval or epoch
+    // is not written to. Nothing here can throw into the caller.
+    async emitStoreWindow(session, { intervalEpoch, signal }) {
+        try {
+            const store = this.candleStore;
+            if (store === null || !store.enabled || !this.isShown(session)) return;
+            const { interval, symbol } = session;
+            const span = futuresCandleStoreWindow({
+                interval,
+                now: this.clock.now(),
+                rows: FUTURES_WORKSTATION_MARKET_LIMITS.RENDERER_CANDLES,
+            });
+            if (span === null) return;
+            const rows = await store.readCandles({
+                symbol,
+                interval,
+                ...span,
+                mode: 'window',
+                signal,
+            });
+            if (!Array.isArray(rows) || rows.length === 0) return;
+            if (!this.isHeld(session)
+                || !this.isShown(session)
+                || session.interval !== interval
+                || session.intervalEpoch !== intervalEpoch
+                || session.candles.length > 0) return;
+            this.emitCandleSeries(session, 'contract', rows, FUTURES_WORKSTATION_STATES.LOADING);
+        } catch {
+            // The store is a convenience over the exchange's own read; a
+            // failure of it is the exchange's read, as before.
+        }
+    }
+
+    // A history page from the store: exactly the rows the exchange would send
+    // for the same span, or null. A short store answer never reaches the
+    // renderer, which reads a short page as the contract's first candle. The
+    // renderer ends a page at the open of the oldest bar it draws; an end
+    // anywhere else would make the store build a bucket from part of itself,
+    // and is the exchange's to answer.
+    async readStorePage(session, { interval, endTime, limit }) {
+        const store = this.candleStore;
+        const intervalMs = FUTURES_CANDLE_STORE_INTERVAL_MS[interval];
+        if (store === null
+            || !store.enabled
+            || intervalMs === undefined
+            || !isFuturesCandleStoreBucketAligned(endTime, interval)
+            || !Number.isSafeInteger(limit)
+            || limit <= 0) return null;
+        const from = endTime - (limit * intervalMs);
+        if (from <= 0) return null;
+        try {
+            const rows = await store.readCandles({
+                symbol: session.symbol,
+                interval,
+                from,
+                to: endTime,
+                limit,
+                mode: 'page',
+                signal: session.abortController.signal,
+            });
+            return Array.isArray(rows) && rows.length === limit ? rows : null;
+        } catch {
+            return null;
+        }
     }
 
     rendererTapeRows(session) {

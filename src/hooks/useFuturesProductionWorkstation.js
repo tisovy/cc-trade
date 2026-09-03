@@ -567,8 +567,19 @@ const useFuturesProductionWorkstation = ({
           interval,
           resources,
           ...history,
+          // The wait ends on the first series of the new interval that is
+          // not the local candle store's `loading` picture: the exchange's
+          // window, which arrives `live`, or a switch's stated failure, which
+          // arrives `unavailable` with its reason. The store's window arrives
+          // first, under `loading`, and is drawn beneath the veil; ended on
+          // it, the veil would lift over bars that stop three minutes short
+          // of now. Ended only on `live`, a switch that failed would keep
+          // the veil over the reason for the whole retry ladder (audit,
+          // 2026-09-04).
           candlesSwitching: previousState.candlesSwitching === true
-            && !(message.resource === 'candles' && message.payload?.interval === interval),
+            && !(message.resource === 'candles'
+              && message.payload?.interval === interval
+              && message.state !== FUTURES_WORKSTATION_STATES.LOADING),
           reasonCode: message.resource === 'status' ? message.payload.reasonCode : next.reasonCode,
         })
       })

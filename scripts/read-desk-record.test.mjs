@@ -869,10 +869,45 @@ describe('the evidence beside faults', () => {
   })
 })
 
-// The two reads that confirm the stream against the exchange, and what they
-// found (2026-09-03). The block is the operator's evidence for ending a read:
-// it is present whenever either read ran, zeros included, and it tells a pass
-// that compared from one that did not.
+// Where the chart's candles came from (2026-09-03): the local store's windows
+// and pages against the exchange's, and what the store could not give. The
+// block is how a day is asked what the store saved and whether it was there.
+describe('candle reads by source', () => {
+  const timing = (phase, overrides = {}) => ({
+    kind: 'timing', phase, durationMs: 12, outcome: 'ok', cache: null, code: null, symbol: null, ...overrides,
+  })
+  const record = [
+    line({ at: '2026-09-03T09:00:00.000Z', ...timing('candle-store-window', { cache: 'hit' }) }),
+    line({ at: '2026-09-03T09:00:01.000Z', ...timing('contract-klines') }),
+    line({ at: '2026-09-03T09:00:02.000Z', ...timing('candle-store-page', { cache: 'hit' }) }),
+    line({ at: '2026-09-03T09:00:03.000Z', ...timing('candle-store-page', { cache: 'hit' }) }),
+    line({ at: '2026-09-03T09:00:04.000Z', ...timing('candle-store-page', { cache: 'miss', code: 'NOT_COVERED' }) }),
+    line({ at: '2026-09-03T09:00:05.000Z', ...timing('candle-history') }),
+    line({ at: '2026-09-03T09:00:06.000Z', ...timing('candle-store-window', { outcome: 'error', code: 'STORE_UNREACHABLE' }) }),
+    line({ at: '2026-09-03T09:00:07.000Z', ...timing('candle-store-page', { outcome: 'skipped', code: 'STORE_UNREACHABLE' }) }),
+    line({ at: '2026-09-03T09:00:08.000Z', ...timing('candle-history', { outcome: 'error', code: 'REQUEST_DEADLINE_EXCEEDED' }) }),
+    line({ at: '2026-09-03T09:00:09.000Z', ...timing('candle-store-window', { outcome: 'aborted', code: 'REQUEST_ABORTED', symbol: 'BTCUSDT' }) }),
+  ].join('')
+
+  it('counts windows and pages by source, and what the store could not give', () => {
+    expect(summarizeDeskDiagnosticRecord(record).candleReads).toEqual({
+      windows: { store: 1, exchange: 1 },
+      pages: { store: 2, exchange: 1 },
+      store: { misses: 1, errors: 1, skipped: 1, aborted: 1 },
+    })
+  })
+
+  it('prints the block with the weight the store\'s pages did not spend', () => {
+    const text = formatDeskDiagnosticSummary(summarizeDeskDiagnosticRecord(record))
+    expect(text).toContain('Candle reads\n  windows: store 1, exchange 1\n  pages: store 2 (weight not spent 10), exchange 1\n  store misses 1, errors 1, skipped 1, aborted 1')
+  })
+
+  it('leaves the block out of a day without a candle read', () => {
+    const text = formatDeskDiagnosticSummary(summarizeDeskDiagnosticRecord(line({ at: '2026-09-03T09:00:00.000Z', kind: 'timing', phase: 'exchange-info', durationMs: 5, outcome: 'ok', cache: null, code: null, symbol: null })))
+    expect(text).not.toContain('Candle reads')
+  })
+})
+
 describe('the reconfirmation score', () => {
   const settled = (overrides = {}) => ({
     kind: 'settled', reason: 'verification', order: 'ascending', pages: 1, reads: 6, attempts: 6,

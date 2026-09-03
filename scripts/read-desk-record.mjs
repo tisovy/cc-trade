@@ -129,6 +129,16 @@ export const summarizeDeskDiagnosticRecord = (text) => {
   // pass, and over the vouched passes alone, which are the ones that count.
   const settledScore = { passes: 0, compared: 0, missing: 0, differing: 0 }
   const historyScore = new Map()
+  // Where the chart's candles came from (2026-09-03): the local store's
+  // windows and pages, the exchange's, and what the store could not give.
+  // A store page is a thousand candles the exchange did not have to send at
+  // weight five; a day can be asked what the store saved and whether it was
+  // there at all.
+  const candleReads = {
+    windows: { store: 0, exchange: 0 },
+    pages: { store: 0, exchange: 0 },
+    store: { misses: 0, errors: 0, skipped: 0, aborted: 0 },
+  }
   const sessions = []
   const commands = []
   // How long each kind of command took to answer. Keyed by action and market
@@ -188,6 +198,18 @@ export const summarizeDeskDiagnosticRecord = (text) => {
       const observed = durations.get(family) ?? []
       observed.push({ durationMs: Number(line.durationMs) || 0, at: line.at, outcome: line.outcome })
       durations.set(family, observed)
+      if (family === 'candle-store-window' || family === 'candle-store-page') {
+        const kind = family === 'candle-store-window' ? 'windows' : 'pages'
+        if (line.outcome === 'ok' && line.cache === 'hit') candleReads[kind].store += 1
+        else if (line.outcome === 'ok') candleReads.store.misses += 1
+        else if (line.outcome === 'skipped') candleReads.store.skipped += 1
+        // A read the session abandoned — the operator moved on before the
+        // store answered — is not the store failing.
+        else if (line.outcome === 'aborted') candleReads.store.aborted += 1
+        else candleReads.store.errors += 1
+      }
+      if (family === 'contract-klines' && line.outcome === 'ok') candleReads.windows.exchange += 1
+      if (family === 'candle-history' && line.outcome === 'ok') candleReads.pages.exchange += 1
     }
     if (line.kind === 'status'
       && (line.state === 'resynchronizing' || line.state === 'unavailable')) {
@@ -461,6 +483,7 @@ export const summarizeDeskDiagnosticRecord = (text) => {
     crossings: descending(crossings.entries()),
     exchangeRefusals: descending(exchangeRefusals.entries()),
     faults: descending(faults.entries()),
+    candleReads,
     reconfirmation: {
       settled: settledScore,
       history: [...historyScore.entries()]
@@ -644,6 +667,21 @@ export const formatDeskDiagnosticSummary = (summary, { day = null } = {}) => {
         + `  differing ${String(entry.differing).padStart(4)}`,
       )
     }
+  }
+
+  // Present whenever a candle was read at all. Pages from the store are the
+  // exchange weight not spent: five per page of a thousand.
+  const candleReads = summary.candleReads ?? null
+  if (candleReads !== null && Object.values(candleReads).some(group => Object.values(group).some(count => count > 0))) {
+    out.push(
+      '',
+      'Candle reads',
+      `  windows: store ${candleReads.windows.store}, exchange ${candleReads.windows.exchange}`,
+      `  pages: store ${candleReads.pages.store} (weight not spent ${candleReads.pages.store * 5})`
+      + `, exchange ${candleReads.pages.exchange}`,
+      `  store misses ${candleReads.store.misses}, errors ${candleReads.store.errors}`
+      + `, skipped ${candleReads.store.skipped}, aborted ${candleReads.store.aborted}`,
+    )
   }
 
   if (Array.isArray(summary.closes) && summary.closes.length > 0) {

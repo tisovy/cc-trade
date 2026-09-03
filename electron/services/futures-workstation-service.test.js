@@ -12,6 +12,7 @@ import {
 import {
     FUTURES_PRODUCTION_WORKSTATION_FIXTURE,
 } from './futures-production-workstation-fixtures.js';
+import { normalizeFuturesWorkstationKlines } from './futures-workstation-market-contract.js';
 import {
     FUTURES_PRODUCTION_WORKSTATION_FRESHNESS,
     FUTURES_PRODUCTION_WORKSTATION_HELD_CONTRACTS,
@@ -129,6 +130,25 @@ const track = runtime => {
     runtimes.push(runtime);
     return runtime;
 };
+
+// What the local candle store answers for a span: the exchange's rows, built
+// from closed minutes, in the shape the exchange's klines are normalized to.
+const storeRows = ({ interval, from, to, limit }) => {
+    const intervalMs = { '1m': 60_000, '5m': 300_000, '1w': 604_800_000 }[interval] ?? 60_000;
+    const count = Math.min(limit, Math.max(1, Math.floor((to - from) / intervalMs)));
+    return normalizeFuturesWorkstationKlines(JSON.stringify(Array.from({ length: count }, (_, index) => {
+        const openTime = from + (index * intervalMs);
+        return [openTime, '58400', '58500', '58300', '58420', '100', openTime + intervalMs - 1, '0', 0, '0', '0', '0'];
+    })));
+};
+const answeringStore = (reads = []) => ({
+    enabled: true,
+    errorCode: null,
+    readCandles: vi.fn(async (selection) => {
+        reads.push(selection);
+        return storeRows(selection);
+    }),
+});
 
 const createManualClock = (initial = 1_784_000_001_000) => {
     let now = initial;
@@ -832,6 +852,102 @@ describe('production Futures workstation service', () => {
         expect(switched.every(event => event.generation === 1)).toBe(true);
         expect(runtime.service.shown).toMatchObject({ generation: 1, interval: '5m' });
         expect(base.getActiveTimerCount()).toBe(1);
+    });
+
+    // The machine's own closed minutes, drawn before the exchange answers
+    // (`read-candles-from-the-nearest-source`, 2026-09-03). The store's window
+    // arrives under `loading`, the exchange's under `live` — a switch used to
+    // show the interval being left, fitted whole, for the second the exchange
+    // took. The store's rows are the renderer's picture only: the session's
+    // own candles stay the exchange's.
+    it('draws the store\'s window under loading before the exchange\'s, on open and on a switch', async () => {
+        const reads = [];
+        const candleStore = answeringStore(reads);
+        const runtime = track(createFuturesProductionWorkstationRuntimeForTest({
+            transport: createFuturesProductionWorkstationFakeTransport(),
+            candleStore,
+        }));
+        const events = [];
+
+        await runtime.service.handleRequest(productionRequest('store-open'), {
+            emit: event => events.push(event),
+        });
+
+        const opened = events.filter(event => event.resource === 'candles' && event.payload.series === 'contract');
+        expect(opened.map(event => [event.state, event.payload.interval])).toEqual([
+            ['loading', '1m'],
+            ['live', '1m'],
+        ]);
+        expect(opened[0].payload.rows.length).toBeGreaterThan(0);
+        expect(opened[0].payload.rows.length).toBeLessThanOrEqual(80);
+        expect(reads).toHaveLength(1);
+        expect(reads[0]).toMatchObject({ symbol: 'BTCUSDT', interval: '1m', mode: 'window', limit: 80 });
+        expect(reads[0].to).toBeGreaterThan(reads[0].from);
+        expect(opened[1].payload.rows.at(-1)).toEqual(runtime.service.shown.candles.at(-1));
+
+        events.length = 0;
+        await runtime.service.handleRequest(
+            productionIntervalRequest('store-switch', 'BTCUSDT', '5m'),
+            { emit: event => events.push(event) },
+        );
+
+        const switched = events.filter(event => event.requestId === 'store-switch' && event.resource === 'candles');
+        expect(switched.map(event => [event.state, event.payload.series, event.payload.interval])).toEqual([
+            ['loading', 'contract', '5m'],
+            ['live', 'contract', '5m'],
+            ['live', 'index', '5m'],
+        ]);
+        expect(reads).toHaveLength(2);
+        expect(reads[1]).toMatchObject({ symbol: 'BTCUSDT', interval: '5m', mode: 'window', limit: 80 });
+        expect(switched[1].payload.rows.at(-1)).toEqual(runtime.service.shown.candles.at(-1));
+        expect(runtime.service.shown.candles).not.toEqual(switched[0].payload.rows);
+    });
+
+    it('drops a store window that answers after the exchange\'s, and reads no store for a desk without one', async () => {
+        let answerLate;
+        const candleStore = {
+            enabled: true,
+            errorCode: null,
+            readCandles: vi.fn(() => new Promise((resolve) => { answerLate = resolve; })),
+        };
+        const runtime = track(createFuturesProductionWorkstationRuntimeForTest({
+            transport: createFuturesProductionWorkstationFakeTransport(),
+            candleStore,
+        }));
+        const events = [];
+        const contractCandles = () => events
+            .filter(event => event.resource === 'candles' && event.payload.series === 'contract')
+            .map(event => event.state);
+
+        await runtime.service.handleRequest(productionRequest('store-late'), {
+            emit: event => events.push(event),
+        });
+        expect(contractCandles()).toEqual(['live']);
+        const selection = candleStore.readCandles.mock.calls[0][0];
+        answerLate(storeRows(selection));
+        await new Promise(resolve => setTimeout(resolve, 0));
+        expect(contractCandles()).toEqual(['live']);
+
+        // A desk without a store draws the exchange's window and nothing before it.
+        const plain = track(createFuturesProductionWorkstationRuntimeForTest({
+            transport: createFuturesProductionWorkstationFakeTransport(),
+        }));
+        const plainEvents = [];
+        await plain.service.handleRequest(productionRequest('store-none'), {
+            emit: event => plainEvents.push(event),
+        });
+        expect(plainEvents.filter(event => event.resource === 'candles' && event.payload.series === 'contract')
+            .map(event => event.state)).toEqual(['live']);
+    });
+
+    it('states a store that is off once, with its code', () => {
+        const faults = [];
+        track(createFuturesProductionWorkstationRuntimeForTest({
+            transport: createFuturesProductionWorkstationFakeTransport(),
+            candleStore: { enabled: false, errorCode: 'CANDLE_STORE_NOT_LOOPBACK', readCandles: async () => null },
+            onInternalError: fault => faults.push(fault),
+        }));
+        expect(faults).toEqual([{ phase: 'candle-store', code: 'CANDLE_STORE_NOT_LOOPBACK' }]);
     });
 
     it('owns weekly live candles and history in the deterministic service', async () => {
@@ -3265,6 +3381,114 @@ describe('production Futures workstation service', () => {
                 expect(emitted[0].outcome).not.toHaveProperty('generation');
                 expect(JSON.parse(emitted[0].frame)).toEqual(emitted[0].outcome);
             }
+        });
+
+        // The nearest source first: a page the store holds whole costs the
+        // exchange nothing (`read-candles-from-the-nearest-source`).
+        it('serves a page from the candle store without asking the exchange', async () => {
+            const readCandleHistory = vi.fn(async () => historyKlines(1_000));
+            const reads = [];
+            const candleStore = {
+                enabled: true,
+                errorCode: null,
+                readCandles: vi.fn(async (selection) => {
+                    reads.push(selection);
+                    return selection.mode === 'page' ? storeRows(selection) : null;
+                }),
+            };
+            const runtime = track(createFuturesProductionWorkstationRuntimeForTest({
+                transport: { ...createFuturesProductionWorkstationFakeTransport(), readCandleHistory },
+                candleStore,
+            }));
+            const events = [];
+            await runtime.service.handleRequest(productionRequest('store-page'), {
+                emit: event => events.push(event),
+            });
+            events.length = 0;
+
+            // The renderer ends a page at the open of the oldest bar it draws.
+            const endTime = 1_783_999_980_000;
+            await runtime.service.handleRequest(productionCandleHistoryRequest('store-page', { endTime }), {
+                emit: event => events.push(event),
+            });
+
+            expect(readCandleHistory).not.toHaveBeenCalled();
+            expect(reads.at(-1)).toMatchObject({
+                symbol: 'BTCUSDT',
+                interval: '1m',
+                from: endTime - (1_000 * 60_000),
+                to: endTime,
+                limit: 1_000,
+                mode: 'page',
+            });
+            const pages = events.filter(event => event.resource === 'candleHistory');
+            expect(pages).toHaveLength(13);
+            expect(pages[0]).toMatchObject({
+                state: 'live',
+                payload: { series: 'contract', interval: '1m', endTime, offset: 0, total: 1_000 },
+            });
+            expect(pages.at(-1).payload.complete).toBe(true);
+            expect(pages.flatMap(page => page.payload.rows)).toHaveLength(1_000);
+        });
+
+        // Less than the whole page is not a page: the exchange is read, and a
+        // short answer keeps its meaning of the contract's first candle.
+        it('reads the exchange when the store has less than the page, or fails', async () => {
+            for (const readCandles of [
+                async () => null,
+                async selection => storeRows({ ...selection, limit: selection.limit - 1 }),
+                async () => { throw new Error('store down'); },
+            ]) {
+                const readCandleHistory = vi.fn(async () => historyKlines(100));
+                const runtime = track(createFuturesProductionWorkstationRuntimeForTest({
+                    transport: { ...createFuturesProductionWorkstationFakeTransport(), readCandleHistory },
+                    candleStore: { enabled: true, errorCode: null, readCandles: vi.fn(readCandles) },
+                }));
+                const events = [];
+                await runtime.service.handleRequest(productionRequest('store-short'), {
+                    emit: event => events.push(event),
+                });
+                events.length = 0;
+
+                await runtime.service.handleRequest(
+                    productionCandleHistoryRequest('store-short', { endTime: 1_783_999_980_000 }),
+                    { emit: event => events.push(event) },
+                );
+
+                expect(runtime.service.candleStore.readCandles.mock.calls
+                    .filter(([selection]) => selection.mode === 'page')).toHaveLength(1);
+                expect(readCandleHistory).toHaveBeenCalledOnce();
+                const pages = events.filter(event => event.resource === 'candleHistory');
+                expect(pages[0].payload.total).toBe(100);
+                expect(pages.at(-1).payload.complete).toBe(true);
+            }
+        });
+
+        // A page ending anywhere but on the interval's buckets would be built
+        // from part of a bucket at either end; the store is not asked for it
+        // (audit, 2026-09-04).
+        it('asks the store for no page that ends off the interval\'s buckets', async () => {
+            const readCandleHistory = vi.fn(async () => historyKlines(100));
+            const candleStore = answeringStore();
+            const runtime = track(createFuturesProductionWorkstationRuntimeForTest({
+                transport: { ...createFuturesProductionWorkstationFakeTransport(), readCandleHistory },
+                candleStore,
+            }));
+            const events = [];
+            await runtime.service.handleRequest(productionRequest('store-off-bucket'), {
+                emit: event => events.push(event),
+            });
+            candleStore.readCandles.mockClear();
+            events.length = 0;
+
+            await runtime.service.handleRequest(
+                productionCandleHistoryRequest('store-off-bucket', { endTime: 1_783_999_980_000 + 20_000 }),
+                { emit: event => events.push(event) },
+            );
+
+            expect(candleStore.readCandles).not.toHaveBeenCalled();
+            expect(readCandleHistory).toHaveBeenCalledOnce();
+            expect(events.filter(event => event.resource === 'candleHistory').at(-1).payload.complete).toBe(true);
         });
 
         // Saying nothing left the renderer holding its request forever: one

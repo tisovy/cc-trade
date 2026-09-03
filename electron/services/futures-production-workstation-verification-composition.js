@@ -26,6 +26,8 @@ export const createFuturesProductionWorkstationRuntime = ({ onTiming, onInternal
 
 export const createFuturesProductionWorkstationRuntimeForTest = ({
     transport,
+    // A test's own answering store; the deterministic runtime itself has none.
+    candleStore,
     clock,
     onInternalError,
     onTiming,
@@ -33,6 +35,7 @@ export const createFuturesProductionWorkstationRuntimeForTest = ({
 } = {}) => {
     const service = new FuturesProductionWorkstationService({
         transport,
+        ...(candleStore ? { candleStore } : {}),
         ...(clock ? { clock } : {}),
         ...(onInternalError ? { onInternalError } : {}),
         ...(onTiming ? { onTiming } : {}),

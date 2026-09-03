@@ -1028,6 +1028,72 @@ describe('useFuturesProductionWorkstation candle history', () => {
     })
   })
 
+  // The local candle store's window of the new interval lands first, under
+  // `loading`, and is drawn beneath the veil; the switch waits for the
+  // exchange's `live` window before the veil lifts (2026-09-03).
+  it('keeps the switch wait through the store\'s loading window and ends it on the exchange\'s live one', () => {
+    const socket = new LocalSocket()
+    const sendMessage = vi.fn(() => true)
+    const { result, rerender } = renderHook(props => useFuturesProductionWorkstation(props), {
+      initialProps: defaultProps(socket, sendMessage),
+    })
+    const requestId = sendMessage.mock.calls[0][0].requestId
+    const candlesFrame = (id, revision, state, interval, rows) => socket.emitMessage(
+      createFuturesProductionWorkstationEvent(eventValues(id, {
+        revision,
+        resource: 'candles',
+        state,
+        payload: Object.freeze({ series: 'contract', interval, rows: Object.freeze(rows) }),
+      })),
+    )
+    act(() => candlesFrame(requestId, 2, 'live', '1m', historyRows(-80, 0)))
+    rerender(defaultProps(socket, sendMessage, { interval: '5m' }))
+    const switchRequest = sendMessage.mock.calls.at(-1)[0]
+    expect(result.current.candlesSwitching).toBe(true)
+    const fiveMinuteRows = Array.from({ length: 40 }, (_, index) => ({
+      ...historyRows(0, 1)[0],
+      openTime: START - ((40 - index) * 5 * MINUTE),
+      closeTime: START - ((39 - index) * 5 * MINUTE) - 1,
+    }))
+
+    act(() => candlesFrame(switchRequest.requestId, 3, 'loading', '5m', fiveMinuteRows))
+    expect(result.current.candlesSwitching).toBe(true)
+    expect(result.current.resources.candles).toMatchObject({ interval: '5m', state: 'loading' })
+    expect(result.current.resources.candles.contract).toHaveLength(40)
+
+    act(() => candlesFrame(switchRequest.requestId, 4, 'live', '5m', fiveMinuteRows))
+    expect(result.current.candlesSwitching).toBe(false)
+    expect(result.current.resources.candles).toMatchObject({ interval: '5m', state: 'live' })
+  })
+
+  // A switch that fails states the new interval's candles `unavailable` with
+  // the reason and retries on its own ladder. Waiting for `live` alone kept
+  // the veil over that reason for the whole ladder (audit, 2026-09-04).
+  it('ends the switch wait on the new interval\'s stated failure, as before', () => {
+    const socket = new LocalSocket()
+    const sendMessage = vi.fn(() => true)
+    const { result, rerender } = renderHook(props => useFuturesProductionWorkstation(props), {
+      initialProps: defaultProps(socket, sendMessage),
+    })
+    const requestId = sendMessage.mock.calls[0][0].requestId
+    const candlesFrame = (id, revision, state, interval, rows) => socket.emitMessage(
+      createFuturesProductionWorkstationEvent(eventValues(id, {
+        revision,
+        resource: 'candles',
+        state,
+        payload: Object.freeze({ series: 'contract', interval, rows: Object.freeze(rows) }),
+      })),
+    )
+    act(() => candlesFrame(requestId, 2, 'live', '1m', historyRows(-80, 0)))
+    rerender(defaultProps(socket, sendMessage, { interval: '5m' }))
+    const switchRequest = sendMessage.mock.calls.at(-1)[0]
+    expect(result.current.candlesSwitching).toBe(true)
+
+    act(() => candlesFrame(switchRequest.requestId, 3, 'unavailable', '5m', []))
+    expect(result.current.candlesSwitching).toBe(false)
+    expect(result.current.resources.candles).toMatchObject({ interval: '5m', state: 'unavailable' })
+  })
+
   it('gives weekly candles and history a fresh owner and ignores the abandoned interval', async () => {
     const socket = new LocalSocket()
     const sendMessage = vi.fn(() => true)
