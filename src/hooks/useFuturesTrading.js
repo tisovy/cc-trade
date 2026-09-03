@@ -82,7 +82,14 @@ const NO_CANCELS_IN_FLIGHT = Object.freeze([])
 // reconciles it over a few seconds, so this only bounds total silence — a
 // caller that waited forever would hold a drag open on a dead connection.
 const COMMAND_ANSWER_TIMEOUT_MS = 15_000
-const HISTORY_GAP_READ_DELAY_MS = 1_200
+// One REST reconfirmation per burst of fills, ten seconds after the newest
+// one; every further fill restarts the wait. The operator's rule (2026-09-03):
+// «после филла таймаут 10 секунд на переподтверждение, новые филлы его
+// ресетят». It was 1.2 s per contract without a restart, which sent a read
+// per window while a scalp was still running — on 2026-09-02 the desk's own
+// history reads outweighed its commands twenty to one. No ceiling on the
+// restart: a burst ends when the fills stop.
+const HISTORY_GAP_READ_DELAY_MS = 10_000
 
 // One commit per cluster of account-lane frames. Measured 2026-08-30
 // (desk-2026-08-30-002.jsonl): execution traffic arrives as clusters of five
@@ -951,12 +958,14 @@ const useFuturesTrading = ({
   useEffect(() => {
     historyCoverageRef.current = state.history.coverage
   }, [state.history.coverage])
-  const historyGapReadTimersRef = useRef(new Map())
+  // The burst's one timer and the contracts it has touched so far.
+  const historyGapReadTimersRef = useRef({ timer: null, symbols: new Set() })
 
   useEffect(() => {
-    const timers = historyGapReadTimersRef.current
-    for (const timer of timers.values()) globalThis.clearTimeout(timer)
-    timers.clear()
+    const burst = historyGapReadTimersRef.current
+    if (burst.timer !== null) globalThis.clearTimeout(burst.timer)
+    burst.timer = null
+    burst.symbols.clear()
     historyCoverageRef.current = {}
     resolvedParentsRef.current.clear()
   }, [marketGeneration, state.accountFingerprint])
@@ -1064,23 +1073,30 @@ const useFuturesTrading = ({
     }
 
     let active = true
-    const historyGapReadTimers = historyGapReadTimersRef.current
+    const historyGapRead = historyGapReadTimersRef.current
 
+    // One timer for the burst, whichever contracts it touches. A fill adds its
+    // contract and restarts the wait; when the fills stop, one read goes out
+    // per contract touched.
     const scheduleHistoryGapRead = (report) => {
       const symbol = String(report?.symbol ?? '').toUpperCase()
       if (symbol === '' || !(Number(report?.lastFilledQty ?? report?.l) > 0)) return
-      if (historyGapReadTimers.has(symbol)) return
-      const timer = globalThis.setTimeout(() => {
-        historyGapReadTimers.delete(symbol)
+      historyGapRead.symbols.add(symbol)
+      if (historyGapRead.timer !== null) globalThis.clearTimeout(historyGapRead.timer)
+      historyGapRead.timer = globalThis.setTimeout(() => {
+        historyGapRead.timer = null
+        const symbols = [...historyGapRead.symbols]
+        historyGapRead.symbols.clear()
         if (!active) return
-        sendCommandRef.current?.(createFuturesAccountHistoryCommand({
-          basisOnly: true,
-          coverage: historyCoverageRef.current,
-          symbol,
-          views: ['trades'],
-        }))
+        for (const touched of symbols) {
+          sendCommandRef.current?.(createFuturesAccountHistoryCommand({
+            basisOnly: true,
+            coverage: historyCoverageRef.current,
+            symbol: touched,
+            views: ['trades'],
+          }))
+        }
       }, HISTORY_GAP_READ_DELAY_MS)
-      historyGapReadTimers.set(symbol, timer)
     }
 
     // One state update per cluster: the first frame after quiet applies at
@@ -1536,10 +1552,9 @@ const useFuturesTrading = ({
         executionDrainTimerRef.current = null
       }
       drainExecutionQueue()
-      for (const timer of historyGapReadTimers.values()) {
-        globalThis.clearTimeout(timer)
-      }
-      historyGapReadTimers.clear()
+      if (historyGapRead.timer !== null) globalThis.clearTimeout(historyGapRead.timer)
+      historyGapRead.timer = null
+      historyGapRead.symbols.clear()
       positionMarkStore.clear()
       unsubscribe()
       wsConnection.removeEventListener('close', handleDisconnect)

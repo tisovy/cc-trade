@@ -1534,7 +1534,7 @@ describe('useFuturesTrading', () => {
           })
         }
       })
-      await act(async () => { await vi.advanceTimersByTimeAsync(1_200) })
+      await act(async () => { await vi.advanceTimersByTimeAsync(10_000) })
       expect(historyReads()).toEqual([])
       expect(result.current.history.trades).toEqual([])
 
@@ -1555,7 +1555,7 @@ describe('useFuturesTrading', () => {
           time: 2_000,
         },
       }))
-      await act(async () => { await vi.advanceTimersByTimeAsync(1_200) })
+      await act(async () => { await vi.advanceTimersByTimeAsync(10_000) })
       expect(historyReads()).toHaveLength(1)
       expect(historyReads()[0]).toMatchObject({
         symbol: 'BTCUSDT', basisOnly: true, views: ['trades'],
@@ -1605,7 +1605,7 @@ describe('useFuturesTrading', () => {
       })
       const historyReads = () => socket.sent.filter(frame => frame.action === 'account.history')
       expect(historyReads()).toEqual([])
-      act(() => { vi.advanceTimersByTime(1_199) })
+      act(() => { vi.advanceTimersByTime(9_999) })
       expect(historyReads()).toEqual([])
       act(() => { vi.advanceTimersByTime(1) })
       expect(historyReads()).toHaveLength(2)
@@ -1613,6 +1613,66 @@ describe('useFuturesTrading', () => {
       for (const frame of historyReads()) {
         expect(frame).toMatchObject({ basisOnly: true, views: ['trades'] })
       }
+    } finally {
+      unmount()
+      vi.useRealTimers()
+    }
+  })
+
+  // The operator's rule (2026-09-03): a fill starts a ten-second wait, every
+  // further fill restarts it, and the read goes out once, when the fills
+  // stop. On 2026-09-02 a read went out per 1.2-second window while a scalp
+  // was still running, and the desk's own history reads outweighed its
+  // commands twenty to one.
+  it('waits out the whole burst, restarting the timer on every fill, and reads once', async () => {
+    const socket = createSocket()
+    const historyStore = {
+      readContracts: vi.fn(async () => []),
+      writeReading: vi.fn(async () => true),
+    }
+    const { result, unmount } = renderHook(() => useFuturesTrading({
+      enabled: true,
+      symbol: 'BTCUSDT',
+      wsConnection: socket,
+      historyStore,
+    }))
+    authorizeAccount(socket)
+    await waitFor(() => expect(result.current.historyStoreReady).toBe(true))
+    vi.useFakeTimers()
+    try {
+      const execution = (symbol, tradeId) => ({
+        futures_execution_update: {
+          symbol,
+          positionSide: 'BOTH',
+          orderId: `${symbol}-${tradeId}`,
+          tradeId,
+          status: 'PARTIALLY_FILLED',
+          side: 'BUY',
+          lastFilledQty: '0.1',
+          lastFilledPrice: '100',
+          realizedPnl: '0',
+          commission: '0.01',
+          commissionAsset: 'USDT',
+          time: 1_000 + tradeId,
+        },
+      })
+      const historyReads = () => socket.sent.filter(frame => frame.action === 'account.history')
+      // Six fills five seconds apart: half a minute of scalping.
+      for (let fill = 1; fill <= 6; fill += 1) {
+        act(() => { socket.receive(execution(fill % 2 === 0 ? 'ETHUSDT' : 'BTCUSDT', fill)) })
+        act(() => { vi.advanceTimersByTime(5_000) })
+        expect(historyReads()).toEqual([])
+      }
+      // Five seconds after the last fill: still nothing. Ten: one read per
+      // contract the burst touched, together.
+      act(() => { vi.advanceTimersByTime(4_999) })
+      expect(historyReads()).toEqual([])
+      act(() => { vi.advanceTimersByTime(1) })
+      expect(historyReads().map(frame => frame.symbol).sort()).toEqual(['BTCUSDT', 'ETHUSDT'])
+      // And a fill after the burst starts a fresh wait of its own.
+      act(() => { socket.receive(execution('BTCUSDT', 7)) })
+      act(() => { vi.advanceTimersByTime(10_000) })
+      expect(historyReads()).toHaveLength(3)
     } finally {
       unmount()
       vi.useRealTimers()
@@ -1903,7 +1963,7 @@ describe('useFuturesTrading', () => {
       expect(result.current.history.trades[0]).toMatchObject({
         id: '9007199254740993', orderId: '9007199254740992', realizedPnl: '10',
       })
-      act(() => { vi.advanceTimersByTime(1_200) })
+      act(() => { vi.advanceTimersByTime(10_000) })
       expect(socket.sent.filter(frame => frame.action === 'account.history')).toHaveLength(1)
     } finally {
       unmount()
