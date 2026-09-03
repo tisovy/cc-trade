@@ -38,3 +38,18 @@ The continuation walker still runs after a read that found coverage
 incomplete — 8 pages a round, a round every 5 s, until the window is
 covered. It runs less often with fewer triggers; its own cadence is a
 separate question.
+
+## Residual — the reconfirmation has to keep its own score
+
+The point of keeping the REST reconfirmation at all is to learn whether the
+socket is enough. The income pass already scores itself on the `settled`
+line (`verified` / `missing` / `differing` against what the stream had
+folded) — on 2026-09-02 every pass scored 0/0/0. The history gap read scores
+nothing: the `request` line names the route since 2026-09-03, but no line
+says whether the read found a trade the stream had not reported or a row
+that differed from the stream's projection. Before the reconfirmation can be
+dropped, a `history` record line is owed: per read, the rows the exchange
+returned, the rows already held from the stream, the rows the stream never
+reported, the rows that differed — counts only. A month of zeros is the
+evidence; a single non-zero is the reason the read stays. Operator's note,
+2026-09-03.
