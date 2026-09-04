@@ -1223,3 +1223,16 @@ Full local checks passed: 144 files / 3,411 tests, lint, build and all gates.
   a fresh baseline even when both keys belong to the same exchange account.
 - No credential changes or trades were made for testing. A live key-rotation
   acceptance check should coincide with an intended operator configuration change.
+
+## bound-renderer-backlog-memory — 2026-09-05
+
+Status: A04 implemented; **operator confirmation pending**, not archived.
+Full local checks passed: 144 files / 3432 tests, lint, build and all gates.
+
+- Per-renderer serialized queue and single frame are capped at 64 MiB; a
+  continuously nonempty backlog expires after 30 seconds. Protected account
+  facts/pages are not silently dropped; overflow closes that connection.
+- Confirm normal traffic and naturally occurring reconnect behavior. Do not
+  deliberately stall a live trading renderer. Limits do not bound total RSS.
+- Overflow does not cancel exchange orders or replay mutations; normal
+  reconnect/account reads remain the recovery path.

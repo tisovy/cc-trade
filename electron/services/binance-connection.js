@@ -5211,8 +5211,9 @@ export function setupBinanceConnection({
         // all is closed rather than served a hole in it.
         rendererOutboxes.set(connection, createRendererOutbox(connection, {
             onBacklog: entry => diagnosticRecord.record('backlog', entry),
-            onOverflow: () => logger.warn(
-                '[renderer-outbox] Closing a renderer that stopped draining its account traffic',
+            onOverflow: details => logger.warn(
+                '[renderer-outbox] Closing a renderer whose delivery backlog exceeded its bounds',
+                details,
             ),
         }));
 

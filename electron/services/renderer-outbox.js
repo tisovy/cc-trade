@@ -45,6 +45,10 @@ export const RENDERER_OUTBOX = Object.freeze({
     // account lane has one: a renderer holding this many frames it cannot be
     // relieved of is not reading.
     MARKET_QUEUE_LIMIT: 1_024,
+    // UTF-8 payload budget per renderer (not process RSS). Enough for 128
+    // maximum-sized workstation pages plus concurrent account traffic.
+    QUEUE_BYTES: 64 * 1024 * 1024,
+    MAX_BACKLOG_MS: 30_000,
     // What was superseded is worth one line in the record, not one line per
     // frame: the pathological case is a socket blocked for a minute at ten books
     // a second, and that is exactly when the record must not become the problem.
@@ -57,10 +61,8 @@ export const RENDERER_OUTBOX = Object.freeze({
 const keyOf = (resource, symbol, variant) => `${resource}|${symbol}|${variant}`;
 const tallyKeyOf = (resource, symbol) => `${resource}|${symbol}`;
 
-// How big a frame is, asked once and only of a frame that is actually waiting.
-// Measured at 5.4µs for a 60 KB book — nothing at ten frames a second, but it is
-// asked on the path that is already behind, so it is not asked on the path that
-// is not: a frame written straight through never carries a size.
+// Measure at most once. Small direct frames need no scan: three UTF-8 bytes
+// per UTF-16 code unit is a conservative upper bound, including lone surrogates.
 const sizeOf = (frame) => {
     if (frame.bytes === null) frame.bytes = Buffer.byteLength(frame.text);
     return frame.bytes;
@@ -76,7 +78,13 @@ export const createRendererOutbox = (connection, {
     now = () => Date.now(),
     onBacklog = () => {},
     onOverflow = () => {},
+    maxQueueBytes = RENDERER_OUTBOX.QUEUE_BYTES,
+    maxBacklogMs = RENDERER_OUTBOX.MAX_BACKLOG_MS,
 } = {}) => {
+    if (!Number.isSafeInteger(maxQueueBytes) || maxQueueBytes <= 0 || maxQueueBytes > RENDERER_OUTBOX.QUEUE_BYTES
+        || !Number.isSafeInteger(maxBacklogMs) || maxBacklogMs <= 0 || maxBacklogMs > RENDERER_OUTBOX.MAX_BACKLOG_MS) {
+        throw new RangeError('Renderer outbox limits must be positive integers within the production bounds');
+    }
     const account = [];
     const market = [];
     // What this connection lost and how far behind it fell, per resource, since
@@ -86,6 +94,13 @@ export const createRendererOutbox = (connection, {
     let blocked = false;
     let reportedAt = null;
     let abandoned = false;
+    let queuedBytes = 0;
+    let backlogTimer = null;
+
+    const stopBacklogTimer = () => {
+        if (backlogTimer !== null) clearTimeout(backlogTimer);
+        backlogTimer = null;
+    };
 
     const tallyOf = (frame) => {
         const existing = tallies.get(frame.tallyKey);
@@ -110,6 +125,7 @@ export const createRendererOutbox = (connection, {
     const tally = (frame, field) => { tallyOf(frame)[field] += 1; };
 
     const entered = (frame) => {
+        queuedBytes += sizeOf(frame);
         const entry = tallyOf(frame);
         entry.frames += 1;
         entry.bytes += sizeOf(frame);
@@ -118,6 +134,7 @@ export const createRendererOutbox = (connection, {
     };
 
     const left = (frame) => {
+        queuedBytes -= frame.bytes ?? 0;
         const entry = tallies.get(frame.tallyKey);
         if (!entry) return;
         entry.frames -= 1;
@@ -134,16 +151,59 @@ export const createRendererOutbox = (connection, {
             && at - reportedAt < RENDERER_OUTBOX.REPORT_COOLDOWN_MS) return;
         reportedAt = at;
         for (const entry of tallies.values()) {
-            onBacklog(Object.freeze({
+            const reading = Object.freeze({
                 resource: entry.resource,
                 symbol: entry.symbol,
                 superseded: entry.superseded,
                 dropped: entry.dropped,
                 frames: entry.peakFrames,
                 bytes: entry.peakBytes,
-            }));
+            });
+            // A diagnostic sink cannot hold delivery or terminal cleanup open.
+            try { onBacklog(reading); } catch { /* diagnostic-only */ }
         }
         tallies.clear();
+    };
+
+    const dispose = () => {
+        abandoned = true;
+        stopBacklogTimer();
+        report(true);
+        account.length = 0;
+        market.length = 0;
+        queuedBytes = 0;
+    };
+
+    const overflow = (reason, frameBytes = 0) => {
+        if (abandoned) return false;
+        const reading = Object.freeze({
+            reason, bytes: queuedBytes, accountFrames: account.length, marketFrames: market.length,
+            frameBytes, maxQueueBytes, maxBacklogMs,
+        });
+        dispose();
+        try { onOverflow(reading); } catch { /* diagnostic-only */ }
+        connection.close();
+        return false;
+    };
+
+    const armBacklogTimer = () => {
+        if (backlogTimer !== null) return;
+        backlogTimer = setTimeout(() => {
+            backlogTimer = null;
+            if (!abandoned && account.length + market.length > 0) overflow('backlog-timeout');
+        }, maxBacklogMs);
+        backlogTimer.unref?.();
+    };
+
+    const makeByteRoom = (frame, replacing = null) => {
+        while (queuedBytes - (replacing?.bytes ?? 0) + sizeOf(frame) > maxQueueBytes) {
+            const index = market.findIndex(queued => queued !== replacing && queued.replaceable);
+            if (index === -1) return overflow('queue-bytes', sizeOf(frame));
+            const [removed] = market.splice(index, 1);
+            tally(removed, 'dropped');
+            left(removed);
+        }
+        return true;
     };
 
     const write = (frame) => {
@@ -159,21 +219,27 @@ export const createRendererOutbox = (connection, {
         frame.queued = true;
         entered(frame);
         lane.push(frame);
+        armBacklogTimer();
     };
 
     const flush = () => {
-        if (connection.connected !== true) return;
+        if (abandoned || connection.connected !== true) return;
         while (!blocked && account.length > 0) write(account.shift());
         while (!blocked && market.length > 0) write(market.shift());
         // The backlog is what is being reported, so the line is written when it
         // ends rather than while it is still growing.
-        if (!blocked && account.length === 0 && market.length === 0) report(false);
+        if (account.length === 0 && market.length === 0) {
+            stopBacklogTimer();
+            if (!blocked) report(false);
+        }
     };
 
     connection.on('drain', () => {
+        if (abandoned) return;
         blocked = false;
         flush();
     });
+    connection.on('close', dispose);
 
     return {
         send: (text, {
@@ -198,18 +264,18 @@ export const createRendererOutbox = (connection, {
                 queued: false,
             };
             const isAccount = lane === RENDERER_OUTBOX_LANES.ACCOUNT;
+            if (text.length * 3 > maxQueueBytes && sizeOf(frame) > maxQueueBytes) {
+                return overflow('frame-bytes', frame.bytes);
+            }
             if (!blocked && account.length === 0 && (isAccount || market.length === 0)) {
                 write(frame);
                 return true;
             }
             if (isAccount) {
                 if (account.length >= RENDERER_OUTBOX.ACCOUNT_QUEUE_FRAMES) {
-                    abandoned = true;
-                    report(true);
-                    onOverflow();
-                    connection.close();
-                    return false;
+                    return overflow('account-frames', sizeOf(frame));
                 }
+                if (!makeByteRoom(frame)) return false;
                 queue(account, frame);
                 return true;
             }
@@ -225,13 +291,17 @@ export const createRendererOutbox = (connection, {
                     queued.replaceable && queued.key === frame.key
                 ));
                 if (index !== -1) {
-                    tally(market[index], 'superseded');
-                    left(market[index]);
+                    const replaced = market[index];
+                    if (!makeByteRoom(frame, replaced)) return false;
+                    // Eviction may have shifted this frame's array index.
+                    const currentIndex = market.indexOf(replaced);
+                    tally(replaced, 'superseded');
+                    left(replaced);
                     // Replaced where it stands, so the order the desk stated
                     // between different resources is the order they arrive in.
                     frame.queued = true;
                     entered(frame);
-                    market[index] = frame;
+                    market[currentIndex] = frame;
                     return true;
                 }
             }
@@ -246,13 +316,10 @@ export const createRendererOutbox = (connection, {
                     left(market[droppable]);
                     market.splice(droppable, 1);
                 } else if (market.length >= RENDERER_OUTBOX.MARKET_QUEUE_LIMIT) {
-                    abandoned = true;
-                    report(true);
-                    onOverflow();
-                    connection.close();
-                    return false;
+                    return overflow('market-frames', sizeOf(frame));
                 }
             }
+            if (!makeByteRoom(frame)) return false;
             queue(market, frame);
             return true;
         },
@@ -271,7 +338,10 @@ export const createRendererOutbox = (connection, {
                 market.splice(index, 1);
                 removed += 1;
             }
-            if (!blocked && account.length === 0 && market.length === 0) report(false);
+            if (account.length === 0 && market.length === 0) {
+                stopBacklogTimer();
+                if (!blocked) report(false);
+            }
             return removed;
         },
         // What is being held right now, for the tests and for anything that wants
@@ -283,7 +353,7 @@ export const createRendererOutbox = (connection, {
             // Depth in bytes as well as in frames: sixty-four frames is a
             // different backlog when they are status lines than when they are
             // books, and only one of the two readings says which.
-            bytes: [...tallies.values()].reduce((total, entry) => total + entry.bytes, 0),
+            bytes: queuedBytes,
             resources: Object.freeze(Object.fromEntries(
                 [...tallies].map(([key, entry]) => [key, Object.freeze({
                     frames: entry.frames,
@@ -295,11 +365,6 @@ export const createRendererOutbox = (connection, {
                 })]),
             )),
         }),
-        dispose: () => {
-            abandoned = true;
-            account.length = 0;
-            market.length = 0;
-            report(true);
-        },
+        dispose,
     };
 };

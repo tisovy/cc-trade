@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
     RENDERER_OUTBOX,
     RENDERER_OUTBOX_LANES,
@@ -35,6 +35,200 @@ const book = symbol => ({
     resource: 'depth',
     symbol,
     supersede: true,
+});
+
+describe('renderer backlog byte and duration bounds', () => {
+    beforeEach(() => vi.useFakeTimers());
+    afterEach(() => { vi.clearAllTimers(); vi.useRealTimers(); });
+    const blockedBox = (options = {}) => {
+        const connection = createConnection();
+        const onOverflow = vi.fn();
+        const outbox = createRendererOutbox(connection, { maxQueueBytes: 12, maxBacklogMs: 100, onOverflow, ...options });
+        connection.stall();
+        outbox.send('open', account);
+        return { connection, outbox, onOverflow };
+    };
+
+    it('accepts the exact byte ceiling then closes once and releases all retained data', () => {
+        const { connection, outbox, onOverflow } = blockedBox();
+        expect(outbox.send('123456', account)).toBe(true);
+        expect(outbox.send('abcdef', { resource: 'history' })).toBe(true);
+        expect(outbox.pending()).toMatchObject({ bytes: 12, account: 1, market: 1 });
+        expect(outbox.send('x', account)).toBe(false);
+        expect(onOverflow).toHaveBeenCalledWith(expect.objectContaining({ reason: 'queue-bytes', bytes: 12, accountFrames: 1, marketFrames: 1, frameBytes: 1 }));
+        expect(outbox.pending()).toMatchObject({ bytes: 0, account: 0, market: 0, resources: {} });
+        expect(vi.getTimerCount()).toBe(0);
+        expect(outbox.send('again', account)).toBe(false);
+        connection.connected = true; // a stray late drain cannot revive abandonment
+        connection.drain();
+        expect(connection.sent).toEqual(['open']);
+        expect(connection.close).toHaveBeenCalledOnce();
+    });
+
+    it('charges UTF-8 rather than string length and guards the direct path', () => {
+        const connection = createConnection();
+        const outbox = createRendererOutbox(connection, { maxQueueBytes: 4 });
+        expect(outbox.send('🙂', account)).toBe(true);
+        expect(outbox.send('éé', account)).toBe(true);
+        expect(outbox.send('ééé', account)).toBe(false);
+        expect(connection.sent).toEqual(['🙂', 'éé']);
+        const blocked = blockedBox({ maxQueueBytes: 4 });
+        expect(blocked.outbox.send('🙂', account)).toBe(true);
+        expect(blocked.outbox.pending().bytes).toBe(4);
+        expect(blocked.outbox.send('a', account)).toBe(false);
+    });
+
+    it('does not send a too-large ASCII frame even to a writable socket', () => {
+        const connection = createConnection();
+        const onOverflow = vi.fn();
+        const outbox = createRendererOutbox(connection, { maxQueueBytes: 4, onOverflow });
+        expect(outbox.send('12345', account)).toBe(false);
+        expect(connection.sent).toEqual([]);
+        expect(onOverflow).toHaveBeenCalledWith(expect.objectContaining({ reason: 'frame-bytes', frameBytes: 5, bytes: 0 }));
+    });
+
+    it('releases replacement bytes and evicts only other replaceable market frames for growth', () => {
+        const { connection, outbox } = blockedBox();
+        outbox.send('1111', book('ETHUSDT'));
+        outbox.send('22', book('BTCUSDT'));
+        outbox.send('page', { resource: 'history' });
+        expect(outbox.send('33333333', book('BTCUSDT'))).toBe(true);
+        expect(outbox.pending()).toMatchObject({ bytes: 12, market: 2 });
+        expect(outbox.send('4', book('BTCUSDT'))).toBe(true);
+        expect(outbox.pending().bytes).toBe(5);
+        connection.drain();
+        expect(connection.sent).toEqual(['open', '4', 'page']);
+        expect(outbox.pending().bytes).toBe(0);
+        expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('makes room for account facts by removing only complete market snapshots', () => {
+        const { connection, outbox } = blockedBox();
+        outbox.send('123456', book('BTCUSDT'));
+        outbox.send('page', { resource: 'catalog' });
+        expect(outbox.send('event', account)).toBe(true);
+        expect(outbox.pending()).toMatchObject({ account: 1, market: 1, bytes: 9 });
+        connection.drain();
+        expect(connection.sent).toEqual(['open', 'event', 'page']);
+    });
+
+    it('does not discard an account frame even when its delivery metadata says supersede', () => {
+        const { outbox, connection } = blockedBox();
+        outbox.send('12345678', { ...account, resource: 'account', supersede: true });
+        expect(outbox.send('abcde', { resource: 'history' })).toBe(false);
+        expect(connection.close).toHaveBeenCalledOnce();
+        expect(connection.sent).toEqual(['open']);
+    });
+
+    it('does not lose protected pages when a growing replacement cannot fit', () => {
+        const { connection, outbox } = blockedBox();
+        outbox.send('12345678', { resource: 'history' });
+        outbox.send('x', book('BTCUSDT'));
+        expect(outbox.send('12345', book('BTCUSDT'))).toBe(false);
+        expect(connection.sent).toEqual(['open']);
+        expect(connection.close).toHaveBeenCalledOnce();
+        expect(outbox.pending().bytes).toBe(0);
+    });
+
+    it('expires a silent backlog without more sends or a drain', () => {
+        const { connection, outbox, onOverflow } = blockedBox();
+        outbox.send('fact', account);
+        vi.advanceTimersByTime(99);
+        expect(connection.close).not.toHaveBeenCalled();
+        vi.advanceTimersByTime(1);
+        expect(connection.close).toHaveBeenCalledOnce();
+        expect(onOverflow).toHaveBeenCalledWith(expect.objectContaining({ reason: 'backlog-timeout', bytes: 4 }));
+        expect(outbox.pending()).toMatchObject({ account: 0, market: 0, bytes: 0 });
+    });
+
+    it('does not renew the deadline when the newest snapshot keeps changing', () => {
+        const { connection, outbox } = blockedBox();
+        outbox.send('first', book('BTCUSDT'));
+        vi.advanceTimersByTime(60);
+        outbox.send('new', book('BTCUSDT'));
+        vi.advanceTimersByTime(40);
+        expect(connection.close).toHaveBeenCalledOnce();
+        expect(connection.sent).toEqual(['open']);
+    });
+
+    it('does not renew the deadline on partial drain', () => {
+        const { connection, outbox } = blockedBox();
+        outbox.send('first', account);
+        outbox.send('second', account);
+        vi.advanceTimersByTime(60);
+        connection.sendUTF.mockImplementation(text => { connection.sent.push(text); connection.stall(); });
+        connection.drain();
+        expect(outbox.pending()).toMatchObject({ account: 1, bytes: 6 });
+        vi.advanceTimersByTime(40);
+        expect(connection.close).toHaveBeenCalledOnce();
+        expect(connection.sent).toEqual(['open', 'first']);
+    });
+
+    it('gives a later independent backlog a new deadline after a full drain', () => {
+        const { connection, outbox } = blockedBox();
+        outbox.send('first', account);
+        vi.advanceTimersByTime(60);
+        connection.drain();
+        expect(vi.getTimerCount()).toBe(0);
+        connection.stall();
+        outbox.send('open2', account);
+        outbox.send('second', account);
+        vi.advanceTimersByTime(99);
+        expect(connection.close).not.toHaveBeenCalled();
+        vi.advanceTimersByTime(1);
+        expect(connection.close).toHaveBeenCalledOnce();
+    });
+
+    it.each(['dispose', 'close', 'discard'])('clears timers and bytes on %s', action => {
+        const { connection, outbox } = blockedBox();
+        outbox.send('book', book('BTCUSDT'));
+        if (action === 'dispose') outbox.dispose();
+        if (action === 'close') connection.on.mock.calls.find(([event]) => event === 'close')[1]();
+        if (action === 'discard') expect(outbox.discardMarket('depth', 'BTCUSDT')).toBe(1);
+        expect(outbox.pending().bytes).toBe(0);
+        expect(vi.getTimerCount()).toBe(0);
+        vi.advanceTimersByTime(200);
+        expect(connection.close).not.toHaveBeenCalled();
+    });
+
+    it('still closes and clears if every diagnostic callback throws', () => {
+        const fail = () => { throw new Error('diagnostic failed'); };
+        const { connection, outbox } = blockedBox({ onBacklog: fail, onOverflow: fail });
+        outbox.send('fact', account);
+        expect(() => vi.advanceTimersByTime(100)).not.toThrow();
+        expect(connection.close).toHaveBeenCalledOnce();
+        expect(outbox.pending()).toMatchObject({ account: 0, market: 0, bytes: 0, resources: {} });
+        expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('keeps current byte accounting independent of diagnostic cooldown', () => {
+        const { connection, outbox } = blockedBox({ now: () => 1234 });
+        outbox.send('first', account);
+        connection.drain();
+        connection.stall();
+        outbox.send('open2', account);
+        outbox.send('123456789012', account);
+        expect(outbox.pending().bytes).toBe(12);
+        expect(outbox.send('x', account)).toBe(false);
+        expect(outbox.pending().bytes).toBe(0);
+    });
+
+    it.each([{ maxQueueBytes: 0 }, { maxQueueBytes: NaN }, { maxBacklogMs: -1 }, { maxBacklogMs: Infinity }])('rejects invalid developer limits %j', options => {
+        expect(() => createRendererOutbox(createConnection(), options)).toThrow(RangeError);
+    });
+
+    it('holds a full 128-page maximum-sized workstation catalog and account facts within production bounds', () => {
+        const { connection, outbox } = blockedBox({ maxQueueBytes: RENDERER_OUTBOX.QUEUE_BYTES });
+        const page = 'p'.repeat(256 * 1024);
+        for (let index = 0; index < 128; index += 1) expect(outbox.send(page, { resource: 'catalog' })).toBe(true);
+        expect(outbox.send('account-event', account)).toBe(true);
+        expect(outbox.pending().bytes).toBe(32 * 1024 * 1024 + 13);
+        connection.drain();
+        expect(connection.sent[1]).toBe('account-event');
+        expect(connection.sent.slice(2)).toHaveLength(128);
+        expect(outbox.pending().bytes).toBe(0);
+        expect(connection.close).not.toHaveBeenCalled();
+    });
 });
 
 describe('createRendererOutbox', () => {
