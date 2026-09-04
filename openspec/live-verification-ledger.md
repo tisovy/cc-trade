@@ -1037,14 +1037,55 @@ interval's window from the store under `loading` on every open and
 switch, history pages from the store whole or not at all, the exchange
 last. Deployed 2026-09-04 with the desk stopped, archived the same day
 with its live steps carried here; the operator's sitting closes them, my
-journal read follows it. `hunter`'s `topup=false` is in its working tree
-and takes effect on the restart in 3.2.
+journal read follows it. `hunter`'s `topup=false` has been live since the owner's Hunter stack
+restart at 21:33 MSK on 2026-09-04; the diff itself is still uncommitted in
+`hunter` (its OpenSpec change is written — see 3.2).
 
 | Change | Task | Status | Observation date | Account | Desk revision | Evidence |
 |---|---:|---|---|---|---|---|
-| `read-candles-from-the-nearest-source` | 3.2 | `OUTSTANDING` | — | Production | `e6805da` or later | Operator: `systemctl --user restart ui.service` after `hunter`'s `topup=false` is in place, so a page beyond the store's oldest minute makes `hunter` read nothing from Binance on the desk's behalf. |
-| `read-candles-from-the-nearest-source` | 5.2 | `OUTSTANDING` | — | Production | `e6805da` or later | Switch 1m → 5m → 1h on a live contract: the new interval's bars are on the chart under the veil at once, the veil lifts when the exchange's window lands, no jump; the journal shows `candle-store-window` `hit` before `contract-klines` on each switch. |
-| `read-candles-from-the-nearest-source` | 5.3 | `OUTSTANDING` | — | Production | `e6805da` or later | Scroll left through the last month on 5m: pages arrive with no `candle-history` timing; the journal shows `candle-store-page` `hit` per page; past 2026-07-30 the pages come from the exchange (`candle-history` timings resume). |
-| `read-candles-from-the-nearest-source` | 5.4 | `OUTSTANDING` | — | Production | `e6805da` or later | Stop `ui.service` for a minute: switches and scrolls keep working from the app cache and the exchange; the journal shows `candle-store-*` errors then `skipped`, then hits again after the unit is back. |
-| `read-candles-from-the-nearest-source` | 5.5 | `OUTSTANDING` | — | Production | `e6805da` or later | A CJK contract (龙虾USDT): the store serves its window and pages. |
-| `read-candles-from-the-nearest-source` | 5.6 | `OUTSTANDING` | — | Production | `e6805da` or later | Journal read after the sitting: the summary's «Candle reads» block states pages from the store, pages from the exchange, and the weight not spent. |
+| `read-candles-from-the-nearest-source` | 3.2 | `CONFIRMED` | 2026-09-04 | Production | `e6805da` (morning), `14c5bca` (evening) | The operator restarted the whole Hunter stack at 21:33:14 MSK (all four units carry the timestamp), which loaded `hunter`'s `topup=false` from its working tree: the running `ui.service` (PID 4280) lists `topup` on `/api/candles/{symbol}` in its OpenAPI, and `GET …/BTCUSDT?market=usdm&tf=1m&from=2026-07-01T00:00Z&to=00:10Z&limit=10&topup=false` answers 0 bars, `coverage_complete=false`, `gap_count=10`, where the same span on 2026-08-01 answers 10 bars complete. `hunter`'s `var/logs/ui.log` carries the desk's 41 requests, every one with `topup=false`. The `hunter` diff is still uncommitted: its OpenSpec change `answer-the-desk-cache-only` is written and strictly valid, `make qa` passed (2345 passed, 33 skipped), but this session's permission layer refused the archive, the `docs/status.md` entry and the commit — three commands left to the owner. |
+| `read-candles-from-the-nearest-source` | 5.2 | `CONFIRMED` | 2026-09-04 | Production | `e6805da`, `14c5bca` | Journal: 5m → 15m → 1h → 1m → 1h at 06:40:53–06:41:08Z and 1m → 5m → 15m → 1h → 4h → 1d → 15m at 07:24:06–07:24:31Z. On every switch the store covers, `candle-store-window` `ok hit` (5–208 ms) lands 1.5–2.5 s before `contract-klines`; the 4h and 1d windows are `miss NOT_COVERED` (the store's holes of 08-22..08-29 and its first minute for this contract, 2026-07-16 17:57Z) and the exchange's window serves alone. The screen on the operator's word that morning: «да, вроде отлично всё работает». |
+| `read-candles-from-the-nearest-source` | 5.3 | `CONFIRMED` | 2026-09-04 | Production | `e6805da`, `14c5bca` | Journal: 12 pages from the store, none followed by a `candle-history` timing — 5m 06:40:53Z, 1m 06:41:03Z / 07:00:46Z / 07:24:06Z, 5m 07:24:12Z, 15m (2026-08-03..08-14) 18:34:45Z, 1m ×2 MARSCOINUSDT 18:36:07Z, 1m ×4 龙虾USDT 18:47:55–18:48:33Z; every `miss NOT_COVERED` is followed by one (15 exchange pages). The 1h pages before the store's first minute (2026-04-28..06-09 and two older, 06:49:04–06:49:06Z) come back empty and go to the exchange. Not walked as a month on 5m: the one 5m page read today (08-31..09-04) was a store hit, and the 15m page of the last ten days is `NOT_COVERED` on the store's own holes, not on its floor (findings below). |
+| `read-candles-from-the-nearest-source` | 5.4 | `PARTIAL` | 2026-09-04 | Production | `e6805da` | The unit was not stopped — a stop is owner-gated in `hunter`, only a restart is granted — but the same path fired on its own twice: the 4h window at 06:39:05Z and the 1d window at 06:50:51Z ran past the 1 500 ms deadline (`error REQUEST_DEADLINE_EXCEEDED`, 1 501 ms), the next reads were `skipped` under the 30 s cooldown (06:39:10–06:39:14Z ×3, 06:50:52Z ×1), the exchange served meanwhile (`contract-klines` 352–430 ms, `candle-history` 461–511 ms) and the chart kept switching and paging, and `hit`s resumed at 06:40:53Z and 07:00:46Z. The deliberate minute-long stop remains the operator's. |
+| `read-candles-from-the-nearest-source` | 5.5 | `CONFIRMED` | 2026-09-04 | Production | `14c5bca` | Journal 18:47:53–18:48:33Z: 龙虾USDT shown from MARSCOINUSDT; `candle-store-window` `ok hit` 45 ms, then pages — one `miss NOT_COVERED` (the page spans the store's 15-minute hole of 08:13–08:28Z that day) served by the exchange, then four `hit`s of 93 / 20 / 17 / 16 ms. The endpoint answers the encoded path `%E9%BE%99%E8%99%BEUSDT`, as the desk's client test asserts. |
+| `read-candles-from-the-nearest-source` | 5.6 | `CONFIRMED` | 2026-09-04 | Production | `e6805da`, `14c5bca` | The day's record (4 016 events, desk stopped 18:48:37Z), «Candle reads»: windows store 16, exchange 24; pages store 12 (weight not spent 60), exchange 15; store misses 17, errors 2, skipped 4, aborted 3. What the block does not state is in the findings below. |
+
+Findings of the 2026-09-04 journal read, none of them fixed:
+
+- **The store has holes, and they are global.** `binance_usdm_ohlcv_1m` misses
+  the same minutes for every symbol (BTCUSDT, USELESSUSDT and 龙虾USDT alike):
+  2026-08-22 284 min in 51 runs (10:02–19:31Z), 08-23 37, 08-25 43, 08-26 43,
+  08-27 51, 08-28 13, 08-29 1, 09-04 15 (08:13–08:28Z). `hunter-runtime`'s
+  catch-up fills only the tail behind its last row, never a hole inside. Every
+  window or page that crosses one is `NOT_COVERED` and paid at the exchange:
+  today the 15m page of the last ten days (153 missing minutes), the 4h window
+  (473), and the first 1m page of each contract shown after 08:28Z. Fifteen of
+  the seventeen misses are these holes or the store's floor, not a contract the
+  store lacks. Hunter-side; the `docs/status.md` entry is drafted, not saved
+  (see 3.2).
+- **A contract younger than a page never pages from the store.** MARSCOINUSDT
+  is stored from 2026-09-01 09:45Z; a page reaching before that comes back
+  shorter than `limit` and is refused as not whole, though the exchange has
+  nothing older either — the exchange then answers the same short page for
+  weight 5. A design residual of `read-candles-from-the-nearest-source`: the
+  store could vouch for a contract's beginning where its `actual_from` is the
+  contract's first minute.
+- **Coarse windows cost the store 0.4–1.5 s for a span it cannot cover.** The
+  4h and 1d windows begin before the store's floor (2026-07-16 for most
+  contracts); the SQL still runs over the months it has — 428 ms warm, past the
+  1 500 ms deadline cold (06:39:05Z, 06:50:51Z) — and the 30 s cooldown that
+  follows skips every store read, whether or not it would have hit. Candidate
+  change: do not ask the store for a span that begins before its floor, or give
+  the deadline the interval's measure.
+- **Pages from the renderer's IndexedDB cache are invisible in the journal.**
+  Two 1h pages of USELESSUSDT (2026-07-21..08-31 and 06-09..07-21) reached the
+  chart between 06:41:06Z and 06:49:04Z with neither a `candle-store-page` nor a
+  `candle-history` timing: `futuresCandleHistoryCache` (IndexedDB
+  `FuturesCandleHistory`, per contract and interval, up to 5 000 rows) served
+  them from an earlier day, silently. The «Candle reads» block therefore
+  understates pages served and weight not spent — it counts the store's share
+  only. Candidate change: a renderer-reported count of cache-served pages.
+- **The window re-reads at 06:47:29Z and 06:48:16Z were session re-opens**
+  (`upstream-streams` and `aggregate-ready` alongside), not store retries; each
+  re-open reads the store's window again (hit) and the exchange's (weight 5).
+
