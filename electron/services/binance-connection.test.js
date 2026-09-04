@@ -475,6 +475,35 @@ describe('setupBinanceConnection user-data orchestration', () => {
         await firstClose;
     });
 
+    it('charges current public and private query scopes during Spot detail bootstrap', async () => {
+        moduleMocks.spotClient.restAPI.getTrades = vi.fn().mockResolvedValue({
+            status: 200, data: async () => [],
+        });
+        setupBinanceConnection({ localWebSocketAccess: { host: '127.0.0.1' } });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        await activateSpotRuntime();
+        const { RateLimiter } = await import('./binance-connection.js');
+        const admission = vi.spyOn(RateLimiter.prototype, 'execute');
+        await moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({
+                action: 'subscribe', channelId: 'detail-BTCUSDT-1m',
+                symbol: 'BTCUSDT', interval: '1m',
+            }),
+        });
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(admission.mock.calls.map(([, weight]) => weight).sort((a, b) => a - b))
+            .toEqual([2, 5, 20, 20, 20, 25, 80]);
+        expect(moduleMocks.spotClient.restAPI.getTrades).toHaveBeenCalledWith({ symbol: 'BTCUSDT', limit: 100 });
+        expect(moduleMocks.spotClient.restAPI.getOpenOrders).toHaveBeenLastCalledWith({ recvWindow: 60000 });
+        expect(moduleMocks.spotClient.restAPI.myTrades).toHaveBeenLastCalledWith({
+            symbol: 'BTCUSDT', limit: 500, recvWindow: 60000,
+        });
+    });
+
     it('retires an in-flight settled read and public mark feed on service close', async () => {
         let resolveIncomePage;
         moduleMocks.futuresAdapter.getIncomePage.mockImplementationOnce(() => (

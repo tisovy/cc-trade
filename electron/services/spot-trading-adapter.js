@@ -108,9 +108,11 @@ export const normalizeSpotUserDataStreamEvent = (payload = {}) => {
 const readResponseData = async (response) => response.data();
 
 const SPOT_ACCOUNT_REFRESH_WEIGHTS = {
-    balances: 10,
-    openOrders: 3,
-    tradeHistory: 10,
+    balances: 20,
+    // The account-wide snapshot deliberately omits symbol.
+    openOrders: 80,
+    // myTrades includes symbol, but not orderId.
+    tradeHistory: 20,
 };
 
 const SPOT_ACCOUNT_REFRESH_ERROR_LABELS = {

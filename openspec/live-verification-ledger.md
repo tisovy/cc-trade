@@ -1162,3 +1162,15 @@ confirmation and separately authorized registry rescan pending**, not archived.
   awaits separate permission to send dependency names/versions to the registry.
 - Development now needs Node ^22.12.0 or >=24.0.0. Operator packages bundle Node.
   React Hooks lint-plugin stays 7.0.1 until its new-rule migration is reviewed.
+
+## count-each-spot-request-attempt — 2026-09-04
+
+Status: F08 read weights and legacy retry accounting implemented; **operator
+confirmation pending**, not archived. Full local checks: 139 files / 3,268 tests.
+
+- Confirm normal Spot account/detail refresh under corrected costs (account
+  pass 120, private reconnect catch-up 100). Do not deliberately exhaust quotas.
+- The limiter may wait sooner because it now counts actual declared read costs
+  and repeated attempts. Its ceiling and spacing were not raised to conceal that.
+- Futures physical accounting and trading retry policy are unchanged. Direct
+  Spot command/lookup admission remains a separate boundary, not claimed covered.

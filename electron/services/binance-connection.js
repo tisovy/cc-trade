@@ -1040,17 +1040,15 @@ export class RateLimiter {
             },
         };
 
-        // Spot keeps its historical logical-operation admission: retries are
-        // part of the one SDK operation the legacy limiter admitted. Futures
-        // installs the physical context below and every low-level HTTP send
-        // reserves itself, so it must not pre-reserve here.
-        if (context === null) await this.reserve(weight, signal, { standing: requestStanding });
-
         const executeAttempts = async () => {
             let lastError;
             for (let attempt = 0; attempt <= maxRetries; attempt++) {
                 try {
                     throwIfAborted(signal);
+                    // Spot's SDK has no hidden retries: every owner retry must
+                    // take a fresh reservation. Futures reserves each send at
+                    // its physical boundary, so do not double-charge it here.
+                    if (context === null) await this.reserve(weight, signal, { standing: requestStanding });
                     return await fn();
                 } catch (err) {
                     lastError = err;
@@ -8476,10 +8474,11 @@ export function setupBinanceConnection({
             channel.depthCache = new DepthCache();
 
             // Rate-limited Data Fetching
-            // Binance API weights: exchangeInfo=10, depth=5-50, klines=1-5, trades=1, account=10
+            // Current query weights: exchangeInfo=20, depth(limit 100)=5,
+            // klines=2, trades=25; private scopes are declared by the adapter.
             const fetchPromises = [];
 
-            // Exchange Info (Filters) - for detail channels (weight ~10)
+            // Exchange Info (Filters) - for detail channels (weight 20)
             if (isDetail && channel.state.initChart) {
                 fetchPromises.push(rateLimiter.execute(async () => {
                     const parsedFilters = await spotTradingAdapter.getExchangeInfo(symbol);
@@ -8487,7 +8486,7 @@ export function setupBinanceConnection({
                         emitGlobal('filters', { [symbol]: parsedFilters });
                         channel.state.initChart = false;
                     }
-                }, 10).catch(err => logger.error("Exchange Info Fetch Error:", err)));
+                }, 20).catch(err => logger.error("Exchange Info Fetch Error:", err)));
             }
 
             // Account State - for detail channels only
@@ -8497,7 +8496,7 @@ export function setupBinanceConnection({
                 }
             }
 
-            // Recent Trades - for detail channels (weight ~1)
+            // Recent Trades - for detail channels (weight 25)
             if (isDetail) {
                 fetchPromises.push(rateLimiter.execute(async () => {
                     const res = await client.restAPI.getTrades({ symbol, limit: 100 });
@@ -8511,7 +8510,7 @@ export function setupBinanceConnection({
                         }))
                         : [];
                     emitToChannel(channelId, 'trades', parsedTrades);
-                }, 1).catch(err => logger.error("Recent Trades Fetch Error:", err)));
+                }, 25).catch(err => logger.error("Recent Trades Fetch Error:", err)));
             }
 
             // Depth Snapshot - for detail channels (weight ~5 for limit 100)

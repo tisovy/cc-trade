@@ -71,7 +71,7 @@ describe('production RateLimiter cancellation', () => {
         expect(limiter.getCurrentWeight()).toBe(30);
     });
 
-    it('keeps a retried legacy Spot operation on its one logical reservation', async () => {
+    it('reserves every retried legacy Spot attempt separately', async () => {
         const limiter = new RateLimiter(100, 60_000, 0);
         const networkError = Object.assign(new Error('reset'), { code: 'ECONNRESET' });
         const operation = vi.fn()
@@ -83,7 +83,72 @@ describe('production RateLimiter cancellation', () => {
 
         await expect(pending).resolves.toBe('recovered');
         expect(operation).toHaveBeenCalledTimes(2);
+        expect(limiter.getCurrentWeight()).toBe(60);
+    });
+
+    it('keeps the charge for all exhausted legacy attempts', async () => {
+        const limiter = new RateLimiter(100, 60_000, 0);
+        const error = Object.assign(new Error('reset'), { code: 'ECONNRESET' });
+        const operation = vi.fn().mockRejectedValue(error);
+        const pending = limiter.execute(operation, 30, 2).catch(value => value);
+        await vi.advanceTimersByTimeAsync(3_000);
+        expect(await pending).toBe(error);
+        expect(operation).toHaveBeenCalledTimes(3);
+        expect(limiter.getCurrentWeight()).toBe(90);
+    });
+
+    it('holds a legacy retry until its own weight fits the window', async () => {
+        const limiter = new RateLimiter(30, 60_000, 0);
+        const error = Object.assign(new Error('reset'), { code: 'ECONNRESET' });
+        const operation = vi.fn().mockRejectedValueOnce(error).mockResolvedValue('ok');
+        const pending = limiter.execute(operation, 30, 1);
+        await vi.advanceTimersByTimeAsync(59_999);
+        expect(operation).toHaveBeenCalledOnce();
         expect(limiter.getCurrentWeight()).toBe(30);
+        // Existing reservation policy keeps a 100ms window-boundary margin.
+        await vi.advanceTimersByTimeAsync(101);
+        expect(await pending).toBe('ok');
+        expect(operation).toHaveBeenCalledTimes(2);
+        expect(limiter.requests).toEqual([{ timestamp: 60_100, weight: 30 }]);
+    });
+
+    it('aborts a capacity-blocked legacy retry without a second send or charge', async () => {
+        const limiter = new RateLimiter(30, 60_000, 0);
+        const controller = new AbortController();
+        const operation = vi.fn().mockRejectedValue(Object.assign(new Error('reset'), { code: 'ECONNRESET' }));
+        const pending = limiter.execute(operation, 30, 2, { signal: controller.signal }).catch(value => value);
+        await vi.advanceTimersByTimeAsync(1_000);
+        controller.abort();
+        expect(await pending).toMatchObject({ name: 'AbortError' });
+        expect(operation).toHaveBeenCalledOnce();
+        expect(limiter.getCurrentWeight()).toBe(30);
+        expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('applies normal spacing as well as backoff to a timestamp retry', async () => {
+        const limiter = new RateLimiter(100, 60_000, 500);
+        const starts = [];
+        const operation = vi.fn(async () => {
+            starts.push(Date.now());
+            if (starts.length === 1) throw Object.assign(new Error('clock rejected'), { code: -1021 });
+            return 'ok';
+        });
+        const pending = limiter.execute(operation, 20, 1);
+        await vi.advanceTimersByTimeAsync(999);
+        expect(starts).toEqual([500]);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(await pending).toBe('ok');
+        expect(starts).toEqual([500, 1_000]);
+        expect(limiter.getCurrentWeight()).toBe(40);
+    });
+
+    it('does not add a retry when an owner permits only one mutation attempt', async () => {
+        const limiter = new RateLimiter(100, 60_000, 0);
+        const error = Object.assign(new Error('reset'), { code: 'ECONNRESET' });
+        const operation = vi.fn().mockRejectedValue(error);
+        await expect(limiter.execute(operation, 1, 0)).rejects.toBe(error);
+        expect(operation).toHaveBeenCalledOnce();
+        expect(limiter.getCurrentWeight()).toBe(1);
     });
 
     it('cancels while a retry awaits capacity without starting or charging that attempt', async () => {

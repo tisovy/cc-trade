@@ -121,7 +121,7 @@ describe('SpotTradingAdapter', () => {
         expect(client.restAPI.sendRequest).toHaveBeenNthCalledWith(2, '/api/v3/time', 'GET');
     });
 
-    it('builds account refresh operations with the existing weights and renderer payload shapes', async () => {
+    it('builds account refresh operations with current scope-specific weights and renderer payload shapes', async () => {
         const client = makeClient({
             getAccount: vi.fn().mockResolvedValue(makeResponse({
                 balances: [{ asset: 'USDT', free: '100.00', locked: '0.00' }],
@@ -134,9 +134,9 @@ describe('SpotTradingAdapter', () => {
         const operations = adapter.getAccountRefreshOperations('BTCUSDT');
 
         expect(operations.map(({ type, weight }) => ({ type, weight }))).toEqual([
-            { type: 'balances', weight: 10 },
-            { type: 'openOrders', weight: 3 },
-            { type: 'tradeHistory', weight: 10 },
+            { type: 'balances', weight: 20 },
+            { type: 'openOrders', weight: 80 },
+            { type: 'tradeHistory', weight: 20 },
         ]);
         await expect(operations[0].loadPayload()).resolves.toEqual({
             balances: { USDT: { available: '100.00', onOrder: '0.00' } },
@@ -170,8 +170,8 @@ describe('SpotTradingAdapter', () => {
         const operations = adapter.getAccountRefreshOperations();
 
         expect(operations.map(({ type, weight }) => ({ type, weight }))).toEqual([
-            { type: 'balances', weight: 10 },
-            { type: 'openOrders', weight: 3 },
+            { type: 'balances', weight: 20 },
+            { type: 'openOrders', weight: 80 },
         ]);
         await expect(operations[0].loadPayload()).resolves.toEqual({
             balances: { BTC: { available: '0.50', onOrder: '0.10' } },
@@ -184,9 +184,9 @@ describe('SpotTradingAdapter', () => {
 
     it('runs spot account refresh operations sequentially and isolates failures', async () => {
         const operations = [
-            { type: 'balances', weight: 10 },
-            { type: 'openOrders', weight: 3 },
-            { type: 'tradeHistory', weight: 10 },
+            { type: 'balances', weight: 20 },
+            { type: 'openOrders', weight: 80 },
+            { type: 'tradeHistory', weight: 20 },
         ];
         const balancesError = new Error('balances unavailable');
         const executionOrder = [];
@@ -217,7 +217,7 @@ describe('SpotTradingAdapter', () => {
         });
     });
 
-    it('builds detail account snapshot operations with existing weights, labels, and payload shapes', async () => {
+    it('builds detail account snapshot operations with current weights, labels, and payload shapes', async () => {
         const client = makeClient({
             getAccount: vi.fn().mockResolvedValue(makeResponse({
                 balances: [{ asset: 'USDT', free: '25.00', locked: '5.00' }],
@@ -230,9 +230,9 @@ describe('SpotTradingAdapter', () => {
         const operations = adapter.getDetailAccountSnapshotOperations('ETHUSDT');
 
         expect(operations.map(({ type, weight, errorLabel }) => ({ type, weight, errorLabel }))).toEqual([
-            { type: 'balances', weight: 10, errorLabel: 'Balances Fetch Error' },
-            { type: 'openOrders', weight: 3, errorLabel: 'Open Orders Fetch Error' },
-            { type: 'tradeHistory', weight: 10, errorLabel: 'Trade History Fetch Error' },
+            { type: 'balances', weight: 20, errorLabel: 'Balances Fetch Error' },
+            { type: 'openOrders', weight: 80, errorLabel: 'Open Orders Fetch Error' },
+            { type: 'tradeHistory', weight: 20, errorLabel: 'Trade History Fetch Error' },
         ]);
         await expect(operations[0].loadPayload()).resolves.toEqual({
             balances: { USDT: { available: '25.00', onOrder: '5.00' } },
