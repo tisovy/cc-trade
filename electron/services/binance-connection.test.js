@@ -9131,6 +9131,107 @@ describe('setupBinanceConnection user-data orchestration', () => {
         .map(([message]) => JSON.parse(message));
 
     it.each([
+        { statuses: ['NEW'], outcome: 'unknown', reads: 3 },
+        { statuses: ['PARTIALLY_FILLED'], outcome: 'unknown', reads: 3 },
+        { statuses: ['PARTIALLY_FILLED', 'CANCELED'], outcome: 'resolved', reads: 2 },
+        { statuses: ['FILLED'], outcome: 'rejected', reads: 1 },
+        { statuses: ['EXPIRED'], outcome: 'rejected', reads: 1 },
+        { statuses: [null], outcome: 'unknown', reads: 3 },
+    ])('proves Spot cancellation from $statuses instead of existence', async ({ statuses, outcome, reads }) => {
+        await connectRenderer('spot');
+        moduleMocks.spotClient.restAPI.deleteOrder = vi.fn().mockRejectedValueOnce(
+            Object.assign(new Error('response lost'), { status: 503, indeterminate: true }),
+        );
+        let observations = 0;
+        moduleMocks.spotClient.restAPI.getOrder.mockImplementation(async () => {
+            const status = statuses[Math.min(observations++, statuses.length - 1)];
+            if (status === null) throw Object.assign(new Error('Order does not exist.'), { status: 400, code: -2013 });
+            return { status: 200, data: async () => ({ symbol: 'PAXUSDT', orderId: 11, status }) };
+        });
+        const pending = moduleMocks.rendererHandlers.message({ type: 'utf8', utf8Data: JSON.stringify({
+            action: 'trade.cancelOrder', version: 1, marketType: 'spot', accountId: 'default',
+            clientOrderId: 'cancel-proof', symbol: 'PAXUSDT', orderId: 11,
+        }) });
+        await vi.advanceTimersByTimeAsync(5_000);
+        await pending;
+        expect(moduleMocks.spotClient.restAPI.deleteOrder).toHaveBeenCalledOnce();
+        expect(observations).toBe(reads);
+        expect(moduleMocks.spotClient.restAPI.newOrder).not.toHaveBeenCalled();
+        const payloads = emitted();
+        expect(payloads.some(p => p.command_resolved?.code === 'SPOT_OUTCOME_CANCELED')).toBe(outcome === 'resolved');
+        expect(payloads.some(p => p.command_unresolved?.code === 'SPOT_OUTCOME_UNKNOWN')).toBe(outcome === 'unknown');
+        expect(payloads.some(p => p.command_rejected?.code === 'SPOT_ORDER_NOT_CANCELLED')).toBe(outcome === 'rejected');
+        expect(payloads.some(p => p.command_resolved?.code === 'SPOT_OUTCOME_EXECUTED')).toBe(false);
+    });
+
+    it.each([
+        { action: 'trade.cancelOrder', reports: [{ status: 'NEW' }], outcome: 'unknown', reads: 3 },
+        { action: 'trade.cancelOrder', reports: [{ status: 'PARTIALLY_FILLED' }, { status: 'CANCELED' }], outcome: 'resolved', reads: 2 },
+        { action: 'trade.cancelOrder', reports: [{ status: 'FILLED' }], outcome: 'rejected', reads: 1 },
+        { action: 'trade.cancelOrder', reports: [null], outcome: 'unknown', reads: 3 },
+        { action: 'trade.replaceOrder', reports: [{ status: 'NEW', price: '39999', origQty: '0.004' }], outcome: 'unknown', reads: 3 },
+        { action: 'trade.replaceOrder', reports: [{ status: 'NEW', price: '40000', origQty: '0.003' }], outcome: 'unknown', reads: 3 },
+        { action: 'trade.replaceOrder', reports: [{ status: 'NEW', price: '40000.00', origQty: '0.004000' }], outcome: 'resolved', reads: 1 },
+        { action: 'trade.replaceOrder', reports: [{ status: 'FILLED', price: '39999', origQty: '0.004' }], outcome: 'rejected', reads: 1 },
+        { action: 'trade.replaceOrder', reports: [{ status: 'UNKNOWN', price: '40000', origQty: '0.004' }], outcome: 'unknown', reads: 3 },
+        { action: 'trade.replaceOrder', reports: [null], outcome: 'unknown', reads: 3 },
+    ])('requires $action postcondition for $reports', async ({ action, reports, outcome, reads }) => {
+        await connectRenderer();
+        const modifying = action === 'trade.replaceOrder';
+        const mutation = modifying ? moduleMocks.futuresAdapter.modifyOrder : moduleMocks.futuresAdapter.cancelOrder;
+        mutation.mockRejectedValueOnce(Object.assign(new Error('response lost'), { status: 503, indeterminate: true }));
+        let observations = 0;
+        moduleMocks.futuresAdapter.findOrder.mockImplementation(async () => {
+            const report = reports[Math.min(observations++, reports.length - 1)];
+            return { exists: report !== null, report: report ? { symbol: 'BTCUSDT', orderId: 11, ...report } : null };
+        });
+        const pending = moduleMocks.rendererHandlers.message({ type: 'utf8', utf8Data: JSON.stringify({
+            action, version: 1, marketType: 'futures', accountId: 'default',
+            clientOrderId: 'mutation-proof', symbol: 'BTCUSDT', orderId: 11,
+            ...(modifying ? { price: '40000', quantity: '0.004', side: 'BUY' } : {}),
+        }) });
+        await vi.advanceTimersByTimeAsync(5_000);
+        await pending;
+        expect(mutation).toHaveBeenCalledOnce();
+        expect(observations).toBe(reads);
+        expect(moduleMocks.futuresAdapter.placeOrder).not.toHaveBeenCalled();
+        const payloads = emitted();
+        expect(payloads.some(p => p.command_resolved)).toBe(outcome === 'resolved');
+        expect(payloads.some(p => p.command_unresolved?.code === 'FUTURES_OUTCOME_UNKNOWN')).toBe(outcome === 'unknown');
+        expect(payloads.some(p => p.command_rejected)).toBe(outcome === 'rejected');
+        if (outcome === 'resolved') expect(payloads.find(p => p.command_resolved).command_resolved.code)
+            .toBe(modifying ? 'FUTURES_OUTCOME_AMENDED' : 'FUTURES_OUTCOME_CANCELED');
+        if (modifying) expect(payloads.find(p => p.command_unresolved).command_unresolved.details.expected)
+            .toEqual({ price: '40000', quantity: '0.004' });
+    });
+
+    it.each(['spot', 'futures-live'])('does not count failed %s placement lookups as repeated absence', async market => {
+        await connectRenderer(market);
+        const failure = Object.assign(new Error('response lost'), { status: 503, indeterminate: true });
+        let pending;
+        if (market === 'spot') {
+            moduleMocks.spotClient.restAPI.newOrder.mockRejectedValueOnce(failure);
+            moduleMocks.spotClient.restAPI.getOrder.mockRejectedValueOnce(failure)
+                .mockRejectedValue(Object.assign(new Error('Order does not exist.'), { status: 400, code: -2013 }));
+            pending = moduleMocks.rendererHandlers.message({ type: 'utf8', utf8Data: JSON.stringify({
+                action: 'trade.placeOrder', version: 1, marketType: 'spot', accountId: 'default',
+                clientOrderId: 'mixed-proof', symbol: 'PAXUSDT', side: 'BUY', orderType: 'LIMIT',
+                timeInForce: 'GTC', price: '0.9990', quantity: '20',
+            }) });
+        } else {
+            moduleMocks.futuresAdapter.placeOrder.mockRejectedValueOnce(failure);
+            moduleMocks.futuresAdapter.findOrder.mockRejectedValueOnce(failure).mockResolvedValue({ exists: false, report: null });
+            pending = placeFuturesOrder('mixed-proof');
+        }
+        await vi.advanceTimersByTimeAsync(5_000);
+        await pending;
+        expect(emitted().some(p => p.command_rejected || p.command_resolved)).toBe(false);
+        expect(emitted().some(p => p.command_unresolved?.code.endsWith('OUTCOME_UNKNOWN'))).toBe(true);
+        const lookups = market === 'spot' ? moduleMocks.spotClient.restAPI.getOrder : moduleMocks.futuresAdapter.findOrder;
+        expect(lookups).toHaveBeenCalledTimes(3);
+    });
+
+    it.each([
         { name: 'accepted before reset', foundAt: 1, lookupFails: false, reads: 1, outcome: 'resolved' },
         { name: 'visible only on the third lookup', foundAt: 3, lookupFails: false, reads: 3, outcome: 'resolved' },
         { name: 'explicitly absent on all lookups', foundAt: Infinity, lookupFails: false, reads: 3, outcome: 'rejected' },

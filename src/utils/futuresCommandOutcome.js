@@ -15,7 +15,7 @@ export const FUTURES_COMMAND_OUTCOME = Object.freeze({
 })
 
 const CANCELLED_STATUSES = new Set(['CANCELED', 'CANCELLED'])
-const WORKING_STATUSES = new Set(['NEW', 'PARTIALLY_FILLED'])
+const TERMINAL_STATUSES = new Set(['FILLED', 'EXPIRED', 'EXPIRED_IN_MATCH', 'REJECTED'])
 const PLACED_STATUSES = new Set(['NEW', 'PARTIALLY_FILLED', 'FILLED'])
 
 const sameText = (left, right) => (
@@ -24,7 +24,7 @@ const sameText = (left, right) => (
   && String(left) === String(right)
 )
 
-const reportStatus = report => String(report?.status ?? report?.X ?? report?.x ?? '').toUpperCase()
+const reportStatus = report => String(report?.status ?? report?.X ?? '').toUpperCase()
 
 // An envelope names the command it answers by the order's identity. A message
 // that names another order says nothing about this one — the desk learned that
@@ -44,6 +44,7 @@ const carriesNoIdentity = details => (
 )
 
 const answersEnvelope = (watcher, envelope) => {
+  if (envelope?.request != null && watcher.request != null && envelope.request !== watcher.request) return false
   const details = envelope?.details ?? {}
   if (carriesNoIdentity(details)) return envelope?.request === watcher.request
   return namesTheOrder(watcher, {
@@ -90,7 +91,7 @@ export const readFuturesCommandAnswer = (watcher, answer) => {
       // Still on the book: the cancellation has not happened yet, so this is not
       // its answer. The reconciliation that reports an order as still existing
       // lands here too, and the wait ends as unknown rather than as a success.
-      if (WORKING_STATUSES.has(status)) return null
+      if (!TERMINAL_STATUSES.has(status)) return null
       // Filled or expired: the order is gone, but not because it was cancelled.
       // The desk owes no replacement for an order the market took.
       return Object.freeze({
@@ -100,6 +101,7 @@ export const readFuturesCommandAnswer = (watcher, answer) => {
         message: `The order is ${status.toLowerCase()} — it was not cancelled.`,
       })
     }
+    if (!PLACED_STATUSES.has(status) && !TERMINAL_STATUSES.has(status) && !CANCELLED_STATUSES.has(status)) return null
     return Object.freeze(PLACED_STATUSES.has(status)
       ? { outcome: FUTURES_COMMAND_OUTCOME.CONFIRMED, status }
       : {

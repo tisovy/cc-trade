@@ -38,6 +38,10 @@ import {
     isIndeterminateTradingFailure,
 } from './trading-command-outcome.js';
 import {
+    evaluateOrderMutationPostcondition,
+    orderMutationUnconfirmedMessage,
+} from '../../src/utils/orderMutationPostcondition.js';
+import {
     createTradingCommandRegistry,
     isMutatingTradingCommand,
 } from './trading-command-registry.js';
@@ -5505,7 +5509,7 @@ export function setupBinanceConnection({
                 emit(createCommandUnresolved(
                     action,
                     'SPOT_OUTCOME_UNKNOWN',
-                    UNCONFIRMED_COMMAND_MESSAGE,
+                    orderMutationUnconfirmedMessage(action) ?? UNCONFIRMED_COMMAND_MESSAGE,
                     { marketType: SPOT_MARKET_TYPE, ...identity, reconciled: false },
                 ));
                 return;
@@ -5514,7 +5518,7 @@ export function setupBinanceConnection({
             emit(createCommandUnresolved(
                 action,
                 'SPOT_OUTCOME_PENDING',
-                UNRESOLVED_COMMAND_MESSAGE,
+                orderMutationUnconfirmedMessage(action) ?? UNRESOLVED_COMMAND_MESSAGE,
                 {
                     marketType: SPOT_MARKET_TYPE,
                     ...identity,
@@ -5523,6 +5527,7 @@ export function setupBinanceConnection({
                 },
             ));
 
+            let absentObservations = 0;
             for (let attempt = 1; attempt <= RECONCILE_ATTEMPTS; attempt += 1) {
                 try {
                     const outcome = await spotTradingAdapter.findOrder({
@@ -5530,55 +5535,38 @@ export function setupBinanceConnection({
                         orderId,
                         origClientOrderId,
                     });
-                    if (outcome.exists) {
+                    if (outcome.exists === true && outcome.report) {
                         noteSpotMutation();
                         emit({ execution_update: outcome.report });
-                        // Spot has no per-order presentation to read the report
-                        // as an answer, so the warning is withdrawn by name —
-                        // otherwise "outcome unconfirmed" stood over an order
-                        // the exchange had just confirmed it holds.
-                        emit(createCommandResolved(
-                            action,
-                            'SPOT_OUTCOME_EXECUTED',
-                            'Binance holds this order — it was accepted.',
-                            { marketType: SPOT_MARKET_TYPE, ...identity, reconciled: true },
-                        ));
-                        // Awaited, the `unresolved` case: the desk has just
-                        // learned what became of an order it could not account
-                        // for, and until this answers the panel still shows the
-                        // account from before it. The operator is released from
-                        // the warning here and may act immediately.
-                        await refreshAccountState(symbol);
-                        return;
+                        const verdict = evaluateOrderMutationPostcondition({ action, report: outcome.report });
+                        if (verdict.state !== 'pending') {
+                            const envelope = verdict.state === 'confirmed' ? createCommandResolved : createCommandRejection;
+                            emit(envelope(action, `SPOT_${verdict.code}`, verdict.message, {
+                                marketType: SPOT_MARKET_TYPE, ...identity, status: verdict.status,
+                                reconciled: true, postconditionSatisfied: verdict.state === 'confirmed',
+                            }));
+                            await refreshAccountState(symbol).catch(refreshError => {
+                                logger.error(`${label} account refresh failed:`, refreshError?.code || refreshError?.message);
+                            });
+                            return;
+                        }
+                    } else if (outcome.exists === false) {
+                        absentObservations += 1;
                     }
-                    // An order the exchange has not caught up to yet is not an
-                    // order that was never accepted. Only the last attempt is
-                    // allowed to conclude the placement never happened.
-                    if (attempt < RECONCILE_ATTEMPTS) {
-                        await pause(RECONCILE_BACKOFF_MS * attempt);
-                        continue;
-                    }
-                    emitRejection();
-                    return;
                 } catch (lookupError) {
-                    if (attempt === RECONCILE_ATTEMPTS) {
-                        logger.error(`${label} could not be reconciled:`, lookupError?.code || lookupError?.message);
-                        emit(createCommandUnresolved(
-                            action,
-                            'SPOT_OUTCOME_UNKNOWN',
-                            UNCONFIRMED_COMMAND_MESSAGE,
-                            {
-                                marketType: SPOT_MARKET_TYPE,
-                                ...identity,
-                                binanceCode: spotBinanceCode(error),
-                                reconciled: false,
-                            },
-                        ));
-                        return;
-                    }
-                    await pause(RECONCILE_BACKOFF_MS * attempt);
+                    logger.error(`${label} reconciliation read failed:`, lookupError?.code || lookupError?.message);
                 }
+                if (attempt < RECONCILE_ATTEMPTS) await pause(RECONCILE_BACKOFF_MS * attempt);
             }
+            if (action === TRADING_COMMAND_ACTIONS.PLACE_ORDER && absentObservations === RECONCILE_ATTEMPTS) {
+                emitRejection();
+                return;
+            }
+            emit(createCommandUnresolved(action, 'SPOT_OUTCOME_UNKNOWN',
+                orderMutationUnconfirmedMessage(action) ?? UNCONFIRMED_COMMAND_MESSAGE, {
+                    marketType: SPOT_MARKET_TYPE, ...identity,
+                    binanceCode: spotBinanceCode(error), reconciled: false,
+                }));
         };
 
         const handleOrderPlacement = async (
@@ -5727,8 +5715,8 @@ export function setupBinanceConnection({
          * The operator sees an unresolved outcome immediately — never a
          * rejection, because a rejection invites the retry that would create the
          * second order — and the reconciliation replaces it with the truth.
-         * `onAbsent` differs per command: an absent order means a placement never
-         * happened, and means a cancellation has nothing left to cancel.
+         * Repeated absence can settle a placement only. It cannot say whether
+         * an existing order was cancelled, filled or amended.
          */
         const reconcileAmbiguousFuturesCommand = async ({
             action,
@@ -5736,6 +5724,7 @@ export function setupBinanceConnection({
             orderId,
             origClientOrderId,
             error,
+            expected,
             onAbsent,
         }) => {
             // The identity of the command, carried on every envelope about it.
@@ -5747,13 +5736,14 @@ export function setupBinanceConnection({
                 symbol: symbol ?? null,
                 orderId: orderId ?? null,
                 clientOrderId: origClientOrderId ?? null,
+                ...(expected ? { expected } : {}),
             };
             const identified = Boolean(symbol) && Boolean(orderId || origClientOrderId);
             if (!identified) {
                 emit(createCommandUnresolved(
                     action,
                     'FUTURES_OUTCOME_UNKNOWN',
-                    UNCONFIRMED_COMMAND_MESSAGE,
+                    orderMutationUnconfirmedMessage(action) ?? UNCONFIRMED_COMMAND_MESSAGE,
                     { marketType: FUTURES_MARKET_TYPE, ...identity, reconciled: false },
                 ));
                 return;
@@ -5761,7 +5751,7 @@ export function setupBinanceConnection({
             emit(createCommandUnresolved(
                 action,
                 'FUTURES_OUTCOME_PENDING',
-                UNRESOLVED_COMMAND_MESSAGE,
+                orderMutationUnconfirmedMessage(action) ?? UNRESOLVED_COMMAND_MESSAGE,
                 {
                     marketType: FUTURES_MARKET_TYPE,
                     ...identity,
@@ -5770,6 +5760,7 @@ export function setupBinanceConnection({
                 },
             ));
 
+            let absentObservations = 0;
             for (let attempt = 1; attempt <= RECONCILE_ATTEMPTS; attempt += 1) {
                 try {
                     const outcome = await futuresRestLimiter.execute(
@@ -5779,59 +5770,44 @@ export function setupBinanceConnection({
                             origClientOrderId,
                         }),
                         1,
-                        2,
+                        0,
                         { urgent: true },
                     );
-                    if (outcome.exists) {
-                        logger.info(`[futures-orders] ${action} resolved by reconciliation: order exists`);
+                    if (outcome.exists === true && outcome.report) {
                         noteFuturesMutation();
                         emit({ futures_execution_update: outcome.report });
-                        await refreshFuturesAccountState({ reason: 'unresolved' });
-                        return;
+                        const verdict = evaluateOrderMutationPostcondition({ action, report: outcome.report, expected });
+                        if (verdict.state !== 'pending') {
+                            const envelope = verdict.state === 'confirmed' ? createCommandResolved : createCommandRejection;
+                            emit(envelope(action, `FUTURES_${verdict.code}`, verdict.message, {
+                                marketType: FUTURES_MARKET_TYPE, ...identity, status: verdict.status,
+                                reconciled: true, postconditionSatisfied: verdict.state === 'confirmed',
+                            }));
+                            await refreshFuturesAccountState({ reason: 'unresolved' })
+                                .catch(refreshError => reportDetachedFuturesAccountRefreshFailure('unresolved', refreshError));
+                            return;
+                        }
+                    } else if (outcome.exists === false) {
+                        absentObservations += 1;
                     }
-                    // "No such order" is provisional. Binance's order state is
-                    // eventually consistent after an ambiguous submission, so an
-                    // order accepted a moment ago can be missing from the first
-                    // read. Concluding absence here is what told the operator it
-                    // was safe to send the order a second time.
-                    if (attempt < RECONCILE_ATTEMPTS) {
-                        logger.info(`[futures-orders] ${action} not yet visible; asking again`);
-                        await pause(RECONCILE_BACKOFF_MS * attempt);
-                        continue;
-                    }
-                    logger.info(`[futures-orders] ${action} resolved by reconciliation: no such order`);
-                    await onAbsent();
-                    // The outcome is known now, so the warning it raised is
-                    // withdrawn — by name, so it withdraws only its own.
-                    emit(createCommandResolved(
-                        action,
-                        'FUTURES_OUTCOME_ABSENT',
-                        'Binance does not have this order — nothing was executed.',
-                        { marketType: FUTURES_MARKET_TYPE, ...identity, reconciled: true },
-                    ));
-                    return;
                 } catch (lookupError) {
-                    if (attempt === RECONCILE_ATTEMPTS) {
-                        logger.error(
-                            `[futures-orders] ${action} could not be reconciled:`,
-                            lookupError?.code || lookupError?.message,
-                        );
-                        emit(createCommandUnresolved(
-                            action,
-                            'FUTURES_OUTCOME_UNKNOWN',
-                            UNCONFIRMED_COMMAND_MESSAGE,
-                            {
-                                marketType: FUTURES_MARKET_TYPE,
-                                ...identity,
-                                binanceCode: error?.code ?? null,
-                                reconciled: false,
-                            },
-                        ));
-                        return;
-                    }
-                    await pause(RECONCILE_BACKOFF_MS * attempt);
+                    logger.error(`[futures-orders] ${action} reconciliation read failed:`,
+                        lookupError?.code || lookupError?.message);
                 }
+                if (attempt < RECONCILE_ATTEMPTS) await pause(RECONCILE_BACKOFF_MS * attempt);
             }
+            if (action === TRADING_COMMAND_ACTIONS.PLACE_ORDER && absentObservations === RECONCILE_ATTEMPTS) {
+                await onAbsent();
+                emit(createCommandResolved(action, 'FUTURES_OUTCOME_ABSENT',
+                    'Binance does not have this order — nothing was executed.',
+                    { marketType: FUTURES_MARKET_TYPE, ...identity, reconciled: true }));
+                return;
+            }
+            emit(createCommandUnresolved(action, 'FUTURES_OUTCOME_UNKNOWN',
+                orderMutationUnconfirmedMessage(action) ?? UNCONFIRMED_COMMAND_MESSAGE, {
+                    marketType: FUTURES_MARKET_TYPE, ...identity,
+                    binanceCode: error?.code ?? null, reconciled: false,
+                }));
         };
 
         // Every mutating Futures command routes its failure through here, so a
@@ -5842,6 +5818,7 @@ export function setupBinanceConnection({
             symbol,
             orderId,
             origClientOrderId,
+            expected,
             onAbsent,
         }) => {
             if (!isIndeterminateTradingFailure(error)) {
@@ -5853,6 +5830,7 @@ export function setupBinanceConnection({
                 symbol,
                 orderId,
                 origClientOrderId,
+                expected,
                 error,
                 onAbsent,
             });
@@ -7582,6 +7560,7 @@ export function setupBinanceConnection({
                     symbol: amendment.symbol,
                     orderId: amendment.orderId,
                     origClientOrderId: amendment.origClientOrderId,
+                    expected: { price: amendment.price, quantity: amendment.quantity },
                     onAbsent: async () => {
                         emitFuturesApiRejection(TRADING_COMMAND_ACTIONS.REPLACE_ORDER, error);
                         // The order survives a rejected amendment; resync so the
@@ -7621,13 +7600,8 @@ export function setupBinanceConnection({
                     orderId: command.orderId,
                     origClientOrderId: command.origClientOrderId,
                     onAbsent: async () => {
-                        // An order Binance does not have cannot be cancelled and
-                        // needs no rejection: the book already matches intent.
-                        // Only a determinate failure is a refusal to report.
-                        if (isIndeterminateTradingFailure(error)) {
-                            await refreshFuturesAccountState({ reason: 'unresolved' });
-                            return;
-                        }
+                        // Only determinate failures reach this callback for a
+                        // cancel. Absence after an ambiguous cancel stays unknown.
                         emitFuturesApiRejection(TRADING_COMMAND_ACTIONS.CANCEL_ORDER, error, {
                             symbol: command.symbol,
                             orderId: command.orderId ?? null,

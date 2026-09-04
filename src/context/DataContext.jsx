@@ -19,6 +19,7 @@ import {
 } from '../utils/spotChartHistory';
 import { incrementTradeCount } from '../utils/pnl';
 import { answersUnresolvedCommand } from '../utils/unresolvedCommandIdentity.js';
+import { readUnresolvedOrderPostcondition } from '../utils/orderMutationPostcondition.js';
 import {
   CHANNEL_TYPES,
   isChannelMessage,
@@ -227,15 +228,15 @@ export const DataProvider = ({
   // The last Spot command outcome the exchange or the transport reported.
   // Stays until the operator dismisses it: a refusal that scrolls away
   // unnoticed is the same as no refusal at all.
-  const [commandOutcome, setCommandOutcome] = useState(null);
-  const dismissCommandOutcome = useCallback(() => setCommandOutcome(null), []);
+  const [outcomes, setOutcomes] = useState({ command: null, unresolved: null });
+  const { command: commandOutcome, unresolved: unresolvedOutcome } = outcomes;
+  const dismissCommandOutcome = useCallback(() => setOutcomes(previous => ({ ...previous, command: null })), []);
   // A command whose outcome the exchange never confirmed is held apart from the
   // ordinary ones. It shared the slot, so the next refusal — of any other order
   // — took its place, and an operator who no longer sees the warning sends the
   // order that may already be live a second time. It leaves on its own answer,
   // or when the operator dismisses it.
-  const [unresolvedOutcome, setUnresolvedOutcome] = useState(null);
-  const dismissUnresolvedOutcome = useCallback(() => setUnresolvedOutcome(null), []);
+  const dismissUnresolvedOutcome = useCallback(() => setOutcomes(previous => ({ ...previous, unresolved: null })), []);
   const [filters, setFilters] = useState({});
   const [depth, setDepth] = useState({ bids: {}, asks: {} });
   const [trades, setTrades] = useState([]);
@@ -1282,7 +1283,7 @@ export const DataProvider = ({
         timestamp: outcome.timestamp ?? null,
       };
       if (rawMessage.command_unresolved) {
-        setUnresolvedOutcome({ kind: 'unresolved', ...reading });
+        setOutcomes(previous => ({ ...previous, unresolved: { kind: 'unresolved', ...reading } }));
         return;
       }
       // Whether this envelope withdraws the standing warning is a question about
@@ -1294,13 +1295,26 @@ export const DataProvider = ({
         clientOrderId: outcome.details?.clientOrderId,
         request: outcome.request,
       };
-      setUnresolvedOutcome(previous => (
-        answersUnresolvedCommand(previous, answered) ? null : previous
-      ));
-      // A resolution is the end of a warning, not a notice of its own.
-      if (rawMessage.command_resolved) return;
-      setCommandOutcome({ kind: 'rejected', ...reading });
+      setOutcomes(previous => ({
+        command: rawMessage.command_resolved ? previous.command : { kind: 'rejected', ...reading },
+        unresolved: answersUnresolvedCommand(previous.unresolved, answered) ? null : previous.unresolved,
+      }));
       return;
+    }
+
+    if (rawMessage.execution_update) {
+      setOutcomes(previous => {
+        const held = previous.unresolved;
+        const verdict = readUnresolvedOrderPostcondition(held, rawMessage.execution_update);
+        if (!verdict || verdict.state === 'pending') return previous;
+        return {
+          unresolved: null,
+          command: verdict.state === 'confirmed' ? previous.command : {
+            kind: 'rejected', request: held.request, code: verdict.code, message: verdict.message,
+            binanceCode: null, details: { ...held.details, status: verdict.status }, timestamp: null,
+          },
+        };
+      });
     }
 
     // Check if this is a channel-format message

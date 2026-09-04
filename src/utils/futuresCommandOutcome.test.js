@@ -21,6 +21,27 @@ const placeWatcher = Object.freeze({
 })
 
 describe('readFuturesCommandAnswer', () => {
+  it.each(['UNKNOWN', '', undefined, 'PENDING_CANCEL'])('does not invent a cancel refusal for status %s', status => {
+    expect(readFuturesCommandAnswer(cancelWatcher, {
+      kind: 'execution', report: { symbol: 'BTCUSDT', orderId: '11', status },
+    })).toBeNull()
+  })
+
+  it('ignores another action on the same order', () => {
+    expect(readFuturesCommandAnswer(cancelWatcher, {
+      kind: 'rejected', envelope: {
+        request: 'trade.replaceOrder', details: { symbol: 'BTCUSDT', orderId: '11' },
+      },
+    })).toBeNull()
+  })
+
+  it('does not call an unknown placement refused or use execution type as order status', () => {
+    for (const report of [{ status: 'UNKNOWN' }, { x: 'NEW' }, {}]) {
+      expect(readFuturesCommandAnswer(placeWatcher, {
+        kind: 'execution', report: { symbol: 'BTCUSDT', clientOrderId: 'f-mint-1', ...report },
+      })).toBeNull()
+    }
+  })
   it('confirms a cancellation only when the exchange reports the order cancelled', () => {
     expect(readFuturesCommandAnswer(cancelWatcher, {
       kind: 'execution',

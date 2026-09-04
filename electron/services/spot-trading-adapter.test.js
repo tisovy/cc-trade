@@ -26,6 +26,16 @@ const makeClient = (overrides = {}) => ({
 });
 
 describe('SpotTradingAdapter', () => {
+    it('preserves both client identities and missing status in private order reports', () => {
+        expect(normalizeSpotExecutionReport({ s: 'BTCUSDT', c: 'cancel-id', C: 'original-id', i: '9007199254740993' }))
+            .toMatchObject({ symbol: 'BTCUSDT', clientOrderId: 'cancel-id', originalClientOrderId: 'original-id', orderId: '9007199254740993', status: 'UNKNOWN', X: 'UNKNOWN' });
+    });
+
+    it('does not invent accepted status for a query with missing evidence', async () => {
+        const adapter = new SpotTradingAdapter({ client: makeClient({ getOrder: vi.fn().mockResolvedValue(makeResponse({ symbol: 'BTCUSDT', orderId: 11 })) }) });
+        await expect(adapter.findOrder({ symbol: 'BTCUSDT', orderId: 11 }))
+            .resolves.toMatchObject({ exists: true, report: { status: 'UNKNOWN', X: 'UNKNOWN' } });
+    });
     beforeEach(() => {
         vi.useFakeTimers();
         vi.setSystemTime(new Date('2026-07-09T10:00:00.000Z'));
@@ -281,7 +291,7 @@ describe('SpotTradingAdapter', () => {
             S: 'BUY',
             o: 'LIMIT',
             x: 'NEW',
-            X: 'NEW',
+            X: 'UNKNOWN',
             i: 987,
             p: '12346',
             q: '0.0999',
@@ -326,7 +336,7 @@ describe('SpotTradingAdapter', () => {
             S: 'BUY',
             o: 'LIMIT',
             x: 'NEW',
-            X: 'NEW',
+            X: 'UNKNOWN',
             i: 654,
             p: '25000',
             q: '0.5',

@@ -45,11 +45,18 @@ export const parseSpotExchangeFilters = (exchangeInfo = {}) => {
 
 export const normalizeSpotExecutionReport = (payload = {}, overrides = {}) => {
     const timestamp = payload.transactTime ?? payload.updateTime ?? payload.T ?? Date.now();
-    const status = overrides.status || payload.status || payload.X || payload.orderStatus || 'NEW';
+    const status = overrides.status ?? payload.status ?? payload.X ?? payload.orderStatus ?? 'UNKNOWN';
     return {
         e: 'executionReport',
         s: payload.symbol ?? payload.s,
         symbol: payload.symbol ?? payload.s,
+        ...(payload.clientOrderId != null || payload.c != null ? {
+            clientOrderId: payload.clientOrderId ?? payload.c,
+            c: payload.clientOrderId ?? payload.c,
+        } : {}),
+        ...(payload.origClientOrderId != null || payload.C != null ? {
+            originalClientOrderId: payload.origClientOrderId ?? payload.C,
+        } : {}),
         S: payload.side ?? payload.S,
         side: payload.side ?? payload.S,
         o: payload.type ?? payload.o,

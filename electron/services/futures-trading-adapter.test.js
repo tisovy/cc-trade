@@ -708,6 +708,15 @@ describe('futures execution outcome classification', () => {
 });
 
 describe('futures order lookup by identity', () => {
+    it('does not invent accepted status for query or private reports', async () => {
+        const adapter = createAdapter();
+        adapter.serverTimeOffsetMs = 0;
+        globalThis.__futuresTestResponse = { orderId: 11, symbol: 'BTCUSDT' };
+        await expect(adapter.findOrder({ symbol: 'BTCUSDT', orderId: 11 }))
+            .resolves.toMatchObject({ exists: true, report: { status: 'UNKNOWN', X: 'UNKNOWN' } });
+        expect(normalizeFuturesExecutionReport({ e: 'ORDER_TRADE_UPDATE', o: { s: 'BTCUSDT', i: 11 } }))
+            .toMatchObject({ status: 'UNKNOWN', X: 'UNKNOWN' });
+    });
     it('reports an order that exists under the command identity', async () => {
         const adapter = createAdapter();
         adapter.serverTimeOffsetMs = 0;

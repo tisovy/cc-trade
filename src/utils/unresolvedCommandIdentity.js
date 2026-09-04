@@ -15,6 +15,7 @@ export const answersUnresolvedCommand = (unresolved, {
   request,
 } = {}) => {
   if (!unresolved) return false
+  if (request != null && unresolved.request != null && request !== unresolved.request) return false
   const held = unresolved.details ?? {}
   const heldOrderId = held.orderId ?? null
   const heldClientOrderId = held.clientOrderId ?? null

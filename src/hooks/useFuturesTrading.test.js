@@ -3784,6 +3784,41 @@ describe('useFuturesTrading', () => {
     expect(result.current.unresolvedCommand).toBeNull()
   })
 
+  it.each(['CANCELED', 'FILLED'])('keeps a cancel warning on working reports until late %s', async status => {
+    const socket = createSocket()
+    const { result } = renderHook(() => useFuturesTrading({ enabled: true, symbol: 'BTCUSDT', wsConnection: socket }))
+    const held = { request: 'trade.cancelOrder', code: 'FUTURES_OUTCOME_UNKNOWN', details: { marketType: 'futures', symbol: 'BTCUSDT', orderId: '11' } }
+    act(() => socket.receive({ command_unresolved: held }))
+    const report = { symbol: 'BTCUSDT', orderId: '11', side: 'BUY', price: '40000', origQty: '0.004' }
+    await receiveSettled(socket, { futures_execution_update: { ...report, status: 'PARTIALLY_FILLED' } })
+    expect(result.current.unresolvedCommand).toEqual(held)
+    act(() => socket.receive({ command_resolved: { ...held, request: 'trade.placeOrder' } }))
+    expect(result.current.unresolvedCommand).toEqual(held)
+    await receiveSettled(socket, { futures_execution_update: { ...report, status } })
+    expect(result.current.unresolvedCommand).toBeNull()
+    if (status === 'FILLED') expect(result.current.lastError).toMatchObject({ code: 'ORDER_NOT_CANCELLED' })
+    else expect(result.current.lastError).toBeNull()
+    await receiveSettled(socket, { futures_execution_update: { ...report, orderId: '12', status: 'NEW' } })
+    if (status === 'FILLED') expect(result.current.lastError).toMatchObject({ code: 'ORDER_NOT_CANCELLED' })
+    expect(socket.sent.filter(frame => frame.action?.startsWith('trade.'))).toEqual([])
+  })
+
+  it('retains amendment uncertainty until both requested terms match', async () => {
+    const socket = createSocket()
+    const { result } = renderHook(() => useFuturesTrading({ enabled: true, symbol: 'BTCUSDT', wsConnection: socket }))
+    const held = { request: 'trade.replaceOrder', code: 'FUTURES_OUTCOME_UNKNOWN', details: {
+      marketType: 'futures', symbol: 'BTCUSDT', orderId: '11', expected: { price: '40000', quantity: '0.004' },
+    } }
+    act(() => socket.receive({ command_unresolved: held }))
+    const report = { symbol: 'BTCUSDT', orderId: '11', side: 'BUY', status: 'NEW' }
+    for (const terms of [{ price: '39999', origQty: '0.004' }, { price: '40000', origQty: '0.003' }]) {
+      await receiveSettled(socket, { futures_execution_update: { ...report, ...terms } })
+      expect(result.current.unresolvedCommand).toEqual(held)
+    }
+    await receiveSettled(socket, { futures_execution_update: { ...report, price: '40000.00', origQty: '0.004000' } })
+    expect(result.current.unresolvedCommand).toBeNull()
+  })
+
 
   // A balance held across a transport loss is a reading, not a confirmation.
   // The ticket sizes orders from it, so it may not stay `ready` until a read has

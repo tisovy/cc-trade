@@ -438,7 +438,7 @@ const httpsJsonRequest = async ({ freshAgent = null, recordEvent = null, ...atte
 export const normalizeFuturesExecutionReport = (payload = {}, overrides = {}) => {
     const order = payload?.e === 'ORDER_TRADE_UPDATE' ? payload.o : payload;
     const timestamp = order.updateTime ?? order.T ?? payload.T ?? payload.E ?? Date.now();
-    const status = overrides.status || order.status || order.X || 'NEW';
+    const status = overrides.status ?? order.status ?? order.X ?? 'UNKNOWN';
     const price = order.price ?? order.p ?? '0';
     const avgPrice = order.avgPrice ?? order.ap;
     const orderKind = overrides.orderKind ?? order.orderKind ?? 'REGULAR';

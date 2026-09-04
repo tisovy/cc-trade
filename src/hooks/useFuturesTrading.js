@@ -51,6 +51,7 @@ import { DESK_FRAME_KINDS, ensureDeskFrameRouter } from '../utils/deskFrameRoute
 import { measureFrameMarks } from '../utils/frameMarks.js'
 import { createUnsentCommandStore } from '../utils/unsentTradingCommand.js'
 import { answersUnresolvedCommand } from '../utils/unresolvedCommandIdentity.js'
+import { readUnresolvedOrderPostcondition } from '../utils/orderMutationPostcondition.js'
 import {
   FUTURES_COMMAND_OUTCOME,
   futuresCommandAnswerNamesAnOrder,
@@ -1157,21 +1158,18 @@ const useFuturesTrading = ({
             ? rememberSettledOrder(withReport, entry.parentIdentity)
             : withReport
           const merged = mergeOrderUpdate(next.openOrders, report, settledOrders)
+          const held = next.unresolvedCommand
+          const verdict = readUnresolvedOrderPostcondition(held, report)
           next = {
             ...next,
             connected: true,
             lastExecution: report,
-            lastError: null,
-            // An execution report answers an unresolved command only when it
-            // is that command's report. Another order's update says nothing
-            // about the one whose fate is unknown.
-            unresolvedCommand: answersUnresolvedCommand(next.unresolvedCommand, {
-              symbol: report?.symbol,
-              orderId: report?.orderId ?? report?.i,
-              clientOrderId: report?.clientOrderId ?? report?.c,
-            })
-              ? null
-              : next.unresolvedCommand,
+            lastError: verdict?.state === 'terminal' ? {
+              request: held.request, code: verdict.code, message: verdict.message,
+              details: { ...held.details, status: verdict.status, postconditionSatisfied: false },
+            } : next.lastError?.details?.postconditionSatisfied === false ? next.lastError : null,
+            // Identity alone is not proof that cancel/modify took effect.
+            unresolvedCommand: verdict && verdict.state !== 'pending' ? null : held,
             settledOrders,
             openOrders: entry.parentSettled
               ? merged.filter(order => orderIdentity(order) !== entry.parentIdentity)

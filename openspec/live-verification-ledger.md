@@ -1174,3 +1174,16 @@ confirmation pending**, not archived. Full local checks: 139 files / 3,268 tests
   and repeated attempts. Its ceiling and spacing were not raised to conceal that.
 - Futures physical accounting and trading retry policy are unchanged. Direct
   Spot command/lookup admission remains a separate boundary, not claimed covered.
+
+## prove-each-order-mutation-outcome — 2026-09-05
+
+Status: F06 implemented; **operator confirmation pending**, not archived.
+Local tests cover 140 files / 3,330 cases; no real mutation was sent.
+
+- Cancel is confirmed only by cancelled status; working orders and lookup
+  absence remain uncertain. FILLED/expired is explicitly distinguished.
+- Modify uncertainty ends only when both requested price and original quantity
+  match, or a terminal non-achievement is explained. No automatic replay.
+- Late matching private events may answer the held warning; unrelated actions
+  and order traffic may not. Confirm naturally observed UI behavior without
+  manufacturing a trading timeout or fill for testing.
