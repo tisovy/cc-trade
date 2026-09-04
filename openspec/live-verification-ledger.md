@@ -1050,33 +1050,34 @@ restart at 21:33 MSK on 2026-09-04; the diff itself is still uncommitted in
 | `read-candles-from-the-nearest-source` | 5.5 | `CONFIRMED` | 2026-09-04 | Production | `14c5bca` | Journal 18:47:53–18:48:33Z: 龙虾USDT shown from MARSCOINUSDT; `candle-store-window` `ok hit` 45 ms, then pages — one `miss NOT_COVERED` (the page spans the store's 15-minute hole of 08:13–08:28Z that day) served by the exchange, then four `hit`s of 93 / 20 / 17 / 16 ms. The endpoint answers the encoded path `%E9%BE%99%E8%99%BEUSDT`, as the desk's client test asserts. |
 | `read-candles-from-the-nearest-source` | 5.6 | `CONFIRMED` | 2026-09-04 | Production | `e6805da`, `14c5bca` | The day's record (4 016 events, desk stopped 18:48:37Z), «Candle reads»: windows store 16, exchange 24; pages store 12 (weight not spent 60), exchange 15; store misses 17, errors 2, skipped 4, aborted 3. What the block does not state is in the findings below. |
 
-Findings of the 2026-09-04 journal read, none of them fixed:
+Findings of the 2026-09-04 journal read, re-verified the same evening. None
+fixed; the changes named are written and strictly valid, for the owner's review:
 
 - **The store has holes, and they are global.** `binance_usdm_ohlcv_1m` misses
   the same minutes for every symbol (BTCUSDT, USELESSUSDT and 龙虾USDT alike):
   2026-08-22 284 min in 51 runs (10:02–19:31Z), 08-23 37, 08-25 43, 08-26 43,
-  08-27 51, 08-28 13, 08-29 1, 09-04 15 (08:13–08:28Z). `hunter-runtime`'s
-  catch-up fills only the tail behind its last row, never a hole inside. Every
-  window or page that crosses one is `NOT_COVERED` and paid at the exchange:
-  today the 15m page of the last ten days (153 missing minutes), the 4h window
-  (473), and the first 1m page of each contract shown after 08:28Z. Fifteen of
-  the seventeen misses are these holes or the store's floor, not a contract the
-  store lacks. Hunter-side; the `docs/status.md` entry is drafted, not saved
-  (see 3.2).
+  08-27 51, 08-28 13, 08-29 1, 09-04 15 (08:13–08:28Z). The cause is in
+  `hunter-runtime`'s own log: the USD-M kline socket reconnected nine times
+  between 08:16Z and 08:24Z that day (nineteen times in the day); a closed
+  minute that closes while the socket is down is never sent again; the
+  collector's catch-up runs only at start and for a newly added contract, and
+  from the stored tail forward — never into a hole behind it; the hourly
+  `data-backfill.timer` repairs the Spot table only. Every window or page that
+  crosses a hole is `NOT_COVERED` and paid at the exchange: fifteen of the
+  seventeen misses that day were holes or the collection floor, not a contract
+  the store lacks. Change in `hunter`: `repair-the-holes-behind-the-usdm-tail`
+  (a repair pass after each reconnect and on a period; the existing
+  `backfill_usdm_1m` once over 08-22..09-04, owner-run).
 - **A contract younger than a page never pages from the store.** MARSCOINUSDT
   is stored from 2026-09-01 09:45Z; a page reaching before that comes back
   shorter than `limit` and is refused as not whole, though the exchange has
-  nothing older either — the exchange then answers the same short page for
-  weight 5. A design residual of `read-candles-from-the-nearest-source`: the
-  store could vouch for a contract's beginning where its `actual_from` is the
-  contract's first minute.
-- **Coarse windows cost the store 0.4–1.5 s for a span it cannot cover.** The
-  4h and 1d windows begin before the store's floor (2026-07-16 for most
-  contracts); the SQL still runs over the months it has — 428 ms warm, past the
-  1 500 ms deadline cold (06:39:05Z, 06:50:51Z) — and the 30 s cooldown that
-  follows skips every store read, whether or not it would have hit. Candidate
-  change: do not ask the store for a span that begins before its floor, or give
-  the deadline the interval's measure.
+  nothing older either — three of its five pages that evening went to the
+  exchange for this reason. For all four contracts listed since the fill the
+  store's first minute equals the exchange's `onboardDate` to the minute
+  (GRVTUSDT 07-31 12:45Z, DOSUSDT 08-11 15:00Z, 牛来USDT 08-30 11:30Z,
+  MARSCOINUSDT 09-01 09:45Z), so the store can vouch for a listing when the
+  desk hands it the listing minute it already reads from the catalogue.
+  Change: `let-the-store-vouch-for-a-listing`.
 - **Pages from the renderer's IndexedDB cache are invisible in the journal.**
   Two 1h pages of USELESSUSDT (2026-07-21..08-31 and 06-09..07-21) reached the
   chart between 06:41:06Z and 06:49:04Z with neither a `candle-store-page` nor a
@@ -1084,8 +1085,16 @@ Findings of the 2026-09-04 journal read, none of them fixed:
   `FuturesCandleHistory`, per contract and interval, up to 5 000 rows) served
   them from an earlier day, silently. The «Candle reads» block therefore
   understates pages served and weight not spent — it counts the store's share
-  only. Candidate change: a renderer-reported count of cache-served pages.
-- **The window re-reads at 06:47:29Z and 06:48:16Z were session re-opens**
-  (`upstream-streams` and `aggregate-ready` alongside), not store retries; each
-  re-open reads the store's window again (hit) and the exchange's (weight 5).
+  only. Change: `count-the-pages-the-cache-serves`.
+- **Retracted: coarse windows do not cost the store 0.4–1.5 s.** Measured on
+  the live endpoint that evening, the 1d window answers in 62–65 ms, the 4h in
+  22–24 ms, the holed 15m page in 27 ms. The morning's 220–433 ms misses and
+  the two 1 501 ms deadline errors were the old `ui.service` process ignoring
+  `topup=false` and reading Binance for the desk (`fuel_client` is created at
+  start) — the very thing 3.2 closed. No change; the deadline and the cooldown
+  stay as designed.
+- **Not a store matter: the window re-reads at 06:47:29Z and 06:48:16Z**
+  followed two `SOCKET_CLOSED` closes of the contract's own stream (code 1006,
+  by transport) and its resynchronization; each re-open reads the store's
+  window (hit) and the exchange's (weight 5).
 
