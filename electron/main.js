@@ -2,6 +2,7 @@ import { app, BrowserWindow, Menu, ipcMain, protocol, session } from 'electron'
 import path from 'path'
 import { fileURLToPath } from 'url'
 import { shouldOpenDevTools } from './devtools.js'
+import { installFatalRuntimeHandlers } from './fatal-runtime.js'
 import { installRendererZoomControls } from './renderer-zoom.js'
 import { createFuturesSettledIncomeStore } from './services/futures-settled-income-store.js'
 import { setupBinanceConnection } from './services/binance-connection.js'
@@ -29,6 +30,14 @@ import {
   resolveTrustedRendererDevServerUrl,
 } from './renderer-protocol.js'
 
+let deskDiagnosticRecord = null
+// Installed before executable initialization. The stderr diagnostic is
+// synchronous; the desk record is best effort and is never awaited on a fault.
+installFatalRuntimeHandlers({
+  exit: code => app.exit(code),
+  recordFault: reading => deskDiagnosticRecord?.record('fault', reading),
+})
+
 if (configureLinuxSafeStorageBackend({ app })) {
   console.log('[Electron] Hyprland safeStorage backend pinned to gnome-libsecret')
 }
@@ -55,48 +64,6 @@ if (process.env.ANALYTICS_SECRET) {
   delete process.env.ANALYTICS_SECRET;
 }
 
-// ============================================================
-// Global error handlers to prevent crashes from network errors
-// ============================================================
-process.on('uncaughtException', (error) => {
-  const isNetworkError = error?.code === 'ECONNRESET' ||
-                         error?.code === 'ETIMEDOUT' ||
-                         error?.code === 'ENOTFOUND' ||
-                         error?.code === 'ECONNREFUSED' ||
-                         error?.code === 'EPIPE' ||
-                         error?.code === 'EAI_AGAIN' ||
-                         error?.message?.includes('socket disconnected') ||
-                         error?.message?.includes('TLS') ||
-                         error?.message?.includes('ECONNRESET');
-
-  if (isNetworkError) {
-    console.warn('[Electron] Network error caught (non-fatal):', error?.code || error?.message);
-  } else {
-    console.error('[Electron] Uncaught exception:', error);
-  }
-  // Don't exit - let the app continue running
-});
-
-process.on('unhandledRejection', (reason, _promise) => {
-  const error = reason instanceof Error ? reason : new Error(String(reason));
-  const isNetworkError = error?.code === 'ECONNRESET' ||
-                         error?.code === 'ETIMEDOUT' ||
-                         error?.code === 'ENOTFOUND' ||
-                         error?.code === 'ECONNREFUSED' ||
-                         error?.code === 'EPIPE' ||
-                         error?.code === 'EAI_AGAIN' ||
-                         error?.message?.includes('socket disconnected') ||
-                         error?.message?.includes('TLS') ||
-                         error?.message?.includes('ECONNRESET');
-
-  if (isNetworkError) {
-    console.warn('[Electron] Unhandled network error (non-fatal):', error?.code || error?.message);
-  } else {
-    console.error('[Electron] Unhandled rejection:', reason);
-  }
-  // Don't exit - let the app continue running
-});
-
 const rendererDevServerUrl = resolveTrustedRendererDevServerUrl({
   value: process.env.VITE_DEV_SERVER_URL,
   isPackaged: app.isPackaged,
@@ -110,7 +77,6 @@ const localWebSocketAccess = {
 };
 const rendererRuntimeRegistry = createRendererRuntimeRegistry(ipcMain)
 let binanceController = null
-let deskDiagnosticRecord = null
 let isExecutionShutdownStarted = false
 
 // Get proxy URL from environment (supports http_proxy, HTTP_PROXY, https_proxy, HTTPS_PROXY)

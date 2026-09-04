@@ -1249,3 +1249,17 @@ Full local checks passed: 145 files / 3440 tests, lint, build and all gates.
   proof of a cancelled/absent order and does not repeat trading commands.
 - Observe normal UI and only naturally occurring recovery; do not inject a
   render failure into a live trading session for acceptance.
+
+## stop-after-unhandled-runtime-faults — 2026-09-05
+
+Status: A02 implemented; **operator confirmation pending**, not archived.
+Full local checks passed: 146 files / 3459 tests, lint, build and all gates.
+Final Linux directory packaging/ASAR contract passed; app was not launched.
+
+- Uncaught exceptions/unhandled rejections cause fixed diagnostics and immediate
+  exit 1. Handled request failures and normal user-initiated quit are unchanged.
+- No auto-relaunch, exchange cancellation or command replay occurs. Existing
+  orders may remain active and in-flight outcomes may be unknown; verify the
+  exchange before resubmitting after a crash.
+- Do not inject a failure into a live trading process. Six isolated Node child
+  cases establish local termination behavior, not live Electron acceptance.
