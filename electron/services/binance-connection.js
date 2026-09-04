@@ -1,6 +1,7 @@
 import http from 'http';
 import { server as WebSocketServer } from 'websocket';
 import { Spot } from '@binance/spot';
+import { protectSpotRestApi } from './spot-rest-boundary.js';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 import { SocksProxyAgent } from 'socks-proxy-agent';
 import { Buffer } from 'buffer';
@@ -1687,6 +1688,7 @@ export function setupBinanceConnection({
             configurationRestAPI: restConfig,
             configurationWebsocketStreams: sharedProxyAgent ? { agent: sharedProxyAgent } : {}
         });
+        client.restAPI = protectSpotRestApi(client.restAPI);
         spotTradingAdapter = new SpotTradingAdapter({
             client,
             recvWindow: SIGNED_RECV_WINDOW,

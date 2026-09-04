@@ -1,3 +1,5 @@
+import { isIndeterminateTradingFailure } from './trading-command-outcome.js';
+
 export const normalizeSpotBalances = (account = {}) => {
     const balances = {};
     account?.balances?.forEach((balance) => {
@@ -276,7 +278,9 @@ export class SpotTradingAdapter {
             const data = await response.data();
             return { exists: true, report: normalizeSpotExecutionReport(data) };
         } catch (error) {
-            if (Number(error?.code ?? error?.response?.data?.code) === SPOT_ORDER_NOT_FOUND_CODE) {
+            if (!isIndeterminateTradingFailure(error)
+                && Number(error?.exchangeCode ?? error?.code ?? error?.response?.data?.code)
+                    === SPOT_ORDER_NOT_FOUND_CODE) {
                 return { exists: false, report: null };
             }
             throw error;

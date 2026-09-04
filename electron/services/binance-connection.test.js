@@ -183,7 +183,7 @@ const moduleMocks = vi.hoisted(() => {
         };
         state.futuresAdapterRuntime = createFuturesAdapterRuntime(state.futuresAdapter);
         state.sendRequest = vi.fn(async (path, method) => ({
-            data: vi.fn().mockResolvedValue(
+            status: 200, data: vi.fn().mockResolvedValue(
                 path === '/api/v3/time' && method === 'GET'
                     ? { serverTime: Date.now() }
                     : path === '/api/v3/userDataStream' && method === 'POST'
@@ -206,26 +206,26 @@ const moduleMocks = vi.hoisted(() => {
                 },
                 sendRequest: state.sendRequest,
                 ticker24hr: vi.fn().mockResolvedValue({
-                    data: vi.fn().mockResolvedValue([]),
+                    status: 200, data: vi.fn().mockResolvedValue([]),
                 }),
                 newOrder: vi.fn().mockResolvedValue({
-                    data: vi.fn().mockResolvedValue({
+                    status: 200, data: vi.fn().mockResolvedValue({
                         symbol: 'PAXUSDT', orderId: 41, status: 'NEW', side: 'BUY',
                     }),
                 }),
                 getOrder: vi.fn().mockResolvedValue({
-                    data: vi.fn().mockResolvedValue({
+                    status: 200, data: vi.fn().mockResolvedValue({
                         symbol: 'PAXUSDT', orderId: 41, status: 'NEW', side: 'BUY',
                     }),
                 }),
                 getAccount: vi.fn().mockResolvedValue({
-                    data: vi.fn().mockResolvedValue({ balances: [] }),
+                    status: 200, data: vi.fn().mockResolvedValue({ balances: [] }),
                 }),
                 getOpenOrders: vi.fn().mockResolvedValue({
-                    data: vi.fn().mockResolvedValue([]),
+                    status: 200, data: vi.fn().mockResolvedValue([]),
                 }),
                 myTrades: vi.fn().mockResolvedValue({
-                    data: vi.fn().mockResolvedValue([]),
+                    status: 200, data: vi.fn().mockResolvedValue([]),
                 }),
             },
             websocketStreams: { connect: state.connect },
@@ -250,7 +250,9 @@ const moduleMocks = vi.hoisted(() => {
         return state.websocketServer;
     });
     const Spot = vi.fn(function MockSpot() {
-        return state.spotClient;
+        // The service replaces its own REST reference with the production
+        // boundary. Keep the fixture's raw methods available for assertions.
+        return { ...state.spotClient };
     });
     const FuturesTradingAdapter = vi.fn(function MockFuturesTradingAdapter() {
         return state.futuresAdapterRuntime;
@@ -2822,7 +2824,7 @@ describe('setupBinanceConnection user-data orchestration', () => {
         moduleMocks.sendRequest.mockImplementation(async (path, method) => {
             if (path === '/api/v3/time' && method === 'GET') {
                 return {
-                    data: vi.fn().mockResolvedValue({ serverTime: Date.now() }),
+                    status: 200, data: vi.fn().mockResolvedValue({ serverTime: Date.now() }),
                 };
             }
 
@@ -2831,11 +2833,11 @@ describe('setupBinanceConnection user-data orchestration', () => {
                 nextListenKeyIndex += 1;
                 lifecycle.push(`create:${listenKey}`);
                 return {
-                    data: vi.fn().mockResolvedValue({ listenKey }),
+                    status: 200, data: vi.fn().mockResolvedValue({ listenKey }),
                 };
             }
 
-            return { data: vi.fn().mockResolvedValue({}) };
+            return { status: 200, data: vi.fn().mockResolvedValue({}) };
         });
 
         const createListenKey = vi.spyOn(
@@ -2989,7 +2991,7 @@ describe('setupBinanceConnection user-data orchestration', () => {
         moduleMocks.sendRequest.mockImplementation(async (path, method) => {
             if (path === '/api/v3/time' && method === 'GET') {
                 return {
-                    data: vi.fn().mockResolvedValue({ serverTime: Date.now() }),
+                    status: 200, data: vi.fn().mockResolvedValue({ serverTime: Date.now() }),
                 };
             }
 
@@ -3003,13 +3005,14 @@ describe('setupBinanceConnection user-data orchestration', () => {
                 }
 
                 return {
+                    status: 200,
                     data: listenKey === listenKeys.c
                         ? readListenKeyCResponse
                         : vi.fn().mockResolvedValue({ listenKey }),
                 };
             }
 
-            return { data: vi.fn().mockResolvedValue({}) };
+            return { status: 200, data: vi.fn().mockResolvedValue({}) };
         });
 
         const loadBalancePayload = vi.fn().mockResolvedValue({ balances: {} });
@@ -3313,13 +3316,13 @@ describe('setupBinanceConnection user-data orchestration', () => {
         const staleSocket = moduleMocks.makeSocket();
         const activeSocket = moduleMocks.makeSocket();
         const orderedListenKeys = [listenKeys.stale, listenKeys.active];
-        const renewalResponse = { data: vi.fn().mockResolvedValue({}) };
+        const renewalResponse = { status: 200, data: vi.fn().mockResolvedValue({}) };
         let nextListenKeyIndex = 0;
 
         moduleMocks.sendRequest.mockImplementation(async (path, method) => {
             if (path === '/api/v3/time' && method === 'GET') {
                 return {
-                    data: vi.fn().mockResolvedValue({ serverTime: Date.now() }),
+                    status: 200, data: vi.fn().mockResolvedValue({ serverTime: Date.now() }),
                 };
             }
 
@@ -3332,7 +3335,7 @@ describe('setupBinanceConnection user-data orchestration', () => {
                 }
 
                 return {
-                    data: vi.fn().mockResolvedValue({ listenKey }),
+                    status: 200, data: vi.fn().mockResolvedValue({ listenKey }),
                 };
             }
 
@@ -3340,7 +3343,7 @@ describe('setupBinanceConnection user-data orchestration', () => {
                 return renewalResponse;
             }
 
-            return { data: vi.fn().mockResolvedValue({}) };
+            return { status: 200, data: vi.fn().mockResolvedValue({}) };
         });
 
         moduleMocks.connect.mockImplementation(({ stream }) => {
@@ -3485,7 +3488,9 @@ describe('setupBinanceConnection user-data orchestration', () => {
                 'PUT',
                 { listenKey: listenKeys.active },
             ]]);
-            expect(await renewListenKey.mock.results[0].value).toBe(renewalResponse);
+            const checkedRenewal = await renewListenKey.mock.results[0].value;
+            expect(checkedRenewal.status).toBe(renewalResponse.status);
+            expect(await checkedRenewal.data()).toEqual(await renewalResponse.data());
             expect(getActiveKeepAliveHandles()).toEqual([activeKeepAlive]);
             expect(moduleMocks.rendererConnection.connected).toBe(true);
             expect(moduleMocks.rendererConnection.close).not.toHaveBeenCalled();
@@ -3533,18 +3538,18 @@ describe('setupBinanceConnection user-data orchestration', () => {
         const keepAliveDelay = 30 * 60 * 1000;
         const marketWatchdogDelay = 15 * 1000;
         const loadBalancePayload = vi.fn().mockResolvedValue({ balances: {} });
-        const renewalResponse = { data: vi.fn().mockResolvedValue({}) };
+        const renewalResponse = { status: 200, data: vi.fn().mockResolvedValue({}) };
 
         moduleMocks.sendRequest.mockImplementation(async (path, method) => {
             if (path === '/api/v3/time' && method === 'GET') {
                 return {
-                    data: vi.fn().mockResolvedValue({ serverTime: Date.now() }),
+                    status: 200, data: vi.fn().mockResolvedValue({ serverTime: Date.now() }),
                 };
             }
 
             if (path === '/api/v3/userDataStream' && method === 'POST') {
                 return {
-                    data: vi.fn().mockResolvedValue({ listenKey }),
+                    status: 200, data: vi.fn().mockResolvedValue({ listenKey }),
                 };
             }
 
@@ -3552,7 +3557,7 @@ describe('setupBinanceConnection user-data orchestration', () => {
                 return renewalResponse;
             }
 
-            return { data: vi.fn().mockResolvedValue({}) };
+            return { status: 200, data: vi.fn().mockResolvedValue({}) };
         });
 
         vi.spyOn(
@@ -3696,7 +3701,7 @@ describe('setupBinanceConnection user-data orchestration', () => {
         moduleMocks.sendRequest.mockImplementation(async (path, method) => {
             if (path === '/api/v3/time' && method === 'GET') {
                 return {
-                    data: vi.fn().mockResolvedValue({ serverTime: Date.now() }),
+                    status: 200, data: vi.fn().mockResolvedValue({ serverTime: Date.now() }),
                 };
             }
 
@@ -3709,11 +3714,11 @@ describe('setupBinanceConnection user-data orchestration', () => {
                 }
 
                 return {
-                    data: vi.fn().mockResolvedValue({ listenKey }),
+                    status: 200, data: vi.fn().mockResolvedValue({ listenKey }),
                 };
             }
 
-            return { data: vi.fn().mockResolvedValue({}) };
+            return { status: 200, data: vi.fn().mockResolvedValue({}) };
         });
 
         moduleMocks.connect.mockImplementation(({ stream }) => {
@@ -3947,7 +3952,7 @@ describe('setupBinanceConnection user-data orchestration', () => {
         moduleMocks.sendRequest.mockImplementation(async (path, method) => {
             if (path === '/api/v3/time' && method === 'GET') {
                 return {
-                    data: vi.fn().mockResolvedValue({ serverTime: Date.now() }),
+                    status: 200, data: vi.fn().mockResolvedValue({ serverTime: Date.now() }),
                 };
             }
 
@@ -3956,7 +3961,7 @@ describe('setupBinanceConnection user-data orchestration', () => {
                 throw retryableError;
             }
 
-            return { data: vi.fn().mockResolvedValue({}) };
+            return { status: 200, data: vi.fn().mockResolvedValue({}) };
         });
 
         const createListenKey = vi.spyOn(
@@ -4106,15 +4111,15 @@ describe('setupBinanceConnection user-data orchestration', () => {
         moduleMocks.sendRequest.mockImplementation(async (path, method) => {
             if (path === '/api/v3/time' && method === 'GET') {
                 return {
-                    data: vi.fn().mockResolvedValue({ serverTime: Date.now() }),
+                    status: 200, data: vi.fn().mockResolvedValue({ serverTime: Date.now() }),
                 };
             }
 
             if (path === '/api/v3/userDataStream' && method === 'POST') {
-                return { data: readListenKeyPayload };
+                return { status: 200, data: readListenKeyPayload };
             }
 
-            return { data: vi.fn().mockResolvedValue({}) };
+            return { status: 200, data: vi.fn().mockResolvedValue({}) };
         });
 
         const createListenKey = vi.spyOn(
@@ -10570,6 +10575,75 @@ describe('setupBinanceConnection user-data orchestration', () => {
     const emitted = () => moduleMocks.rendererConnection.sendUTF.mock.calls
         .map(([message]) => JSON.parse(message));
 
+    it.each([
+        { name: 'accepted before reset', foundAt: 1, lookupFails: false, reads: 1, outcome: 'resolved' },
+        { name: 'visible only on the third lookup', foundAt: 3, lookupFails: false, reads: 3, outcome: 'resolved' },
+        { name: 'explicitly absent on all lookups', foundAt: Infinity, lookupFails: false, reads: 3, outcome: 'rejected' },
+        { name: 'all lookups unconfirmed', foundAt: Infinity, lookupFails: true, reads: 3, outcome: 'unknown' },
+    ])('reconciles the installed Spot SDK after $name without a second mutation', async ({ foundAt, lookupFails, reads, outcome }) => {
+        const { Spot: InstalledSpot } = await vi.importActual('@binance/spot');
+        let orderReads = 0;
+        const mutations = [];
+        const transport = vi.fn(async (config) => {
+            const url = new URL(config.url);
+            const method = config.method.toUpperCase();
+            let status = 200;
+            let data = {};
+            if (url.pathname === '/api/v3/order' && method === 'POST') {
+                mutations.push(url.searchParams.get('newClientOrderId'));
+                throw Object.assign(new Error('response lost after request'), { code: 'ECONNRESET' });
+            }
+            if (url.pathname === '/api/v3/order' && method === 'GET') {
+                orderReads += 1;
+                expect(url.searchParams.get('origClientOrderId')).toBe('sdk-boundary-intent');
+                if (lookupFails) throw Object.assign(new Error('read reset'), { code: 'ECONNRESET' });
+                if (orderReads < foundAt) {
+                    status = 400;
+                    data = { code: -2013, msg: 'Order does not exist.' };
+                } else {
+                    data = { symbol: 'PAXUSDT', orderId: 451, clientOrderId: 'sdk-boundary-intent', status: 'NEW', side: 'BUY' };
+                }
+            } else if (url.pathname === '/api/v3/time') {
+                data = { serverTime: Date.now() };
+            } else if (url.pathname === '/api/v3/userDataStream') {
+                data = { listenKey: 'fixture-listen-key' };
+            } else if (url.pathname === '/api/v3/account') {
+                data = { balances: [] };
+            } else if (['/api/v3/ticker/24hr', '/api/v3/openOrders', '/api/v3/myTrades'].includes(url.pathname)) {
+                data = [];
+            }
+            const response = { status, headers: {}, data: JSON.stringify(data), config };
+            if (!config.validateStatus(status)) throw Object.assign(new Error('HTTP error'), { response });
+            return response;
+        });
+        moduleMocks.Spot.mockImplementationOnce(function createInstalledSpot(config) {
+            const client = new InstalledSpot(config);
+            client.restAPI.configuration.baseOptions.adapter = transport;
+            client.websocketStreams = moduleMocks.spotClient.websocketStreams;
+            return client;
+        });
+        await connectRenderer('spot');
+        const pending = moduleMocks.rendererHandlers.message({
+            type: 'utf8', utf8Data: JSON.stringify({
+                action: 'trade.placeOrder', version: 1, marketType: 'spot', accountId: 'default',
+                clientOrderId: 'sdk-boundary-intent', symbol: 'PAXUSDT', side: 'BUY',
+                orderType: 'LIMIT', timeInForce: 'GTC', price: '0.9990', quantity: '20',
+            }),
+        });
+        await vi.advanceTimersByTimeAsync(5_000);
+        await pending;
+        const payloads = emitted();
+        expect(mutations).toEqual(['sdk-boundary-intent']);
+        expect(orderReads).toBe(reads);
+        expect(payloads.some(payload => payload.command_unresolved?.code === 'SPOT_OUTCOME_PENDING')).toBe(true);
+        expect(payloads.some(payload => payload.command_rejected)).toBe(outcome === 'rejected');
+        expect(payloads.some(payload => payload.command_resolved?.code === 'SPOT_OUTCOME_EXECUTED')).toBe(outcome === 'resolved');
+        expect(payloads.some(payload => payload.command_unresolved?.code === 'SPOT_OUTCOME_UNKNOWN')).toBe(outcome === 'unknown');
+        if (outcome === 'resolved') {
+            expect(payloads.some(payload => payload.execution_update?.orderId === 451)).toBe(true);
+        }
+    });
+
     it('never resubmits an ambiguous placement whose order exists on the exchange', async () => {
         await connectRenderer();
         moduleMocks.futuresAdapter.placeOrder.mockRejectedValueOnce(
@@ -13510,7 +13584,7 @@ describe('setupBinanceConnection user-data orchestration', () => {
 
     it('runs positive typed Spot placement, cancellation, and refresh sequencing through main', async () => {
         const events = [];
-        const makeResponse = (data) => ({ data: vi.fn().mockResolvedValue(data) });
+        const makeResponse = (data) => ({ status: 200, data: vi.fn().mockResolvedValue(data) });
         moduleMocks.spotClient.restAPI.newOrder = vi.fn(async (params) => {
             events.push('rest:newOrder');
             return makeResponse({
@@ -13681,7 +13755,7 @@ describe('setupBinanceConnection user-data orchestration', () => {
             const held = new Promise((resolve) => { release = resolve; });
             moduleMocks.spotClient.restAPI.getAccount = vi.fn(async () => {
                 await held;
-                return { data: vi.fn().mockResolvedValue({
+                return { status: 200, data: vi.fn().mockResolvedValue({
                     balances: [{ asset: 'USDT', free: '100', locked: '0' }],
                 }) };
             });
@@ -13773,7 +13847,7 @@ describe('setupBinanceConnection user-data orchestration', () => {
                     indeterminate: true,
                 }));
             moduleMocks.spotClient.restAPI.getOrder = vi.fn(async () => ({
-                data: vi.fn().mockResolvedValue({
+                status: 200, data: vi.fn().mockResolvedValue({
                     symbol: 'BTCUSDT', orderId: 41, status: 'NEW', side: 'BUY',
                 }),
             }));
@@ -13815,7 +13889,7 @@ describe('setupBinanceConnection user-data orchestration', () => {
         const openDetailChannel = async () => {
             await connectRenderer('spot');
             moduleMocks.spotClient.restAPI.klines = vi.fn(async () => ({
-                data: vi.fn().mockResolvedValue(klinePage(1_700_000_000_000, 3)),
+                status: 200, data: vi.fn().mockResolvedValue(klinePage(1_700_000_000_000, 3)),
             }));
             await moduleMocks.rendererHandlers.message({
                 type: 'utf8',

@@ -1116,3 +1116,18 @@ change; **operator confirmation pending**, not archived.
 - **Boundary:** these fixes do not close audit F01/F02/F05 or the remaining P2
   and architectural findings. In particular, a successfully packaged Spot UI
   is not evidence of healthy private-stream delivery or safe SDK error handling.
+
+## preserve-spot-command-outcome-evidence — 2026-09-04
+
+Status: audit F02 implemented and locally verified; **operator confirmation
+pending**, not archived. Evidence is in the active change.
+
+- The installed Spot SDK now preserves HTTP status / Binance code, exposes
+  uncertain outcomes honestly and performs no hidden retries. Local fixtures
+  prove accepted-before-reset, delayed visibility, bounded absence checks and
+  permanently unconfirmed reads without a second mutation.
+- Live acceptance must confirm ordinary Spot responses and operator-visible
+  uncertainty when naturally observed. Do not deliberately create a real order
+  or disrupt a trading connection to force an ambiguous outcome for this gate.
+- SDK tests are not live account acceptance. F01 private-stream migration and
+  F06 cancel/modify postconditions remain separate, unresolved audit findings.
