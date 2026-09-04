@@ -1131,3 +1131,18 @@ pending**, not archived. Evidence is in the active change.
   or disrupt a trading connection to force an ambiguous outcome for this gate.
 - SDK tests are not live account acceptance. F01 private-stream migration and
   F06 cancel/modify postconditions remain separate, unresolved audit findings.
+
+## own-the-spot-private-subscription — 2026-09-04
+
+Status: audit F01 implemented and locally verified; **operator confirmation
+pending**, not archived. Full checks passed (138 files / 3,238 tests).
+
+- Confirm the signed Spot private subscription reports ready independently of
+  public prices; balances and open orders catch up after connection.
+- On a naturally observed disconnect, the warning must persist until a new
+  subscription is acknowledged. New placements pause; cancellation and refresh
+  remain available. No previous command is replayed.
+- This gate does not authorize real test orders or deliberately breaking a
+  production connection. Local wire/lifecycle tests are not live acceptance.
+- The controller removes the retired listenKey API, but does not close F05
+  dependencies or F06/F08/F09/F10. Active-change evidence records the limits.

@@ -102,6 +102,7 @@ const formatStartupConfigurationError = startupStatus => {
 }
 
 const GatewayContext = createContext(null)
+const SPOT_PRIVATE_UNCONFIRMED = Object.freeze({ state: 'unconfirmed', reason: null })
 
 export const GatewayProvider = ({
   activeMarketMode = MARKET_WORKSPACES.UNSELECTED,
@@ -113,6 +114,7 @@ export const GatewayProvider = ({
     status: STARTUP_STATUS_LOADING,
   }))
   const [spotDetailSubscription, setSpotDetailSubscription] = useState(null)
+  const [spotPrivateSnapshot, setSpotPrivateSnapshot] = useState(null)
   // Null until the backend says which market it activated. Nothing
   // market-scoped is sent before that.
   const [marketActivation, setMarketActivation] = useState(null)
@@ -172,6 +174,21 @@ export const GatewayProvider = ({
       return
     }
 
+    // This can arrive in the same socket batch as activation, before the
+    // workspace mounts its listeners. The gateway must retain it by session.
+    if (payload?.spot_user_data_status) {
+      const held = activationRef.current
+      const status = payload.spot_user_data_status
+      if (held?.connection !== connection || held?.generation !== payload.generation
+        || held?.marketMode !== MARKET_WORKSPACES.SPOT) return
+      if (!['stopped', 'connecting', 'subscribing', 'ready', 'reconnecting', 'failed'].includes(status.state)) return
+      setSpotPrivateSnapshot({
+        connection, generation: payload.generation,
+        status: { state: status.state, reason: typeof status.reason === 'string' ? status.reason.slice(0, 100) : null },
+      })
+      return
+    }
+
     for (const listener of messageListenersRef.current) {
       listener(event, connection, frame)
     }
@@ -222,6 +239,11 @@ export const GatewayProvider = ({
     ? marketActivation
     : null
   const activationGeneration = activation?.generation ?? null
+  const spotPrivateStatus = activeMarketMode === MARKET_WORKSPACES.SPOT
+    && startupStatus.ready && activation?.marketMode === MARKET_WORKSPACES.SPOT
+    && spotPrivateSnapshot?.connection === wsConnection
+    && spotPrivateSnapshot?.generation === activationGeneration
+    ? spotPrivateSnapshot.status : SPOT_PRIVATE_UNCONFIRMED
 
   useEffect(() => {
     if (wsUrl === null) return
@@ -311,6 +333,7 @@ export const GatewayProvider = ({
     reconnectTransport,
     sendMessage,
     setSpotDetailSubscription,
+    spotPrivateStatus,
     startupStatus,
     subscribe,
     transportFailure,
@@ -323,6 +346,7 @@ export const GatewayProvider = ({
     notifications,
     reconnectTransport,
     sendMessage,
+    spotPrivateStatus,
     startupStatus,
     subscribe,
     transportFailure,

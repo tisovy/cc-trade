@@ -141,7 +141,6 @@ export const runSpotAccountRefreshOperations = async ({
 // Binance's "Order does not exist", identical on both markets.
 export const SPOT_ORDER_NOT_FOUND_CODE = -2013;
 
-const SPOT_USER_DATA_STREAM_PATH = '/api/v3/userDataStream';
 const SPOT_SERVER_TIME_PATH = '/api/v3/time';
 
 export class SpotTradingAdapter {
@@ -230,20 +229,6 @@ export class SpotTradingAdapter {
 
     normalizeUserDataStreamEvent(payload) {
         return normalizeSpotUserDataStreamEvent(payload);
-    }
-
-    async createUserDataStreamListenKey() {
-        const response = await this.client.restAPI.sendRequest(SPOT_USER_DATA_STREAM_PATH, 'POST');
-        const data = await response.data();
-        return data?.listenKey;
-    }
-
-    renewUserDataStreamListenKey(listenKey) {
-        return this.client.restAPI.sendRequest(SPOT_USER_DATA_STREAM_PATH, 'PUT', { listenKey });
-    }
-
-    connectUserDataStream(listenKey) {
-        return this.client.websocketStreams.connect({ stream: listenKey });
     }
 
     async placeOrder(command) {

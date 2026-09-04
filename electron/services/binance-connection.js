@@ -2,6 +2,7 @@ import http from 'http';
 import { server as WebSocketServer } from 'websocket';
 import { Spot } from '@binance/spot';
 import { protectSpotRestApi } from './spot-rest-boundary.js';
+import { createSpotUserDataStream } from './spot-user-data-stream.js';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 import { SocksProxyAgent } from 'socks-proxy-agent';
 import { Buffer } from 'buffer';
@@ -1782,8 +1783,8 @@ export function setupBinanceConnection({
     // These Binance sockets are created ONCE and shared by all renderers
     // ============================================================
     let globalWsConnection = null;      // Ticker stream (!ticker@arr)
-    let userDataWsConnection = null;    // User data stream (orders/balances)
-    let keepAliveInterval = null;
+    const spotAccountRefreshers = new Map();
+    let spotPrivateRevision = 0;
     let tickerStallInterval = null;     // Watchdog interval for the ticker stream
     let globalSocketsInitialized = false;
     const rendererConnections = new Set();  // Track all connected renderers
@@ -1823,40 +1824,79 @@ export function setupBinanceConnection({
             clearInterval(tickerStallInterval);
             tickerStallInterval = null;
         }
-        if (keepAliveInterval) {
-            clearInterval(keepAliveInterval);
-            keepAliveInterval = null;
-        }
+        spotUserDataStream?.stop();
+        spotAccountRefreshers.clear();
         const staleGlobal = globalWsConnection;
-        const staleUserData = userDataWsConnection;
         globalWsConnection = null;
-        userDataWsConnection = null;
-        await Promise.all([
-            safeDisconnect(staleGlobal, 'global stream'),
-            safeDisconnect(staleUserData, 'user data stream'),
-        ]);
+        await safeDisconnect(staleGlobal, 'global stream');
     };
 
     // Shared balance refresh - fetches via REST and broadcasts to all renderers
     // Deduplicated by in-flight guard to avoid duplicate calls from rapid events
     let _balanceRefreshInFlight = false;
+    let _balanceRefreshQueued = false;
     const fetchAndBroadcastBalances = async () => {
-        if (!spotTradingAdapter) return;
-        if (_balanceRefreshInFlight) return;
+        if (!spotTradingAdapter || spotRendererConnections.size === 0
+            || spotUserDataStream?.getStatus().state !== 'ready') return;
+        if (_balanceRefreshInFlight) {
+            _balanceRefreshQueued = true;
+            return;
+        }
         _balanceRefreshInFlight = true;
+        const revision = spotPrivateRevision;
         try {
             const balanceOperation = spotTradingAdapter.getAccountRefreshOperations()
                 .find(({ type }) => type === 'balances');
             await rateLimiter.execute(async () => {
+                if (revision !== spotPrivateRevision || spotRendererConnections.size === 0) return;
                 const payload = await balanceOperation.loadPayload();
-                broadcastToRenderers(payload);
+                if (revision === spotPrivateRevision && spotRendererConnections.size > 0) {
+                    broadcastToRenderers(payload);
+                } else {
+                    _balanceRefreshQueued = true;
+                }
             }, balanceOperation.weight);
         } catch (error) {
             logger.error("Broadcast balance fetch error:", error);
         } finally {
             _balanceRefreshInFlight = false;
+            if (_balanceRefreshQueued) {
+                _balanceRefreshQueued = false;
+                void fetchAndBroadcastBalances();
+            }
         }
     };
+
+    const spotUserDataStream = spotCredentialsReady ? createSpotUserDataStream({
+        apiKey: APIKEY,
+        apiSecret: APISECRET,
+        agent: sharedProxyAgent,
+        createSocket: (url, options) => new WebSocket(url, options),
+        admit: (run, weight) => rateLimiter.execute(run, weight, 0),
+        onState: (status) => {
+            spotPrivateRevision += 1;
+            logger.info(`[spot-private] ${status.state}${status.reason ? `: ${status.reason}` : ''}`);
+            for (const owner of spotAccountRefreshers.values()) {
+                owner.invalidate();
+                owner.publish(status);
+            }
+        },
+        onReady: () => {
+            // Reuse the epoch-protected account-read owner for each desk. This
+            // catches up open orders as well as balances, without introducing
+            // an unguarded global snapshot or replaying any trading command.
+            for (const owner of spotAccountRefreshers.values()) owner.refresh();
+        },
+        onEvent: (payload) => {
+            const streamEvent = spotTradingAdapter.normalizeUserDataStreamEvent(payload);
+            if (!streamEvent) return;
+            spotPrivateRevision += 1;
+            // A REST snapshot begun before a private event cannot undo it.
+            for (const owner of spotAccountRefreshers.values()) owner.invalidate();
+            if (streamEvent.rendererPayload) broadcastToRenderers(streamEvent.rendererPayload);
+            if (streamEvent.shouldRefreshBalances) void fetchAndBroadcastBalances();
+        },
+    }) : null;
 
     // ============================================================
     // Futures trading (spot-parity path, separate BFK/BFS credentials)
@@ -5579,6 +5619,15 @@ export function setupBinanceConnection({
 
             try {
                 logger.info(`[orders] ${resolvedSide} ${symbol} qty=${numericQuantity} price=${numericPrice}`);
+                if (spotUserDataStream?.getStatus().state !== 'ready') {
+                    emit(createCommandRejection(
+                        TRADING_COMMAND_ACTIONS.PLACE_ORDER,
+                        'SPOT_PRIVATE_STREAM_UNAVAILABLE',
+                        'Spot private updates are not confirmed. New orders are paused; cancellation and refresh remain available.',
+                        { marketType: SPOT_MARKET_TYPE, symbol, clientOrderId: newClientOrderId },
+                    ));
+                    return;
+                }
                 const executionReport = await spotTradingAdapter.placeOrder({
                     symbol,
                     side: resolvedSide,
@@ -8096,6 +8145,16 @@ export function setupBinanceConnection({
             spotRendererConnections.add(connection);
             if (spotDataInitialized) return;
             spotDataInitialized = true;
+            spotAccountRefreshers.set(connection, {
+                refresh: () => refreshAccountStateUnstated(),
+                invalidate: noteSpotMutation,
+                publish: (status) => sendJSON(connection, {
+                    spot_user_data_status: status, generation: marketActivationGeneration,
+                }),
+            });
+            const privateStatus = spotUserDataStream.getStatus();
+            spotAccountRefreshers.get(connection).publish(privateStatus);
+            if (privateStatus.state === 'ready') refreshAccountStateUnstated();
 
             // Real Data Logic using @binance/spot
 
@@ -8270,172 +8329,7 @@ export function setupBinanceConnection({
                     subscribeGlobal();
                 }, 15000);
 
-                // Subscribe to User Data Stream (shared by all renderers)
-                let userDataReconnecting = false;
-                const startUserDataStream = async (retryCount = 0) => {
-                    const MAX_RETRIES = 5;
-                    const RETRY_DELAY_BASE = 3000;
-
-                    // Close/retry timers and awaited setup stages can outlive the
-                    // renderer session that started them. Do not resurrect shared
-                    // user-data state after the last renderer tears global sockets down.
-                    if (spotRendererConnections.size === 0) return;
-                    
-                    if (userDataReconnecting && retryCount === 0) return;
-                    userDataReconnecting = true;
-                    
-                    try {
-                        logger.info("Starting User Data Stream setup...");
-
-                        let listenKeyCreationSkipped = false;
-                        const listenKey = await rateLimiter.execute(
-                            () => {
-                                // A reconnect can lose its final renderer while waiting
-                                // for rate-limiter spacing. Recheck ownership immediately
-                                // before issuing the POST so teardown cannot create a
-                                // renderer-less listen key.
-                                if (spotRendererConnections.size === 0) {
-                                    listenKeyCreationSkipped = true;
-                                    return undefined;
-                                }
-                                return spotTradingAdapter.createUserDataStreamListenKey();
-                            },
-                            1
-                        );
-                        if (listenKeyCreationSkipped) {
-                            userDataReconnecting = false;
-                            return;
-                        }
-                        if (!listenKey) {
-                            logger.error("Failed to obtain listenKey");
-                            userDataReconnecting = false;
-                            return;
-                        }
-                        logger.info("Listen Key obtained successfully.");
-
-                    await throttleWsConnection();
-                    // Tear down any previous user-data socket first so we never run
-                    // two in parallel (which would duplicate executionReport /
-                    // outboundAccountPosition events and leak the old base's timers).
-                    if (userDataWsConnection) {
-                        const previousUserData = userDataWsConnection;
-                        userDataWsConnection = null;
-                        // Drop the old socket's keep-alive (a fresh one is created
-                        // below); its close handler's identity guard will no-op.
-                        if (keepAliveInterval) { clearInterval(keepAliveInterval); keepAliveInterval = null; }
-                        await safeDisconnect(previousUserData, 'previous user data stream');
-                    }
-                    if (spotRendererConnections.size === 0) {
-                        userDataReconnecting = false;
-                        return;
-                    }
-
-                    const nextUserDataConnection = await spotTradingAdapter.connectUserDataStream(listenKey);
-                    if (spotRendererConnections.size === 0) {
-                        userDataReconnecting = false;
-                        await safeDisconnect(nextUserDataConnection, 'orphaned user data stream');
-                        return;
-                    }
-                    userDataWsConnection = nextUserDataConnection;
-                    userDataReconnecting = false;
-                    const udConn = userDataWsConnection; // capture for the close guard
-
-                    logger.info("User Data Stream connected.");
-
-                    // Catch up on any balance changes missed during reconnection gap
-                    fetchAndBroadcastBalances();
-
-                    userDataWsConnection.on('message', (data) => {
-                        const payload = extractStreamPayload(data);
-                        if (!payload) return;
-
-                        const streamEvent = spotTradingAdapter.normalizeUserDataStreamEvent(payload);
-                        if (!streamEvent) return;
-
-                        if (streamEvent.type === 'executionReport') {
-                            const report = streamEvent.executionReport;
-                            logger.info(`[stream] Execution Report: ${report.symbol} ${report.side} ${report.status}`);
-                            // Broadcast to ALL connected renderers
-                            broadcastToRenderers(streamEvent.rendererPayload);
-
-                            // Refresh balances via REST for fill events as a fallback
-                            // in case outboundAccountPosition is missed
-                            if (streamEvent.shouldRefreshBalances) {
-                                fetchAndBroadcastBalances();
-                            }
-                        } else if (streamEvent.type === 'outboundAccountPosition') {
-                            // Fast incremental balance update from WebSocket
-                            broadcastToRenderers(streamEvent.rendererPayload);
-                        } else if (streamEvent.type === 'balanceUpdate') {
-                            // Deposit/withdrawal event - fetch fresh balances via REST
-                            logger.info(`[stream] Balance Update (deposit/withdrawal): asset=${streamEvent.balanceUpdate.a} delta=${streamEvent.balanceUpdate.d}`);
-                            fetchAndBroadcastBalances();
-                        }
-                    });
-
-                    userDataWsConnection.on('error', (err) => {
-                        const isNetworkError = err?.code === 'ECONNRESET' || err?.code === 'ETIMEDOUT' ||
-                                               err?.message?.includes('socket disconnected');
-                        if (isNetworkError) {
-                            logger.warn(`User Data Stream network error (${err?.code}), will reconnect...`);
-                        } else {
-                            logger.error("User Data Stream Error:", err?.code || err?.message);
-                        }
-                    });
-
-                    udConn.on('close', () => {
-                        logger.warn("User Data Stream closed");
-                        // Only the CURRENT socket manages the shared keep-alive and
-                        // reconnect; ignore closes from a superseded/zombie socket so
-                        // it can't kill the live keep-alive or duplicate the stream.
-                        if (userDataWsConnection !== udConn) return;
-                        if (keepAliveInterval) { clearInterval(keepAliveInterval); keepAliveInterval = null; }
-                        userDataWsConnection = null;
-                        // Auto-reconnect on unexpected close if any renderer connected
-                        if (spotRendererConnections.size > 0 && !userDataReconnecting) {
-                            logger.info('Scheduling User Data Stream reconnection...');
-                            setTimeout(() => startUserDataStream(), 5000);
-                        }
-                    });
-
-                    // Keep-alive every 30 minutes
-                    keepAliveInterval = setInterval(async () => {
-                        try {
-                            const renewed = await rateLimiter.execute(
-                                async () => {
-                                    // The interval can be cleared while an already-fired
-                                    // callback is waiting for rate-limiter spacing. Recheck
-                                    // ownership immediately before issuing the PUT so a
-                                    // superseded or renderer-less stream cannot renew.
-                                    if (spotRendererConnections.size === 0 || userDataWsConnection !== udConn) {
-                                        return false;
-                                    }
-                                    await spotTradingAdapter.renewUserDataStreamListenKey(listenKey);
-                                    return true;
-                                },
-                                1
-                            );
-                            if (renewed) logger.debug("Renewed listenKey");
-                        } catch (err) {
-                            logger.warn("Failed to renew listenKey:", err?.code || err?.message);
-                        }
-                    }, 30 * 60 * 1000);
-
-                } catch (err) {
-                    userDataReconnecting = false;
-                    const isNetworkError = err?.code === 'ECONNRESET' || err?.code === 'ETIMEDOUT' ||
-                                           err?.code === 'ENOTFOUND' || err?.message?.includes('TLS');
-                    
-                    if (isNetworkError && retryCount < MAX_RETRIES && spotRendererConnections.size > 0) {
-                        const delay = RETRY_DELAY_BASE * (retryCount + 1);
-                        logger.warn(`User Data Stream connection failed (${err?.code}), retrying in ${delay}ms (${retryCount + 1}/${MAX_RETRIES})`);
-                        setTimeout(() => startUserDataStream(retryCount + 1), delay);
-                    } else {
-                        logger.error("Failed to start User Data Stream:", err?.code || err?.message);
-                    }
-                }
-                };
-                startUserDataStream();
+                spotUserDataStream?.start();
             } // End of globalSocketsInitialized block
 
             // Initialize MarketStreamManager for consolidated WebSocket connections
@@ -8503,6 +8397,8 @@ export function setupBinanceConnection({
         const deactivateSpotData = async () => {
             spotDataInitialized = false;
             spotRendererConnections.delete(connection);
+            spotAccountRefreshers.delete(connection);
+            noteSpotMutation();
             marketStreamManager.disableDepthView();
             await channelManager.cleanup(safeDisconnect);
             if (spotRendererConnections.size === 0) {
@@ -9087,6 +8983,8 @@ export function setupBinanceConnection({
             });
             spotRendererConnections.delete(connection);
             futuresRendererConnections.delete(connection);
+            spotAccountRefreshers.delete(connection);
+            noteSpotMutation();
             futuresHistorySession.disposed = true;
             futuresHistorySession.reset();
             futuresHistorySessions.delete(futuresHistorySession);

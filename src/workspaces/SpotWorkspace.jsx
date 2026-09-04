@@ -45,6 +45,7 @@ function SpotWorkspaceContent() {
     dismissCommandOutcome,
     unresolvedOutcome,
     dismissUnresolvedOutcome,
+    spotPrivateStatus,
   } = useDataContext();
   const { alerts, checkPriceAlerts, triggeredAlerts: _triggeredAlerts } = useAlertContext();
   const [showOrderModal, setShowOrderModal] = useState(false);
@@ -485,6 +486,14 @@ function SpotWorkspaceContent() {
 
   return (
     <>
+      {spotPrivateStatus?.state !== 'ready' ? (
+        <div className="spot-command-outcome is-unresolved" role="status">
+          <strong>Spot private updates unconfirmed</strong>
+          <span>New orders are paused. Cancellation and refresh remain available.
+            {spotPrivateStatus?.reason ? ` (${spotPrivateStatus.reason})` : ''}
+          </span>
+        </div>
+      ) : null}
       {/* A refused or unconfirmed Spot command. It stays until dismissed: an
           order the exchange refused is not something to notice in passing. An
           unconfirmed one carries no retry, because resubmitting an order that

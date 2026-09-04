@@ -50,8 +50,9 @@ vi.mock('../hooks/useWebSocket.js', () => ({
 }))
 
 const Observer = () => {
-  const { startupStatus } = useGatewayContext()
-  return <span data-testid="startup-state">{startupStatus.state}</span>
+  const { startupStatus, spotPrivateStatus } = useGatewayContext()
+  return <><span data-testid="startup-state">{startupStatus.state}</span>
+    <span data-testid="spot-private-state">{spotPrivateStatus.state}</span></>
 }
 
 describe('GatewayContext', () => {
@@ -61,6 +62,45 @@ describe('GatewayContext', () => {
   })
 
   afterEach(() => vi.unstubAllGlobals())
+
+  it('retains private health before child mount and invalidates it across activation and socket changes', () => {
+    const originalConnection = mocks.connection
+    mocks.connection = { readyState: 1 }
+    const tree = (mode = MARKET_WORKSPACES.SPOT, mounted = true) => <NotificationProvider>
+      <GatewayProvider activeMarketMode={mode}>{mounted ? <Observer /> : null}</GatewayProvider>
+    </NotificationProvider>
+    const deliver = payload => act(() => mocks.handleMessage({ data: JSON.stringify(payload) }, mocks.connection))
+    const activate = (marketMode, generation) => deliver({ type: 'market_activation', marketMode, generation })
+    const health = (state, generation) => deliver({ spot_user_data_status: { state }, generation })
+    const { rerender } = render(tree(MARKET_WORKSPACES.SPOT, false))
+    try {
+      deliver({ type: 'startup_status', version: 1, state: 'READY', code: 'READY', ready: true, missingFields: [], retiredFields: [] })
+      activate('spot', 1)
+      health('ready', 1)
+      rerender(tree())
+      expect(screen.getByTestId('spot-private-state')).toHaveTextContent('ready')
+      health('reconnecting', 1)
+      expect(screen.getByTestId('spot-private-state')).toHaveTextContent('reconnecting')
+      health('ready', 1)
+      rerender(tree(MARKET_WORKSPACES.FUTURES_LIVE))
+      expect(screen.getByTestId('spot-private-state')).toHaveTextContent('unconfirmed')
+      activate('futures-live', 2)
+      rerender(tree())
+      activate('spot', 3)
+      health('ready', 1)
+      expect(screen.getByTestId('spot-private-state')).toHaveTextContent('unconfirmed')
+      health('ready', 3)
+      expect(screen.getByTestId('spot-private-state')).toHaveTextContent('ready')
+      mocks.connection.readyState = 3
+      rerender(tree())
+      expect(screen.getByTestId('spot-private-state')).toHaveTextContent('unconfirmed')
+      mocks.connection = { readyState: 1 }
+      rerender(tree())
+      expect(screen.getByTestId('spot-private-state')).toHaveTextContent('unconfirmed')
+    } finally {
+      mocks.connection = originalConnection
+    }
+  })
 
   it('owns startup preflight and activates only the selected market mode', async () => {
     const { rerender } = render(

@@ -24,6 +24,7 @@ const mocks = vi.hoisted(() => ({
   checkPriceAlerts: vi.fn(),
   futuresProductionEnabled: [],
   futuresProductionState: null,
+  spotPrivateStatus: { state: 'ready' },
 }))
 
 vi.mock('./context/DataContext', () => ({
@@ -44,6 +45,7 @@ vi.mock('./context/DataContext', () => ({
       },
     },
     isOffline: false,
+    spotPrivateStatus: mocks.spotPrivateStatus,
     sendMessage: mocks.sendMessage,
     startupStatus: {
       version: 1,
@@ -216,6 +218,7 @@ describe('App spot order payloads', () => {
     mocks.checkPriceAlerts.mockClear()
     mocks.futuresProductionEnabled.length = 0
     mocks.futuresProductionState = null
+    mocks.spotPrivateStatus = { state: 'ready' }
   })
 
   afterEach(() => {
@@ -223,6 +226,16 @@ describe('App spot order payloads', () => {
     globalThis.WebSocket = originalWebSocket
     vi.unstubAllGlobals()
     localStorageMock.clear()
+  })
+
+  it('shows a persistent private-stream warning independently of live market data', async () => {
+    mocks.spotPrivateStatus = { state: 'reconnecting', reason: 'connection-closed' }
+    const { rerender } = render(<App />)
+    expect(await screen.findByText('Spot private updates unconfirmed')).toBeInTheDocument()
+    expect(screen.getByText(/New orders are paused/)).toHaveTextContent('Cancellation and refresh remain available')
+    mocks.spotPrivateStatus = { state: 'ready' }
+    rerender(<App />)
+    await waitFor(() => expect(screen.queryByText('Spot private updates unconfirmed')).not.toBeInTheDocument())
   })
 
   it('sends typed buy place-order commands with the 0.999 quantity reduction', async () => {
