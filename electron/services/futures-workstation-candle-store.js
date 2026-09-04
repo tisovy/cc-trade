@@ -124,8 +124,10 @@ const decimalOf = (value) => {
 
 const timestampOf = (value) => {
     if (value === null || value === undefined) return null;
-    const time = Date.parse(String(value));
-    if (!Number.isFinite(time)) fail('INVALID_STORE_ANSWER');
+    if (typeof value !== 'string'
+        || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value)) fail('INVALID_STORE_ANSWER');
+    const time = Date.parse(value);
+    if (!Number.isSafeInteger(time)) fail('INVALID_STORE_ANSWER');
     return time;
 };
 
@@ -141,6 +143,12 @@ const tupleOf = (bar, intervalMs) => {
         fail('INVALID_STORE_ANSWER');
     }
     const openTime = bar.time * 1_000;
+    if (!Number.isSafeInteger(openTime) || !Number.isSafeInteger(openTime + intervalMs - 1)
+        || ['open', 'high', 'low', 'close', 'volume'].some(key => typeof bar[key] !== 'number' || !Number.isFinite(bar[key]))) {
+        fail('INVALID_STORE_ANSWER');
+    }
+    if (bar.high < bar.low || bar.high < bar.open || bar.high < bar.close
+        || bar.low > bar.open || bar.low > bar.close) fail('INVALID_KLINE_PRICE_RANGE');
     return [
         openTime,
         decimalOf(bar.open),
@@ -228,7 +236,7 @@ const loopbackGet = (url, { bodyLimit, signal }) => new Promise((resolve, reject
     request.end();
 });
 
-const parseAnswer = (text) => {
+const parseAnswer = (text, { symbol, interval, from, to, limit }) => {
     let answer;
     try {
         answer = JSON.parse(text);
@@ -239,21 +247,43 @@ const parseAnswer = (text) => {
         || typeof answer !== 'object'
         || answer.market !== 'usdm'
         || !Array.isArray(answer.bars)
-        || answer.bars.length > FUTURES_CANDLE_STORE_MAX_ROWS
+        || answer.bars.length > limit
         || typeof answer.coverage_complete !== 'boolean'
         || !Number.isSafeInteger(answer.gap_count)
         || answer.gap_count < 0) {
         fail('INVALID_STORE_ANSWER');
     }
+    if (answer.symbol !== symbol || answer.tf !== interval
+        || timestampOf(answer.requested_from) !== from || timestampOf(answer.requested_to) !== to) {
+        fail('STORE_IDENTITY_MISMATCH');
+    }
+    // The shared normalizer sorts rows; first prove that the store actually
+    // sent an ordered, aligned range, without silently repairing its answer.
+    let previous = null;
+    for (const bar of answer.bars) {
+        const time = bar?.time * 1_000;
+        if (!Number.isSafeInteger(bar?.time) || !Number.isSafeInteger(time)
+            || time < from || time >= to || !isFuturesCandleStoreBucketAligned(time, interval)
+            || (previous !== null && time <= previous)) fail('INVALID_STORE_GEOMETRY');
+        previous = time;
+    }
     return answer;
 };
 
+const proveWholeBuckets = (rows, from, to, intervalMs) => {
+    if (rows.length !== (to - from) / intervalMs
+        || rows.some((row, index) => row.openTime !== from + index * intervalMs)) {
+        fail('INVALID_STORE_GEOMETRY');
+    }
+    return rows;
+};
+
 // A page: every minute of the span, and exactly the buckets asked for.
-const servePage = (answer, rows, limit) => (
-    answer.coverage_complete && answer.gap_count === 0 && rows.length === limit
-        ? rows
-        : null
-);
+const servePage = (answer, rows, { from, to, intervalMs, limit }) => {
+    if (!answer.coverage_complete || answer.gap_count !== 0 || rows.length !== limit) return null;
+    if (timestampOf(answer.actual_from) !== from || timestampOf(answer.actual_to) !== to) fail('INVALID_STORE_GEOMETRY');
+    return proveWholeBuckets(rows, from, to, intervalMs);
+};
 
 // A window: the whole buckets between the first minute the store has of the
 // span and the last, provided no minute between those two is missing. The
@@ -278,7 +308,10 @@ const serveWindow = (answer, rows, { from, to, intervalMs }) => {
     let end = rows.length;
     while (end > first && rows[end - 1].openTime + intervalMs > actualTo) end -= 1;
     if (end <= first) return null;
-    return first === 0 && end === rows.length ? rows : Object.freeze(rows.slice(first, end));
+    const wholeFrom = from + Math.ceil((actualFrom - from) / intervalMs) * intervalMs;
+    const wholeTo = from + Math.floor((actualTo - from) / intervalMs) * intervalMs;
+    return proveWholeBuckets(first === 0 && end === rows.length ? rows : Object.freeze(rows.slice(first, end)),
+        wholeFrom, wholeTo, intervalMs);
 };
 
 // The whole store: reading it and remembering when it last failed.
@@ -305,10 +338,11 @@ export const createFuturesWorkstationCandleStore = ({
             || !isFuturesCandleStoreBucketAligned(from, interval)
             || !isFuturesCandleStoreBucketAligned(to, interval)
             || !Number.isSafeInteger(limit) || limit <= 0 || limit > FUTURES_CANDLE_STORE_MAX_ROWS
+            || (mode === 'page' && to - from !== limit * intervalMs)
             || !MODES.has(mode)) {
             fail('INVALID_STORE_SELECTION');
         }
-        const contract = symbol.trim();
+        const contract = symbol.trim().toUpperCase();
         const line = { phase: `candle-store-${mode}`, symbol: contract, startedAt: now(), now };
         if (line.startedAt < cooldownUntil) {
             emitTiming(onTiming, line, 'skipped', null, lastCode);
@@ -333,12 +367,13 @@ export const createFuturesWorkstationCandleStore = ({
                 bodyLimit: FUTURES_CANDLE_STORE_BODY_LIMIT_BYTES,
                 signal: deadline.signal,
             });
-            const answer = parseAnswer(text);
+            const selection = { symbol: contract, interval, from, to, limit, intervalMs };
+            const answer = parseAnswer(text, selection);
             const rows = normalizeFuturesWorkstationKlines(
                 JSON.stringify(answer.bars.map(bar => tupleOf(bar, intervalMs))),
             );
             const served = mode === 'page'
-                ? servePage(answer, rows, limit)
+                ? servePage(answer, rows, selection)
                 : serveWindow(answer, rows, { from, to, intervalMs });
             if (served === null) {
                 lastCode = 'NOT_COVERED';

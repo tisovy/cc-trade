@@ -1187,3 +1187,15 @@ Local tests cover 140 files / 3,330 cases; no real mutation was sent.
 - Late matching private events may answer the held warning; unrelated actions
   and order traffic may not. Confirm naturally observed UI behavior without
   manufacturing a trading timeout or fill for testing.
+
+## verify-the-candle-store-answer — 2026-09-05
+
+Status: F07 implemented; **operator confirmation pending**, not archived.
+Full local checks passed: 140 files / 3,354 tests, lint, build and all gates.
+
+- Store hits now require exact chart identity/range and contiguous whole
+  buckets. Invalid replies return no rows and use existing exchange fallback.
+- Confirm normal store hits, interval switching and history scrolling on live
+  market data; do not mutate the store to manufacture an invalid response.
+- Short-page listing proof and cache-hit telemetry remain separate proposals.
+  Hunter, database contents and running services were not modified.

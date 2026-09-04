@@ -31,10 +31,15 @@ const serve = async (handler) => {
     return `http://127.0.0.1:${server.address().port}`;
 };
 const jsonServer = (respond, requests = []) => serve((request, response) => {
-    requests.push(new URL(request.url, 'http://127.0.0.1'));
+    const url = new URL(request.url, 'http://127.0.0.1');
+    requests.push(url);
     const body = respond(request);
     response.writeHead(body.status ?? 200, { 'content-type': body.contentType ?? 'application/json' });
-    response.end(typeof body.text === 'string' ? body.text : JSON.stringify(body));
+    response.end(typeof body.text === 'string' ? body.text : JSON.stringify({
+        requested_from: url.searchParams.get('from'), requested_to: url.searchParams.get('to'),
+        actual_from: url.searchParams.get('from'), actual_to: url.searchParams.get('to'),
+        ...body,
+    }));
 });
 
 const bars = (count, { from = START, intervalMs = MINUTE, high = 101, low = 99 } = {}) => (
@@ -52,10 +57,6 @@ const answer = overrides => ({
     tf: '1m',
     market: 'usdm',
     bars: [],
-    requested_from: null,
-    requested_to: null,
-    actual_from: null,
-    actual_to: null,
     coverage_complete: true,
     gap_count: 0,
     ...overrides,
@@ -71,11 +72,92 @@ const storeOn = (url, options = {}) => {
 };
 
 describe('the candle store on the wire', () => {
+    it.each([
+        ['another symbol', { symbol: 'ETHUSDT' }],
+        ['another interval', { tf: '1h' }],
+        ['missing symbol', { symbol: undefined }],
+        ['missing interval', { tf: undefined }],
+        ['earlier range', { requested_from: new Date(START - MINUTE).toISOString() }],
+        ['later end', { requested_to: new Date(START + 4 * MINUTE).toISOString() }],
+        ['missing range', { requested_from: undefined }],
+        ['null range', { requested_to: null }],
+    ])('rejects %s before either mode can hit', async (_label, metadata) => {
+        for (const mode of ['page', 'window']) {
+            const requests = [];
+            const url = await jsonServer(() => answer({ bars: bars(3), ...metadata }), requests);
+            const { store, timings } = storeOn(url);
+            const selection = { symbol: 'BTCUSDT', interval: '1m', from: START, to: START + 3 * MINUTE, limit: 3, mode };
+            expect(await store.readCandles(selection)).toBeNull();
+            expect(timings[0]).toMatchObject({ outcome: 'error', code: 'STORE_IDENTITY_MISMATCH' });
+            expect(await store.readCandles(selection)).toBeNull();
+            expect(timings[1]).toMatchObject({ outcome: 'skipped', code: 'STORE_IDENTITY_MISMATCH' });
+            expect(requests).toHaveLength(1);
+            expect(JSON.stringify(timings)).not.toContain('ETHUSDT');
+        }
+    });
+
+    it.each([
+        ['previous page', [-3, -2, -1]], ['shifted page', [1, 2, 3]],
+        ['duplicate', [0, 0, 2]], ['reversed', [2, 1, 0]],
+        ['off-grid', [0, 1.5, 2]], ['skipped', [0, 2, 3]],
+    ])('rejects %s buckets before the normalizer sorts them', async (_label, offsets) => {
+        for (const mode of ['page', 'window']) {
+            const url = await jsonServer(() => answer({ bars: offsets.map(offset => bars(1, { from: START + offset * MINUTE })[0]) }));
+            const { store, timings } = storeOn(url);
+            expect(await store.readCandles({ symbol: 'BTCUSDT', interval: '1m', from: START, to: START + 3 * MINUTE, limit: 3, mode })).toBeNull();
+            expect(timings[0]).toMatchObject({ outcome: 'error', code: 'INVALID_STORE_GEOMETRY' });
+        }
+    });
+
+    it.each([
+        { volume: null }, { volume: false }, { open: '100' }, { close: null },
+        { volume: undefined }, { high: Infinity }, { open: 100.000000001, high: 100, close: 100 },
+    ])('does not coerce or round malformed bars into evidence: %j', async fields => {
+        const url = await jsonServer(() => answer({ bars: [{ ...bars(1)[0], ...fields }] }));
+        const { store, timings } = storeOn(url);
+        expect(await store.readCandles({ symbol: 'BTCUSDT', interval: '1m', from: START, to: START + MINUTE, limit: 1, mode: 'page' })).toBeNull();
+        expect(timings[0].outcome).toBe('error');
+    });
+
+    it('does not trust complete coverage with missing window buckets or contradictory page bounds', async () => {
+        for (const offsets of [[0, 2, 3], [1, 2, 3], [0, 1, 2]]) {
+            const url = await jsonServer(() => answer({ bars: offsets.map(offset => bars(1, { from: START + offset * MINUTE })[0]) }));
+            const { store, timings } = storeOn(url);
+            expect(await store.readCandles({ symbol: 'BTCUSDT', interval: '1m', from: START, to: START + 4 * MINUTE, limit: 4, mode: 'window' })).toBeNull();
+            expect(timings[0]).toMatchObject({ outcome: 'error', code: 'INVALID_STORE_GEOMETRY' });
+        }
+        const url = await jsonServer(() => answer({ bars: bars(3), actual_to: new Date(START + 2 * MINUTE).toISOString() }));
+        const { store, timings } = storeOn(url);
+        expect(await store.readCandles({ symbol: 'BTCUSDT', interval: '1m', from: START, to: START + 3 * MINUTE, limit: 3, mode: 'page' })).toBeNull();
+        expect(timings[0]).toMatchObject({ outcome: 'error', code: 'INVALID_STORE_GEOMETRY' });
+    });
+
+    it('rejects timezone-free range echoes and mismatched request geometry', async () => {
+        const url = await jsonServer(() => answer({ bars: bars(1), requested_from: new Date(START).toISOString().replace('Z', '') }));
+        const { store, timings } = storeOn(url);
+        expect(await store.readCandles({ symbol: 'BTCUSDT', interval: '1m', from: START, to: START + MINUTE, limit: 1, mode: 'page' })).toBeNull();
+        expect(timings[0]).toMatchObject({ outcome: 'error', code: 'INVALID_STORE_ANSWER' });
+        await expect(store.readCandles({ symbol: 'BTCUSDT', interval: '1m', from: START, to: START + 2 * MINUTE, limit: 1, mode: 'page' }))
+            .rejects.toMatchObject({ code: 'INVALID_STORE_SELECTION' });
+    });
+
+    it('serves exact Monday weeks and canonicalizes only the requested symbol', async () => {
+        const from = Date.UTC(2026, 7, 31);
+        const week = 604_800_000;
+        const requests = [];
+        const url = await jsonServer(() => answer({ tf: '1w', bars: bars(2, { from, intervalMs: week }) }), requests);
+        const { store } = storeOn(url);
+        const rows = await store.readCandles({ symbol: ' btcusdt ', interval: '1w', from, to: from + 2 * week, limit: 2, mode: 'page' });
+        expect(rows.map(row => row.openTime)).toEqual([from, from + week]);
+        expect(requests[0].pathname).toBe('/api/candles/BTCUSDT');
+    });
+
     // The address is the integration: one wrong query and `hunter` reads the
     // exchange on the desk's behalf.
     it('asks for the exact span, the USD-M venue and no top-up, and answers the exchange\'s rows', async () => {
         const requests = [];
         const url = await jsonServer(() => answer({
+            symbol: '龙虾USDT',
             bars: bars(1_000),
             actual_from: new Date(START).toISOString(),
             actual_to: new Date(START + (1_000 * MINUTE)).toISOString(),
