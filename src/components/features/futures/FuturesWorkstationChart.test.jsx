@@ -28,6 +28,15 @@ vi.mock('lightweight-charts', () => ({
       coordinateToLogical: vi.fn(value => value),
       coordinateToTime: vi.fn(value => value),
       fitContent: vi.fn(),
+      width: vi.fn(() => 1200),
+      // The library's reading of the pan: the visible range's right border
+      // past the newest bar of the series drawn.
+      scrollPosition: vi.fn(() => {
+        const range = timeScale.visibleLogicalRange
+        const drawn = series[0]?.data?.length ?? 0
+        return range && drawn > 0 ? range.to - (drawn - 1) : 0
+      }),
+      applyOptions: vi.fn(),
       subscribeVisibleLogicalRangeChange: vi.fn((listener) => {
         visibleLogicalRangeListeners.add(listener)
       }),
@@ -58,7 +67,7 @@ vi.mock('lightweight-charts', () => ({
             return line
           }),
           removePriceLine: vi.fn(),
-          setData: vi.fn(),
+          setData: vi.fn((data) => { next.data = data }),
           update: vi.fn(),
         }
         series.push(next)
@@ -157,6 +166,9 @@ const priceLinesOf = series => series.createPriceLine.mock.results.map(result =>
 beforeEach(() => {
   chartMock.charts.length = 0
   chartMock.openingLogicalRange = null
+  // The chart remembers where it was left across a mount; a test starts
+  // with nothing remembered unless it says so.
+  localStorage.clear()
 })
 
 describe('FuturesWorkstationChart viewport ownership', () => {
@@ -2086,7 +2098,8 @@ describe('FuturesWorkstationChart history loading', () => {
     expect(onLoadHistory).toHaveBeenCalledExactlyOnceWith(START)
   })
 
-  it('fits and pages an interval that replaces the series without remounting the chart', () => {
+  it('carries the viewport to an interval that replaces the series without remounting the chart, and pages behind it', () => {
+    // Forty bars across the mock's 1200 px, the newest bar at the right edge.
     chartMock.openingLogicalRange = { from: 40, to: 79 }
     const onLoadHistory = vi.fn()
     const { rerender } = render(<FuturesWorkstationChart
@@ -2097,7 +2110,9 @@ describe('FuturesWorkstationChart history loading', () => {
     />)
     const chart = chartMock.charts[0]
     expect(chart.timeScale().fitContent).toHaveBeenCalledTimes(1)
-    expect(onLoadHistory).not.toHaveBeenCalled()
+    // Asked on open, at a zoom that shows half the window.
+    expect(onLoadHistory).toHaveBeenCalledExactlyOnceWith(START)
+    onLoadHistory.mockClear()
 
     rerender(<FuturesWorkstationChart
       {...properties([])}
@@ -2105,6 +2120,7 @@ describe('FuturesWorkstationChart history loading', () => {
       interval="1m"
       onLoadHistory={onLoadHistory}
     />)
+    expect(onLoadHistory).not.toHaveBeenCalled()
     chart.timeScale().visibleLogicalRange = { from: 0, to: 79 }
     rerender(<FuturesWorkstationChart
       {...properties(series(-80, 0))}
@@ -2114,11 +2130,16 @@ describe('FuturesWorkstationChart history loading', () => {
     />)
 
     expect(chartMock.charts).toHaveLength(1)
-    expect(chart.timeScale().fitContent).toHaveBeenCalledTimes(2)
+    // Not fitted again: the new series stands where the operator left the
+    // chart — the same forty bars across, the newest at the right edge.
+    expect(chart.timeScale().fitContent).toHaveBeenCalledTimes(1)
+    expect(chart.timeScale().applyOptions).toHaveBeenCalledExactlyOnceWith({ barSpacing: 30, rightOffset: 0 })
     expect(onLoadHistory).toHaveBeenCalledExactlyOnceWith(START - (80 * MINUTE))
   })
 
   it('clears both imperative series when a replacement interval commits, then draws what it holds', () => {
+    // Fifty-five bars across, the newest bar five in from the right edge.
+    chartMock.openingLogicalRange = { from: 30, to: 84 }
     const rows = series(0, 80)
     const { rerender } = render(<FuturesWorkstationChart
       {...properties(rows)}
@@ -2148,11 +2169,17 @@ describe('FuturesWorkstationChart history loading', () => {
     expect(volumeSeries.setData).toHaveBeenCalledTimes(2)
     expect(contractSeries.setData.mock.calls.at(-1)[0]).toHaveLength(rows.length)
     expect(volumeSeries.setData.mock.calls.at(-1)[0]).toHaveLength(rows.length)
-    // The first draw of a generation fits the viewport, as a first open does.
-    expect(chartMock.charts[0].timeScale().fitContent).toHaveBeenCalledTimes(fitted + 1)
+    // The first draw of a generation puts the chart where the operator left
+    // it, and does not fit the held series whole into the screen — that fit
+    // was the «совершенно странное значение графика» behind the switch's
+    // spinner (2026-09-04).
+    const timeScale = chartMock.charts[0].timeScale()
+    expect(timeScale.fitContent).toHaveBeenCalledTimes(fitted)
+    expect(timeScale.applyOptions).toHaveBeenCalledExactlyOnceWith({ barSpacing: 1200 / 55, rightOffset: 5 })
 
     // The new interval's rows then replace the held ones in full, without
-    // fitting the viewport again under the operator.
+    // fitting or placing the viewport again under the operator: the library
+    // carries the zoom and the margin through a replacement by itself.
     const replacement = series(-40, 0)
     rerender(<FuturesWorkstationChart
       {...properties(replacement)}
@@ -2160,7 +2187,9 @@ describe('FuturesWorkstationChart history loading', () => {
       interval="1m"
     />)
     expect(contractSeries.setData.mock.calls.at(-1)[0]).toHaveLength(replacement.length)
-    expect(chartMock.charts[0].timeScale().fitContent).toHaveBeenCalledTimes(fitted + 1)
+    expect(timeScale.fitContent).toHaveBeenCalledTimes(fitted)
+    expect(timeScale.applyOptions).toHaveBeenCalledTimes(1)
+    expect(timeScale.setVisibleLogicalRange).not.toHaveBeenCalled()
   })
 
   // A switch draws the held series until the new interval's window lands.
@@ -2208,21 +2237,114 @@ describe('FuturesWorkstationChart history loading', () => {
     expect(timeScale.setVisibleLogicalRange).toHaveBeenCalledExactlyOnceWith({ from: 60, to: 119 })
   })
 
+  it('asks for history on open at a zoom that shows less than the window', () => {
+    // Forty bars of an eighty-bar window on screen: the left edge is nowhere
+    // near the oldest bar, and the chart still opens on more than the window.
+    chartMock.openingLogicalRange = { from: 40, to: 79 }
+    const onLoadHistory = vi.fn()
+    render(<FuturesWorkstationChart
+      {...properties(series(0, 80))}
+      onLoadHistory={onLoadHistory}
+    />)
+    expect(onLoadHistory).toHaveBeenCalledExactlyOnceWith(START)
+  })
+
   it('asks again when scrolling reaches the oldest loaded candle', () => {
     const onLoadHistory = vi.fn()
     render(<FuturesWorkstationChart
       {...properties(series(0, 80))}
       onLoadHistory={onLoadHistory}
     />)
+    // Once on open, whatever range the chart settled on.
+    expect(onLoadHistory).toHaveBeenCalledExactlyOnceWith(START)
+    onLoadHistory.mockClear()
+
+    // Deep in the middle of the series there is nothing to ask for.
+    act(() => chartMock.charts[0].timeScale().emitVisibleLogicalRangeChange({ from: 40, to: 79 }))
     expect(onLoadHistory).not.toHaveBeenCalled()
 
     act(() => chartMock.charts[0].timeScale().emitVisibleLogicalRangeChange({ from: 0, to: 79 }))
     expect(onLoadHistory).toHaveBeenCalledWith(START)
+  })
 
-    // Deep in the middle of the series there is nothing to ask for.
-    onLoadHistory.mockClear()
-    act(() => chartMock.charts[0].timeScale().emitVisibleLogicalRangeChange({ from: 40, to: 79 }))
-    expect(onLoadHistory).not.toHaveBeenCalled()
+  it('carries the zoom and pan to the next contract', () => {
+    chartMock.openingLogicalRange = { from: 30, to: 84 }
+    const { rerender } = render(<FuturesWorkstationChart
+      {...properties(series(0, 80))}
+      symbol="BTCUSDT"
+      interval="1m"
+    />)
+    const timeScale = chartMock.charts[0].timeScale()
+    expect(timeScale.fitContent).toHaveBeenCalledTimes(1)
+
+    // The contract changes: the chart is emptied, then handed the next
+    // contract's window — a longer one.
+    rerender(<FuturesWorkstationChart
+      {...properties([])}
+      symbol="ETHUSDT"
+      interval="1m"
+    />)
+    expect(timeScale.applyOptions).not.toHaveBeenCalled()
+    rerender(<FuturesWorkstationChart
+      {...properties(series(0, 120))}
+      symbol="ETHUSDT"
+      interval="1m"
+    />)
+    expect(timeScale.fitContent).toHaveBeenCalledTimes(1)
+    // Fifty-five bars across, the newest bar five in from the edge, whatever
+    // its index in the longer series.
+    expect(timeScale.applyOptions).toHaveBeenCalledExactlyOnceWith({ barSpacing: 1200 / 55, rightOffset: 5 })
+    expect(timeScale.setVisibleLogicalRange).not.toHaveBeenCalled()
+  })
+
+  it('carries a pan into history through a switch in bars, as far as the new series reaches', () => {
+    // Forty-five bars back from the newest: the newest bar is off the right
+    // edge. The library clamps a pan the new series cannot honour; the chart
+    // asks for the same bars and lets it.
+    chartMock.openingLogicalRange = { from: -20, to: 34 }
+    const rows = series(0, 80)
+    const { rerender } = render(<FuturesWorkstationChart
+      {...properties(rows)}
+      symbol="BTCUSDT"
+      interval="1m"
+    />)
+    const timeScale = chartMock.charts[0].timeScale()
+    rerender(<FuturesWorkstationChart
+      {...properties(rows)}
+      symbol="BTCUSDT"
+      interval="5m"
+    />)
+    expect(timeScale.applyOptions).toHaveBeenCalledExactlyOnceWith({ barSpacing: 1200 / 55, rightOffset: -45 })
+    expect(timeScale.fitContent).toHaveBeenCalledTimes(1)
+  })
+
+  it('opens a new chart where the operator left the last one', () => {
+    localStorage.setItem('futuresChartViewport', JSON.stringify({ barSpacing: 20, margin: 5 }))
+    render(<FuturesWorkstationChart {...properties(series(0, 80))} />)
+    const timeScale = chartMock.charts[0].timeScale()
+    expect(timeScale.fitContent).not.toHaveBeenCalled()
+    expect(timeScale.applyOptions).toHaveBeenCalledExactlyOnceWith({ barSpacing: 20, rightOffset: 5 })
+  })
+
+  it('remembers the zoom and the margin at the live edge, not a pan into history', () => {
+    render(<FuturesWorkstationChart {...properties(series(0, 80))} />)
+    const timeScale = chartMock.charts[0].timeScale()
+    const remembered = () => JSON.parse(localStorage.getItem('futuresChartViewport'))
+    const moveTo = (range) => {
+      timeScale.visibleLogicalRange = range
+      act(() => timeScale.emitVisibleLogicalRangeChange(range))
+    }
+
+    moveTo({ from: 30, to: 84 })
+    expect(remembered()).toEqual({ barSpacing: 1200 / 55, margin: 5 })
+
+    // Scrolled forty-five bars into history: the zoom is remembered, the
+    // margin stays the one kept at the live edge.
+    moveTo({ from: -20, to: 34 })
+    expect(remembered()).toEqual({ barSpacing: 1200 / 55, margin: 5 })
+
+    moveTo({ from: 20, to: 87 })
+    expect(remembered()).toEqual({ barSpacing: 1200 / 68, margin: 8 })
   })
 
   it('asks for the page behind the new oldest candle on the next trip to the edge', () => {
@@ -2234,7 +2356,6 @@ describe('FuturesWorkstationChart history loading', () => {
       onLoadHistory={onLoadHistory}
     />)
     const timeScale = chartMock.charts[0].timeScale()
-    act(() => timeScale.emitVisibleLogicalRangeChange({ from: 0, to: 79 }))
     expect(onLoadHistory).toHaveBeenCalledExactlyOnceWith(START)
 
     timeScale.visibleLogicalRange = { from: 0, to: 79 }

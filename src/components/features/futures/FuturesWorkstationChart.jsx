@@ -23,6 +23,12 @@ import {
   resolveFuturesTradingGesture,
 } from '../../../utils/futuresTradingGestures.js'
 import { countPrependedRows, planSeriesDraw } from '../../../utils/chartSeriesDraw.js'
+import {
+  browserStorage,
+  createChartViewportMemory,
+  placeChartViewport,
+  readChartViewport,
+} from '../../../utils/chartViewport.js'
 import { MeasurementOverlay } from '../../common/MeasurementOverlay.jsx'
 import '../charts/ChartWrapper.css'
 
@@ -320,7 +326,17 @@ export const FuturesWorkstationChart = ({
   const symbolRef = useRef(symbol)
   const candlesRef = useRef(candles)
   const onLoadHistoryRef = useRef(onLoadHistory)
-  const hasFittedContentRef = useRef(false)
+  // The zoom and pan the operator left — pixels per bar, and the newest bar's
+  // distance from the right edge — read off the chart whenever its visible
+  // range moves. The first series of a new contract or interval is placed at
+  // it rather than fitted; a chart created later opens at what was remembered.
+  const viewportRef = useRef(null)
+  const [viewportMemory] = useState(() => createChartViewportMemory(browserStorage()))
+  const viewportPlacedRef = useRef(false)
+  // Whether this selection holds a page behind its window yet. Until it does,
+  // the chart asks for one on every opening evaluation, wherever the viewport
+  // stands: at the operator's zoom the window may be wider than the screen.
+  const historyBehindRef = useRef(false)
   const volumeScaleRef = useRef(null)
   const rowStateRef = useRef({ contract: null, index: null })
   const measurementRef = useRef(null)
@@ -389,19 +405,32 @@ export const FuturesWorkstationChart = ({
   // atomic from the operator's point of view. Dropping the candle ref first also
   // keeps the previous range subscription from issuing a history read if
   // setData changes the logical range synchronously.
+  const noteViewport = useCallback(() => {
+    const timeScale = chartRef.current?.timeScale()
+    if (!timeScale) return
+    const viewport = readChartViewport(timeScale, rowStateRef.current.contract)
+    if (viewport === null) return
+    viewportRef.current = viewport
+    viewportMemory.note(viewport)
+  }, [viewportMemory])
+
   useLayoutEffect(() => {
+    // Where the operator left the series being replaced, read before it goes:
+    // the first draw of the new selection puts the chart back there.
+    noteViewport()
     candlesRef.current = EMPTY_CHART_ROWS
     rowStateRef.current = { contract: null }
     const series = seriesRef.current
     if (!series) return
     series.volumeSeries.setData(EMPTY_CHART_ROWS)
     series.contractSeries.setData(EMPTY_CHART_ROWS)
-  }, [measurementGeneration])
+  }, [measurementGeneration, noteViewport])
 
   useEffect(() => {
     symbolRef.current = symbol
     measurementGenerationRef.current = measurementGeneration
-    hasFittedContentRef.current = false
+    viewportPlacedRef.current = false
+    historyBehindRef.current = false
     volumeScaleRef.current = null
     rowStateRef.current = { contract: null }
     ignoreNextLeftClickRef.current = false
@@ -709,6 +738,7 @@ export const FuturesWorkstationChart = ({
     }
     const timeScale = chart.timeScale()
     timeScale.subscribeVisibleLogicalRangeChange?.(handleViewportChange)
+    timeScale.subscribeVisibleLogicalRangeChange?.(noteViewport)
     container.addEventListener('mousedown', handleMouseDown)
     container.addEventListener('click', handleLeftClick)
     container.addEventListener('contextmenu', handleContextMenu)
@@ -747,6 +777,7 @@ export const FuturesWorkstationChart = ({
       container.removeEventListener('contextmenu', handleContextMenu)
       container.removeEventListener('mousemove', handleMouseMove)
       container.removeEventListener('wheel', handleViewportChange)
+      timeScale.unsubscribeVisibleLogicalRangeChange?.(noteViewport)
       timeScale.unsubscribeVisibleLogicalRangeChange?.(handleViewportChange)
       chart.remove()
       chartRef.current = null
@@ -755,7 +786,7 @@ export const FuturesWorkstationChart = ({
       rowStateRef.current = { contract: null }
       setPositionAnnotationCoordinates([])
     }
-  }, [cancelMeasurement])
+  }, [cancelMeasurement, noteViewport])
 
   // Holding exactly one trading modifier shows the gesture legend on the
   // chart, so the double-click shortcuts are discoverable where they act.
@@ -827,6 +858,7 @@ export const FuturesWorkstationChart = ({
       // the exact moment they were reading it, so the visible range is moved by
       // as many bars as were prepended and the view stands still.
       const prepended = countPrependedRows(rowTime(drawnRows?.[0]), candles, DRAW_PLAN)
+      if (prepended > 0) historyBehindRef.current = true
       const timeScale = chartRef.current?.timeScale()
       const heldRange = prepended > 0 ? timeScale?.getVisibleLogicalRange?.() ?? null : null
       volumeSeries.setData(volumePresentation.data)
@@ -848,9 +880,19 @@ export const FuturesWorkstationChart = ({
       volumeSeries.applyOptions({ priceFormat: volumePresentation.priceFormat })
     }
     rowStateRef.current = { contract: candles }
-    if (contractData.length > 0 && !hasFittedContentRef.current) {
-      chartRef.current?.timeScale().fitContent()
-      hasFittedContentRef.current = true
+    // The first series of a selection is shown where the operator left the
+    // chart — the same pixels per bar, the newest bar the same distance from
+    // the right edge — and fitted only when there is nothing to carry: a
+    // first chart with nothing remembered. Fitting on every new contract or
+    // interval put the series held through a switch whole into the screen and
+    // drew the new window at whatever that left (2026-09-04).
+    if (contractData.length > 0 && !viewportPlacedRef.current) {
+      const timeScale = chartRef.current?.timeScale()
+      if (timeScale) {
+        const viewport = viewportRef.current ?? viewportMemory.opening()
+        if (!placeChartViewport(timeScale, viewport)) timeScale.fitContent()
+        viewportPlacedRef.current = true
+      }
     }
     requestOrderCoordinateRefreshRef.current()
     // On the generation as well as on the rows. The layout effect above has
@@ -859,7 +901,7 @@ export const FuturesWorkstationChart = ({
     // through an interval switch is. Keyed on the rows alone, this effect did
     // not run and the held series reached the canvas only because an
     // intermediate render happened to change the reference (2026-09-03).
-  }, [candles, measurementGeneration])
+  }, [candles, measurementGeneration, viewportMemory])
 
   // Scrolling into the left edge is the request for more history: the operator
   // is asking to see what came before, and the chart answers by loading it
@@ -867,9 +909,14 @@ export const FuturesWorkstationChart = ({
   useEffect(() => {
     const timeScale = chartRef.current?.timeScale()
     if (!timeScale || typeof onLoadHistory !== 'function') return undefined
-    const handleRangeChange = (range) => {
-      if (!range || historyExhausted) return
-      if (range.from > HISTORY_PREFETCH_BARS) return
+    const handleRangeChange = (range, opening = false) => {
+      if (historyExhausted) return
+      // Scrolling asks near the edge. The opening evaluation of a selection
+      // that holds nothing but its window asks wherever the viewport stands:
+      // the chart opens on more than the window, and at the operator's zoom
+      // the window may reach further than the screen does.
+      const opensOnItsWindow = opening && !historyBehindRef.current
+      if (!opensOnItsWindow && (!range || range.from > HISTORY_PREFETCH_BARS)) return
       const oldest = candlesRef.current[0]?.openTime
       if (!Number.isSafeInteger(oldest)) return
       onLoadHistoryRef.current?.(oldest)
@@ -878,7 +925,7 @@ export const FuturesWorkstationChart = ({
     // The range the chart already settled on after its first fit never fires an
     // event we are subscribed for, so the opening view is evaluated directly —
     // otherwise a contract would only deepen once the operator scrolled.
-    handleRangeChange(timeScale.getVisibleLogicalRange?.() ?? null)
+    handleRangeChange(timeScale.getVisibleLogicalRange?.() ?? null, true)
     return () => timeScale.unsubscribeVisibleLogicalRangeChange(handleRangeChange)
   }, [historyExhausted, oldestCandleTime, onLoadHistory])
 
