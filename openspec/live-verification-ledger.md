@@ -1146,3 +1146,19 @@ pending**, not archived. Full checks passed (138 files / 3,238 tests).
   production connection. Local wire/lifecycle tests are not live acceptance.
 - The controller removes the retired listenKey API, but does not close F05
   dependencies or F06/F08/F09/F10. Active-change evidence records the limits.
+
+## refresh-the-desktop-security-baseline — 2026-09-04
+
+Status: F05 dependencies updated and locally verified; **operator packaged-window
+confirmation and separately authorized registry rescan pending**, not archived.
+
+- Electron 43.6.0 Linux directory package is in `release/security-baseline/linux-unpacked`;
+  ASAR inspection passed (2,062 files / 10 renderer files). Launch with no dev
+  server and confirm window, Spot/Futures workspace, zoom and private health.
+- Full local verification passed (139 files / 3,262 tests), including actual SDK
+  and loopback transport contracts. This is not production or cross-platform
+  acceptance. No real trade is needed for the window check.
+- Updated version floors do not establish zero advisories. Fresh npm audit
+  awaits separate permission to send dependency names/versions to the registry.
+- Development now needs Node ^22.12.0 or >=24.0.0. Operator packages bundle Node.
+  React Hooks lint-plugin stays 7.0.1 until its new-rule migration is reviewed.

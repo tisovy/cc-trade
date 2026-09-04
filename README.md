@@ -17,7 +17,7 @@ A modern cryptocurrency trading terminal built with React, Vite, and Electron. F
 
 ## Prerequisites
 
-- Node.js `^20.19.0 || >=22.12.0`
+- Node.js `^22.12.0 || >=24.0.0` (Node 24 LTS recommended for development)
 - npm or yarn
 - Binance API keys (optional — app runs in mock mode without them)
 

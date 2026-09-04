@@ -7,7 +7,7 @@
   "author": "tisovy",
   "license": "GPL-3.0",
   "engines": {
-    "node": "^20.19.0 || >=22.12.0"
+    "node": "^22.12.0 || >=24.0.0"
   },
   "build": {
     "directories": {
@@ -40,7 +40,8 @@
     "test:futures-burst": "vitest run src/App.futures-burst.test.jsx",
     "test:watch": "vitest",
     "test:ui": "vitest --ui",
-    "test:all": "npm run test && npm run lint && npm run build && npm run check:circular && npm run check:runtime-mock && npm run check:futures-production && npm run check:command-path",
+    "test:all": "npm run check:dependency-baseline && npm run test && npm run lint && npm run build && npm run check:circular && npm run check:runtime-mock && npm run check:futures-production && npm run check:command-path",
+    "check:dependency-baseline": "node scripts/check-dependency-baseline.mjs",
     "check:circular": "node scripts/check-circular-imports.mjs",
     "check:electron-build-artifacts": "node scripts/check-electron-build-artifacts.mjs",
     "check:packaged-app": "node scripts/check-packaged-app.mjs",
@@ -60,7 +61,7 @@
     "socks-proxy-agent": "^8.0.5",
     "technicalindicators": "^3.1.0",
     "websocket": "^1.0.35",
-    "ws": "^8.18.3"
+    "ws": "^8.21.3"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.1",
@@ -70,18 +71,18 @@
     "@types/react-dom": "^19.2.2",
     "@vitejs/plugin-react": "^5.1.0",
     "bootstrap": "^5.3.8",
-    "electron": "^39.2.2",
-    "electron-builder": "^26.0.12",
+    "electron": "^43.6.0",
+    "electron-builder": "^26.15.3",
     "eslint": "^9.39.1",
-    "eslint-plugin-react-hooks": "^7.0.1",
+    "eslint-plugin-react-hooks": "7.0.1",
     "eslint-plugin-react-refresh": "^0.4.24",
     "globals": "^16.5.0",
     "jsdom": "^27.2.0",
     "lightweight-charts": "^5.0.9",
     "react-bootstrap": "^2.10.10",
     "sass": "^1.94.1",
-    "vite": "^7.2.2",
+    "vite": "^7.3.6",
     "vite-plugin-electron": "^0.29.0",
-    "vitest": "^4.0.13"
+    "vitest": "^4.1.11"
   }
 }

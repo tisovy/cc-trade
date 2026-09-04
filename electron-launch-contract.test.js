@@ -42,6 +42,7 @@ describe('Electron launch contracts', () => {
 
   it('aggregates only the retained non-browser verification gates', () => {
     expect(packageManifest.scripts['test:all'].split(' && ')).toEqual([
+      'npm run check:dependency-baseline',
       'npm run test',
       'npm run lint',
       'npm run build',
