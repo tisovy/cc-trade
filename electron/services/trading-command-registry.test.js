@@ -5,6 +5,7 @@ import {
     isTradingCommandOutcomeEnvelope,
     readTradingCommandIdentity,
     readTradingCommandLane,
+    readTradingCommandOrderLane,
 } from './trading-command-registry.js';
 
 const command = (overrides = {}) => ({
@@ -372,6 +373,7 @@ describe('commands on one contract', () => {
     // waits, and on screen the next order simply would not budge.
     it('lifts one order while a placement for another is still travelling', async () => {
         const registry = createTradingCommandRegistry();
+        registry.observeEnvelope({ futures_regular_orders: [{ symbol: 'BTCUSDT', orderId: 907, clientOrderId: 'existing-907' }] });
         const placement = deferred();
         const order = [];
 
@@ -568,5 +570,165 @@ describe('commands on one contract', () => {
 
         expect(replayBtc.mock.calls).toEqual([[{ futures_execution_update: { symbol: 'BTCUSDT' } }]]);
         expect(replayEth.mock.calls).toEqual([[{ futures_execution_update: { symbol: 'ETHUSDT' } }]]);
+    });
+});
+
+describe('exchange-observed order aliases', () => {
+    const observe = (registry, orderId = 42, clientOrderId = 'original-42', scope = {}) => registry.observeOrder({
+        marketType: 'futures', accountId: 'default', symbol: 'BTCUSDT', orderId, clientOrderId, ...scope,
+    });
+    const target = (identity, clientOrderId) => command({ action: 'trade.cancelOrder', clientOrderId, ...identity });
+
+    it('keeps exchange and client namespaces distinct, with number/string exchange equivalence', () => {
+        expect(readTradingCommandOrderLane(target({ orderId: 42 }, 'a'))).toBe(readTradingCommandOrderLane(target({ orderId: '42' }, 'b')));
+        expect(readTradingCommandOrderLane(target({ orderId: 42 }, 'a'))).not.toBe(readTradingCommandOrderLane(target({ origClientOrderId: '42' }, 'b')));
+        expect(readTradingCommandOrderLane(target({ orderId: 9007199254740992 }, 'a'))).toBeNull();
+    });
+
+    it.each([false, true])('serializes both alias directions with prior exchange proof=%s', async known => {
+        for (const reverse of [false, true]) {
+            const registry = createTradingCommandRegistry();
+            if (known) observe(registry);
+            const held = deferred();
+            const events = [];
+            const identities = [{ orderId: 42 }, { origClientOrderId: 'original-42' }];
+            if (reverse) identities.reverse();
+            const first = registry.submit({ ...target(identities[0], 'modify'), action: 'trade.replaceOrder' }, {
+                emit: vi.fn(), execute: async () => { events.push('modify'); await held.promise; },
+            });
+            const second = registry.submit(target(identities[1], 'cancel'), { emit: vi.fn(), execute: async () => { events.push('cancel'); } });
+            await flush();
+            expect(events).toEqual(['modify']);
+            held.settle();
+            await Promise.all([first, second]);
+            expect(events).toEqual(['modify', 'cancel']);
+            await flush();
+            expect(registry.laneCount()).toBe(0);
+        }
+    });
+
+    it.each(['unobserved', 'private', 'command'])('holds exchange-ID cancellation behind a pending placement (%s identity)', async source => {
+        const registry = createTradingCommandRegistry();
+        const held = deferred();
+        const events = [];
+        const first = registry.submit(command({ clientOrderId: 'new-order' }), {
+            emit: vi.fn(), execute: async () => {
+                events.push('place');
+                if (source === 'command') registry.recordOutcome({ futures_execution_update: { symbol: 'BTCUSDT', orderId: 51, status: 'NEW' } });
+                await held.promise;
+            },
+        });
+        await flush();
+        if (source === 'private') registry.observeEnvelope({ futures_execution_update: { symbol: 'BTCUSDT', orderId: 51, clientOrderId: 'new-order' } });
+        const second = registry.submit(target({ orderId: 51 }, 'cancel-new'), { emit: vi.fn(), execute: async () => { events.push('cancel'); } });
+        await flush();
+        expect(events).toEqual(['place']);
+        held.settle();
+        await Promise.all([first, second]);
+        expect(events).toEqual(['place', 'cancel']);
+    });
+
+    it('does not learn a pair merely asserted by a command', async () => {
+        const registry = createTradingCommandRegistry();
+        await registry.submit(target({ orderId: 42, origClientOrderId: 'claimed' }, 'claim'), { emit: vi.fn(), execute: async () => {} });
+        expect(registry.aliasCount()).toBe(0);
+    });
+
+    it('runs proven different groups concurrently, even when both commands use client IDs', async () => {
+        const registry = createTradingCommandRegistry();
+        observe(registry, 41, 'one');
+        observe(registry, 42, 'two');
+        const held = deferred();
+        const events = [];
+        const first = registry.submit(target({ origClientOrderId: 'one' }, 'first'), { emit: vi.fn(), execute: async () => { events.push('one'); await held.promise; } });
+        const second = registry.submit(target({ origClientOrderId: 'two' }, 'second'), { emit: vi.fn(), execute: async () => { events.push('two'); } });
+        await flush();
+        expect(events).toEqual(['one', 'two']);
+        held.settle();
+        await Promise.all([first, second]);
+    });
+
+    it('falls back to the contract after conflicting/reused client identity', async () => {
+        const registry = createTradingCommandRegistry();
+        observe(registry, 41, 'reused');
+        observe(registry, 42, 'reused');
+        observe(registry, 99, 'unrelated');
+        const held = deferred();
+        const events = [];
+        const first = registry.submit(target({ orderId: 99 }, 'first'), { emit: vi.fn(), execute: async () => { events.push('first'); await held.promise; } });
+        const second = registry.submit(target({ orderId: 41 }, 'unsafe'), { emit: vi.fn(), execute: async () => { events.push('unsafe'); } });
+        await flush();
+        expect(events).toEqual(['first']);
+        held.settle();
+        await Promise.all([first, second]);
+        expect(events).toEqual(['first', 'unsafe']);
+    });
+
+    it.each([{ marketType: 'spot' }, { accountId: 'other' }, { symbol: 'ETHUSDT' }])('isolates alias scopes: %j', async scope => {
+        const registry = createTradingCommandRegistry();
+        observe(registry);
+        observe(registry, 42, 'original-42', scope);
+        const held = deferred();
+        const events = [];
+        const first = registry.submit(target({ orderId: 42 }, 'first'), { emit: vi.fn(), execute: async () => { events.push('first'); await held.promise; } });
+        const second = registry.submit({ ...target({ origClientOrderId: 'original-42' }, 'second'), ...scope }, { emit: vi.fn(), execute: async () => { events.push('second'); } });
+        await flush();
+        expect(events).toEqual(['first', 'second']);
+        held.settle();
+        await Promise.all([first, second]);
+    });
+
+    it('retains active aliases across expiry and capacity pressure, then releases memory safely', async () => {
+        let clock = 100;
+        const registry = createTradingCommandRegistry({ now: () => clock, aliasMaxAgeMs: 10, maxAliasEntries: 4 });
+        observe(registry);
+        const held = deferred();
+        const events = [];
+        const first = registry.submit(target({ orderId: 42 }, 'first'), { emit: vi.fn(), execute: async () => { events.push('first'); await held.promise; } });
+        await flush();
+        clock += 100;
+        for (let id = 100; id < 120; id++) observe(registry, id, `other-${id}`);
+        expect(registry.aliasCount()).toBeLessThanOrEqual(4);
+        const second = registry.submit(target({ origClientOrderId: 'original-42' }, 'second'), { emit: vi.fn(), execute: async () => { events.push('second'); } });
+        await flush();
+        expect(events).toEqual(['first']);
+        held.settle();
+        await Promise.all([first, second]);
+        await flush();
+        clock += 100;
+        await registry.submit(target({ orderId: 999 }, 'third'), { emit: vi.fn(), execute: async () => {} });
+        expect(registry.aliasCount()).toBe(0);
+        expect(registry.laneCount()).toBe(0);
+    });
+
+    it('keeps unknown aliases conservative when all retained capacity is active', async () => {
+        const registry = createTradingCommandRegistry({ maxAliasEntries: 2 });
+        observe(registry);
+        const held = deferred();
+        const first = registry.submit(target({ orderId: 42 }, 'first'), { emit: vi.fn(), execute: async () => held.promise });
+        await flush();
+        expect(observe(registry, 99, 'new')).toBe(false);
+        expect(registry.aliasCount()).toBe(2);
+        const run = vi.fn(async () => {});
+        const second = registry.submit(target({ origClientOrderId: 'new' }, 'second'), { emit: vi.fn(), execute: run });
+        await flush();
+        expect(run).not.toHaveBeenCalled();
+        held.settle();
+        await Promise.all([first, second]);
+        expect(run).toHaveBeenCalledOnce();
+    });
+
+    it('learns snapshots/private identity without recording it as another command outcome', async () => {
+        const registry = createTradingCommandRegistry();
+        await registry.submit(command(), { emit: vi.fn(), execute: async () => {
+            registry.observeEnvelope({ type: 'futures_account_state', resources: { regularOrders: { data: [{ symbol: 'BTCUSDT', orderId: 42, clientOrderId: 'existing' }] } } });
+            registry.observeEnvelope({ execution_update: { s: 'BTCUSDT', i: 43, C: 'spot-existing', c: 'cancel-client' } });
+            registry.observeEnvelope({ futures_execution_update: { symbol: 'BTCUSDT', orderId: 44, clientOrderId: 'algo', orderKind: 'ALGO' } });
+            registry.recordOutcome({ command_rejected: { code: 'OWN' } });
+        } });
+        const replay = vi.fn();
+        await registry.submit(command(), { emit: replay, execute: async () => { throw new Error('duplicate'); } });
+        expect(replay.mock.calls).toEqual([[{ command_rejected: { code: 'OWN' } }]]);
+        expect(registry.aliasCount()).toBe(4);
     });
 });

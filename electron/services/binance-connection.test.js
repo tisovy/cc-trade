@@ -12086,6 +12086,106 @@ describe('setupBinanceConnection user-data orchestration', () => {
             expect(moduleMocks.futuresAdapter.cancelOrder).toHaveBeenCalledOnce();
         });
 
+        it('learns mixed Futures aliases from private evidence and orders modify before cancel', async () => {
+            await connectRenderer();
+            await vi.advanceTimersByTimeAsync(2_000);
+            const socket = moduleMocks.futuresUserDataSockets.find(candidate => candidate.handlers.ping);
+            socket.handlers.open();
+            await vi.advanceTimersByTimeAsync(2_000);
+            socket.handlers.message(JSON.stringify({ e: 'ORDER_TRADE_UPDATE', E: Date.now(), o: {
+                s: 'BTCUSDT', i: 42, c: 'original-42', X: 'NEW', S: 'BUY', p: '50000', q: '0.01',
+            } }));
+            expect(emitted().some(payload => payload.futures_execution_update?.clientOrderId === 'original-42')).toBe(true);
+            const amendment = holdAt('modifyOrder');
+            const amend = amendFuturesOrder('alias-amend', { orderId: '42' });
+            const cancel = cancelFuturesOrder('alias-cancel', { orderId: undefined, origClientOrderId: 'original-42' });
+            await vi.advanceTimersByTimeAsync(1_000);
+            expect(amendment.reached).toHaveLength(1);
+            expect(moduleMocks.futuresAdapter.cancelOrder).not.toHaveBeenCalled();
+            amendment.release();
+            await Promise.all([amend, cancel]);
+            expect(moduleMocks.futuresAdapter.cancelOrder).toHaveBeenCalledOnce();
+            expect(moduleMocks.futuresAdapter.cancelOrder.mock.calls[0][0].origClientOrderId).toBe('original-42');
+        });
+
+        it('preserves known-order concurrency after observing the private book', async () => {
+            await connectRenderer();
+            await vi.advanceTimersByTimeAsync(2_000);
+            const socket = moduleMocks.futuresUserDataSockets.find(candidate => candidate.handlers.ping);
+            socket.handlers.open();
+            await vi.advanceTimersByTimeAsync(2_000);
+            socket.handlers.message(JSON.stringify({ e: 'ORDER_TRADE_UPDATE', E: Date.now(), o: {
+                s: 'BTCUSDT', i: 907, c: 'known-907', X: 'NEW', S: 'BUY', p: '50000', q: '0.01',
+            } }));
+            expect(emitted().some(payload => payload.futures_execution_update?.clientOrderId === 'known-907')).toBe(true);
+            // Two concurrent mutation fixtures must not both drive the fake
+            // clock recursively. This test owns time; physical admission stays.
+            const admit = globalThis.__binanceConnectionTestAdmitPhysicalAttempt;
+            globalThis.__binanceConnectionTestAdmitPhysicalAttempt = weight => admit(weight, { advanceClock: false });
+            const held = holdAt('placeOrder');
+            const place = placeFuturesOrder('new-independent');
+            const cancel = cancelFuturesOrder('lift-known', { orderId: '907' });
+            await vi.advanceTimersByTimeAsync(5_000);
+            expect(emitted().filter(payload => payload.command_rejected)).toEqual([]);
+            expect(held.reached).toHaveLength(1);
+            expect(moduleMocks.futuresAdapter.cancelOrder).toHaveBeenCalledOnce();
+            held.release();
+            await vi.advanceTimersByTimeAsync(1_000);
+            await Promise.all([place, cancel]);
+        });
+
+        it('does not let a newly observed exchange ID overtake its pending placement', async () => {
+            await connectRenderer();
+            await vi.advanceTimersByTimeAsync(2_000);
+            const socket = moduleMocks.futuresUserDataSockets.find(candidate => candidate.handlers.ping);
+            socket.handlers.open();
+            await vi.advanceTimersByTimeAsync(2_000);
+            let release;
+            moduleMocks.futuresAdapter.placeOrder.mockImplementationOnce(async () => {
+                await new Promise(resolve => { release = resolve; });
+                return { symbol: 'BTCUSDT', orderId: 51, clientOrderId: 'pending-51', status: 'NEW' };
+            });
+            const place = placeFuturesOrder('pending-51');
+            await vi.advanceTimersByTimeAsync(100);
+            socket.handlers.message(JSON.stringify({ e: 'ORDER_TRADE_UPDATE', E: Date.now(), o: {
+                s: 'BTCUSDT', i: 51, c: 'pending-51', X: 'NEW', S: 'BUY', p: '50000', q: '0.01',
+            } }));
+            expect(emitted().some(payload => payload.futures_execution_update?.clientOrderId === 'pending-51')).toBe(true);
+            const cancel = cancelFuturesOrder('cancel-51', { orderId: '51' });
+            await vi.advanceTimersByTimeAsync(1_000);
+            expect(moduleMocks.futuresAdapter.cancelOrder).not.toHaveBeenCalled();
+            release();
+            await Promise.all([place, cancel]);
+            expect(moduleMocks.futuresAdapter.placeOrder).toHaveBeenCalledOnce();
+            expect(moduleMocks.futuresAdapter.cancelOrder).toHaveBeenCalledOnce();
+        });
+
+        it('learns Spot order aliases from its REST snapshot without serializing unrelated placement', async () => {
+            moduleMocks.spotClient.restAPI.getOpenOrders.mockResolvedValue({ status: 200, data: async () => [
+                { symbol: 'BTCUSDT', orderId: 907, clientOrderId: 'spot-existing-907', status: 'NEW' },
+            ] });
+            await connectRenderer('spot');
+            let release;
+            const held = new Promise(resolve => { release = resolve; });
+            moduleMocks.spotClient.restAPI.newOrder.mockImplementationOnce(async () => {
+                await held;
+                return { status: 200, data: async () => ({ symbol: 'BTCUSDT', orderId: 51, clientOrderId: 'spot-independent', status: 'NEW' }) };
+            });
+            moduleMocks.spotClient.restAPI.deleteOrder = vi.fn(async () => ({ status: 200, data: async () => ({
+                symbol: 'BTCUSDT', orderId: 907, origClientOrderId: 'spot-existing-907', status: 'CANCELED',
+            }) }));
+            const send = details => moduleMocks.rendererHandlers.message({ type: 'utf8', utf8Data: JSON.stringify({
+                version: 1, marketType: 'spot', accountId: 'default', symbol: 'BTCUSDT', ...details,
+            }) });
+            const place = send({ action: 'trade.placeOrder', clientOrderId: 'spot-independent', side: 'BUY', orderType: 'LIMIT', timeInForce: 'GTC', price: '50000', quantity: '0.01' });
+            const cancel = send({ action: 'trade.cancelOrder', clientOrderId: 'spot-cancel-known', origClientOrderId: 'spot-existing-907' });
+            await vi.advanceTimersByTimeAsync(1_000);
+            expect(moduleMocks.spotClient.restAPI.newOrder).toHaveBeenCalledOnce();
+            expect(moduleMocks.spotClient.restAPI.deleteOrder).toHaveBeenCalledOnce();
+            release();
+            await Promise.all([place, cancel]);
+        });
+
         it('lets a second contract through while the first is in flight', async () => {
             await connectRenderer();
             const held = holdAt('placeOrder');

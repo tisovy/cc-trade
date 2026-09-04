@@ -1,0 +1,15 @@
+## Identity and ordering
+
+Each raw lane key contains account, market, symbol and an explicit exchange/client namespace. A bounded map groups aliases observed together in main-owned order snapshots/execution reports. A validated command's two IDs alone do not prove their association. Regular orders only; algo identity must not be mixed with regular exchange order IDs.
+
+Admission waits on every tail in the current group and the contract barrier. Publishing an alias while a placement is still in flight makes later exchange-ID commands wait for its existing client-ID tail. Unknown target aliases conservatively use the contract barrier (including exchange-ID commands before the desk has observed that ID); a placement can start with its own client lane. A client-target command naming an active placement waits for that same lane. Two proven unrelated order groups retain per-order concurrency. Whole-contract commands retain existing ordering in both directions.
+
+Conflicting/reused alias observations do not guess a winner: the affected identity group becomes unsafe and falls back to the contract gate. Groups are scoped and bounded (TTL and count); eviction/expiry cannot discard a group whose keys still hold command tails. If active state prevents retaining new aliases, those identities stay unproved and use the barrier. Alias observations never replay or submit orders.
+
+Main observes only known outbound regular-order reports and account snapshots in its common emit/broadcast owners, with its configured logical account scope. Move registry initialization before those owners so startup cannot reference an uninitialized instance. Observe identity independently from AsyncLocalStorage outcome recording: private/account frames teach aliases but never become replayed command output. Placement command scope may supply the original client ID when its own exchange response omits it; unrelated or wrong-symbol reports must not be associated.
+
+## Risks and boundaries
+
+GitNexus broadcastToRenderers is CRITICAL (45 upstream nodes, trade/history/account/activation paths), disclosed before edits. Registry exported-arrow callers and emit return empty graphs; unresolved, supplemented by exact-path imports/calls and source inspection. Broad delivery hook should add only cheap recognized-envelope checks and no transport change. Unknown identities may wait longer; known distinct orders must preserve the previously verified concurrent drag behavior.
+
+The five-minute/256 completed-command record remains in-memory. Alias retention is an ordering aid, not durable command identity or credential-account equivalence. No credentials, production services, live orders or external coordination. Tests must prove mixed IDs, pending/acknowledged placement, unknown/conflicting aliases, string/number namespaces, account/market/symbol isolation, expiry/capacity, multiple renderer delivery, failures and released gates. Production first; full tests/graph review before main commit; archive only after operator live confirmation.

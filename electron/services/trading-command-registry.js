@@ -32,14 +32,14 @@
 //   running command's answer. Routing stream traffic through `emit` would break
 //   that, and this is the comment that says so.
 // - A lane is held for as long as its command takes, and a mutating command is
-//   bounded: every REST call times out at 10 s, and the worst path — an
-//   indeterminate failure followed by three reconciliation lookups and their
-//   backoff — is around 40 s. That is the ceiling on how long the next command
-//   *about the same order* can wait, and it is the price of the ordering. It is
+//   bounded in observations: an indeterminate failure can add three read-only
+//   lookups and backoff. Network deadlines do not bound admission waits under
+//   rate limiting, so this is not a fixed wall-clock ceiling. It is
 //   also exactly the window in which the desk has already told the operator it
 //   does not know what happened. A command that speaks for a whole contract —
 //   cancel-all, leverage, margin type — holds every order on it for that long,
-//   which is the reason it is the narrower lane that is the default.
+//   which is the reason proven distinct identities retain narrower lanes.
+//   Unknown or conflicting aliases take the contract barrier too.
 
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { TRADING_COMMAND_ACTIONS } from '../../src/utils/tradingCommands.js';
@@ -140,13 +140,16 @@ export const CONTRACT_WIDE_TRADING_ACTIONS = Object.freeze(new Set([
 // orders movable only one at a time, each lift waiting a full round trip for a
 // placement it had no relationship with.
 //
-// An order is named by the exchange's own id wherever the desk has one and by
-// the client id the desk minted only until that id exists, at every call site
-// that names one, so two commands about one order always spell it the same way.
-// A placement names the order it creates: the id it mints is the only name that
-// order has until Binance answers, and it is the name a cancellation arriving
-// behind it would use. A command that carries both names is keyed by the
-// exchange id, because that is the one every other command prefers.
+// This is a raw typed name, not proof that two names identify different orders.
+// The registry resolves observed aliases (or takes the contract barrier).
+const aliasKey = (command, kind, value) => {
+    if (typeof value === 'number' && !Number.isSafeInteger(value)) return null;
+    if (typeof value !== 'string' && typeof value !== 'number') return null;
+    const text = String(value);
+    if (!text || text.length > 256 || [...text].some(character => character.charCodeAt(0) < 32)) return null;
+    return [readTradingCommandLane(command), kind, text].join(SEPARATOR);
+};
+
 export const readTradingCommandOrderLane = (command) => {
     if (!isMutatingTradingCommand(command)) return null;
     if (CONTRACT_WIDE_TRADING_ACTIONS.has(command.action)) return null;
@@ -156,7 +159,8 @@ export const readTradingCommandOrderLane = (command) => {
     // Named by nothing the desk can order it against. It takes the contract,
     // which is the only thing left that is narrower than everything.
     if (named === null || named === undefined || named === '') return null;
-    return [readTradingCommandLane(command), String(named)].join(SEPARATOR);
+    const kind = command.action === TRADING_COMMAND_ACTIONS.PLACE_ORDER || command.orderId == null ? 'client' : 'order';
+    return aliasKey(command, kind, named);
 };
 
 // Long enough to cover a renderer that drops its socket, reconnects and resends
@@ -168,6 +172,7 @@ export const TRADING_COMMAND_RECORD_MAX_ENTRIES = 256;
 // warning, its withdrawal, and the report. The cap is what stops a handler
 // nobody foresaw from making the record grow with its output.
 export const TRADING_COMMAND_MAX_RECORDED_OUTCOMES = 8;
+export const TRADING_COMMAND_MAX_ALIAS_ENTRIES = 1_024;
 
 const IGNORE = () => {};
 const RESOLVED = Promise.resolve();
@@ -183,6 +188,8 @@ export const createTradingCommandRegistry = ({
     maxAgeMs = TRADING_COMMAND_RECORD_MAX_AGE_MS,
     maxEntries = TRADING_COMMAND_RECORD_MAX_ENTRIES,
     maxOutcomes = TRADING_COMMAND_MAX_RECORDED_OUTCOMES,
+    maxAliasEntries = TRADING_COMMAND_MAX_ALIAS_ENTRIES,
+    aliasMaxAgeMs = TRADING_COMMAND_RECORD_MAX_AGE_MS,
 } = {}) => {
     // Insertion-ordered, which is what makes eviction by age a walk from the
     // front rather than a sort.
@@ -191,11 +198,84 @@ export const createTradingCommandRegistry = ({
     // speak for the whole of it.
     const lanes = new Map();
     const contracts = new Map();
+    const aliases = new Map();
+    const aliasLimit = Number.isSafeInteger(maxAliasEntries) && maxAliasEntries >= 2 ? maxAliasEntries : TRADING_COMMAND_MAX_ALIAS_ENTRIES;
     // The recording travels with the command's own async execution, so an
     // outcome emitted after three awaits and a reconciliation is still
     // attributed to the command that caused it — and a command running
     // concurrently on another contract records its own.
     const recording = new AsyncLocalStorage();
+
+    const pruneAliases = (extra = 0, retained = new Set()) => {
+        const deadline = now() - aliasMaxAgeMs;
+        for (const group of new Set(aliases.values())) {
+            if (retained.has(group) || [...group.keys].some(key => lanes.has(key))) continue;
+            if (group.seenAt > deadline && aliases.size + extra <= aliasLimit) continue;
+            for (const key of group.keys) aliases.delete(key);
+        }
+    };
+
+    // Only callers holding exchange evidence may use this method. Command
+    // assertions alone never teach an association, and algo ids are separate.
+    const observeOrder = (order = {}) => {
+        if (!['spot', 'futures'].includes(order.marketType)
+            || typeof order.symbol !== 'string' || !order.symbol
+            || (order.orderKind != null && order.orderKind !== 'REGULAR')) return false;
+        const scope = { ...order, accountId: order.accountId ?? 'default' };
+        const exchangeKey = aliasKey(scope, 'order', order.orderId ?? order.i);
+        if (exchangeKey === null) return false;
+        const clientKey = aliasKey(scope, 'client', order.originalClientOrderId ?? order.origClientOrderId ?? order.C ?? order.clientOrderId ?? order.c);
+        const existing = aliases.get(exchangeKey);
+        if (existing && (clientKey === null || aliases.get(clientKey) === existing)) {
+            existing.seenAt = now();
+            return true;
+        }
+        const keys = new Set([exchangeKey, ...(clientKey === null ? [] : [clientKey])]);
+        const groups = new Set([...keys].map(key => aliases.get(key)).filter(Boolean));
+        const exchangeKeys = new Set([exchangeKey]);
+        let unsafe = false;
+        for (const group of groups) {
+            for (const key of group.keys) keys.add(key);
+            for (const key of group.exchangeKeys) exchangeKeys.add(key);
+            unsafe ||= group.unsafe;
+        }
+        const extra = [...keys].filter(key => !aliases.has(key)).length;
+        if (aliases.size + extra > aliasLimit) pruneAliases(extra, groups);
+        if (aliases.size + extra > aliasLimit) return false;
+        const group = { keys, exchangeKeys, unsafe: unsafe || exchangeKeys.size > 1, seenAt: now() };
+        for (const key of keys) aliases.set(key, group);
+        return true;
+    };
+
+    const observeEnvelope = (payload, accountId = 'default') => {
+        if (!payload || typeof payload !== 'object') return;
+        const observe = (report, marketType) => {
+            if (!report || typeof report !== 'object') return;
+            observeOrder({ ...report, symbol: report.symbol ?? report.s, marketType, accountId });
+        };
+        observe(payload.execution_update, 'spot');
+        observe(payload.futures_execution_update, 'futures');
+        for (const [rows, marketType] of [
+            [payload.orders, 'spot'], [payload.futures_orders, 'futures'], [payload.futures_regular_orders, 'futures'],
+            [payload.type === 'futures_account_state' ? payload.resources?.regularOrders?.data : null, 'futures'],
+        ]) {
+            if (Array.isArray(rows)) for (const row of rows.slice(0, aliasLimit)) observe(row, marketType);
+        }
+    };
+
+    const resolveOrderKeys = (command) => {
+        pruneAliases();
+        const key = readTradingCommandOrderLane(command);
+        if (key === null) return null;
+        const group = aliases.get(key);
+        if (group?.unsafe) return null;
+        if (command.orderId != null && command.origClientOrderId != null
+            && !group?.keys.has(aliasKey(command, 'client', command.origClientOrderId))) return null;
+        if (group) return [...group.keys];
+        // A placement starts with its minted client name. An unproved target
+        // uses the contract, unless it names that exact in-flight client lane.
+        return command.action === TRADING_COMMAND_ACTIONS.PLACE_ORDER || lanes.has(key) ? [key] : null;
+    };
 
     const evict = () => {
         const deadline = now() - maxAgeMs;
@@ -238,15 +318,15 @@ export const createTradingCommandRegistry = ({
     // accepted after it waits for it.
     const runInLane = (command, task) => {
         const contractKey = readTradingCommandLane(command);
-        const orderKey = readTradingCommandOrderLane(command);
+        const orderKeys = resolveOrderKeys(command);
         const gate = contractGate(contractKey);
-        const after = orderKey === null
+        const after = orderKeys === null
             ? Promise.all([gate.barrier, ...gate.members])
-            : Promise.all([lanes.get(orderKey) ?? RESOLVED, gate.barrier]);
+            : Promise.all([...orderKeys.map(key => lanes.get(key) ?? RESOLVED), gate.barrier]);
         const settled = after.then(task);
         const tail = settled.then(IGNORE, IGNORE);
 
-        if (orderKey === null) {
+        if (orderKeys === null) {
             gate.barrier = tail;
             // Every member it waited for is accounted for by the barrier now;
             // only what is accepted after it has anything left to wait on.
@@ -258,10 +338,10 @@ export const createTradingCommandRegistry = ({
             return settled;
         }
 
-        lanes.set(orderKey, tail);
+        for (const key of orderKeys) lanes.set(key, tail);
         gate.members.add(tail);
         void tail.then(() => {
-            if (lanes.get(orderKey) === tail) lanes.delete(orderKey);
+            for (const key of orderKeys) if (lanes.get(key) === tail) lanes.delete(key);
             gate.members.delete(tail);
             forgetContract(contractKey);
         });
@@ -269,6 +349,8 @@ export const createTradingCommandRegistry = ({
     };
 
     return {
+        observeOrder,
+        observeEnvelope,
         /**
          * Records an outbound payload against the command being executed.
          *
@@ -279,6 +361,14 @@ export const createTradingCommandRegistry = ({
             const record = recording.getStore();
             if (!record || record.settled) return false;
             if (!isTradingCommandOutcomeEnvelope(payload)) return false;
+            const report = record.scope.marketType === 'spot' ? payload.execution_update : payload.futures_execution_update;
+            if (report && (report.symbol ?? report.s ?? record.scope.symbol) === record.scope.symbol) {
+                observeOrder({
+                    ...report, ...record.scope,
+                    clientOrderId: report.clientOrderId ?? report.c
+                        ?? (record.scope.action === TRADING_COMMAND_ACTIONS.PLACE_ORDER ? record.scope.clientOrderId : undefined),
+                });
+            }
             if (record.outcomes.length >= maxOutcomes) return false;
             record.outcomes.push(payload);
             return true;
@@ -314,6 +404,10 @@ export const createTradingCommandRegistry = ({
 
             let settle;
             const record = {
+                scope: {
+                    marketType: command.marketType, accountId: command.accountId, symbol: command.symbol,
+                    action: command.action, clientOrderId: command.clientOrderId,
+                },
                 outcomes: [],
                 settled: false,
                 completedAt: 0,
@@ -341,5 +435,6 @@ export const createTradingCommandRegistry = ({
         // What the record holds, for the test that proves it stays bounded.
         size: () => records.size,
         laneCount: () => lanes.size + contracts.size,
+        aliasCount: () => aliases.size,
     };
 };

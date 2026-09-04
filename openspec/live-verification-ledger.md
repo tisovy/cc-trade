@@ -1199,3 +1199,15 @@ Full local checks passed: 140 files / 3,354 tests, lint, build and all gates.
   market data; do not mutate the store to manufacture an invalid response.
 - Short-page listing proof and cache-hit telemetry remain separate proposals.
   Hunter, database contents and running services were not modified.
+
+## unify-order-command-alias-lanes — 2026-09-05
+
+Status: F10 implemented; **operator confirmation pending**, not archived.
+Full local checks passed: 140 files / 3,373 tests, lint, build and all gates.
+
+- Exchange/client IDs learned from account/private evidence share active
+  dependencies. Unknown/conflicting identities use the contract barrier.
+- Confirm ordinary interaction with multiple known orders; do not force a
+  race or timeout with real money. Unknown identity may intentionally wait.
+- Private alias observation is not a replayable command outcome. Alias memory
+  and duplicate-command records remain bounded, in-memory and non-durable.

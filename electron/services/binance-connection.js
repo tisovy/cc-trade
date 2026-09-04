@@ -1792,6 +1792,9 @@ export function setupBinanceConnection({
     const rendererConnections = new Set();  // Track all connected renderers
     const spotRendererConnections = new Set();
     const futuresRendererConnections = new Set();
+    // Shared across renderer reconnects; initialized before any observation
+    // owner so private/account delivery can teach regular-order aliases.
+    const tradingCommandRegistry = createTradingCommandRegistry();
 
     // Broadcast to all connected renderers.
     //
@@ -1802,6 +1805,7 @@ export function setupBinanceConnection({
     // being the desk's and becomes the socket's: the same moment
     // `markOutboundFrame` takes it on the market lane.
     const broadcastToRenderers = (payload, delivery = ACCOUNT_FRAME, marks = null) => {
+        tradingCommandRegistry.observeEnvelope(payload);
         const message = markAccountFrame(JSON.stringify(payload), payload, marks);
         for (const conn of rendererConnections) {
             sendFrameText(conn, message, delivery);
@@ -2445,13 +2449,6 @@ export function setupBinanceConnection({
     const noteFuturesMutation = () => {
         futuresMutationEpoch += 1;
     };
-
-    // One registry for the whole main process, deliberately outside the
-    // per-connection closure: a renderer that drops its socket and reconnects
-    // resends the command it believes never left, and the copy arrives on a
-    // connection that has no memory of the first. The registry does, and answers
-    // the new socket from what the old one was told.
-    const tradingCommandRegistry = createTradingCommandRegistry();
 
     // Both order lists as one, for the single question asked of them here: which
     // contracts have something resting on them.
@@ -8028,6 +8025,7 @@ export function setupBinanceConnection({
 
         // Legacy emit for backward compatibility
         const emit = (payload, overrideRequestId) => {
+            tradingCommandRegistry.observeEnvelope(payload);
             // How a trading command ended reaches the operator here and nowhere
             // else; the record recognizes those envelopes and ignores the rest.
             diagnosticRecord.observeOutbound(payload);
