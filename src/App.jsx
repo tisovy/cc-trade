@@ -1,6 +1,8 @@
 import { Suspense, lazy, useCallback, useEffect, useState } from 'react'
 import './styles/app-layout.css'
 import NotificationToast from './components/common/NotificationToast.jsx'
+import RenderErrorBoundary from './components/common/RenderErrorBoundary.jsx'
+import WorkspaceRecovery from './components/common/WorkspaceRecovery.jsx'
 import { GatewayProvider, useGatewayContext } from './context/GatewayContext.jsx'
 import { NotificationProvider } from './context/NotificationProvider.jsx'
 import {
@@ -200,6 +202,13 @@ const WorkspaceGateway = ({ marketMode, onMarketModeChange }) => {
           parent's activation had been sent at all — ordering that rested on
           nothing but effect scheduling. */}
       {isWorkspaceActive ? (
+        <RenderErrorBoundary key={marketMode} fallback={() => (
+          <WorkspaceRecovery
+            title={marketMode === MARKET_MODES.SPOT ? 'Spot workspace' : 'Futures workspace'}
+            reload
+            onRetry={() => window.location.reload()}
+          />
+        )}>
         <Suspense fallback={(
           <>
             {marketMode === MARKET_MODES.FUTURES_LIVE ? <MarketClock /> : null}
@@ -212,6 +221,7 @@ const WorkspaceGateway = ({ marketMode, onMarketModeChange }) => {
             <FuturesWorkspace marketClock={<MarketClock />} />
           )}
         </Suspense>
+        </RenderErrorBoundary>
       ) : (
         <WorkspaceLoading mode={marketMode} />
       )}

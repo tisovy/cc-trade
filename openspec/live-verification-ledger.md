@@ -1236,3 +1236,16 @@ Full local checks passed: 144 files / 3432 tests, lint, build and all gates.
   deliberately stall a live trading renderer. Limits do not bound total RSS.
 - Overflow does not cancel exchange orders or replay mutations; normal
   reconnect/account reads remain the recovery path.
+
+## isolate-workspace-render-failures — 2026-09-05
+
+Status: A03 implemented; **operator confirmation pending**, not archived.
+Full local checks passed: 145 files / 3440 tests, lint, build and all gates.
+
+- Workspace/panel render failures have scoped, manual recovery. Spot chart and
+  analytics failures leave sibling controls mounted; content retry retains the
+  account/trading owner. Outer failure retains the shell and offers reload.
+- Fallback warns that exchange orders may still be active. Recovery is not
+  proof of a cancelled/absent order and does not repeat trading commands.
+- Observe normal UI and only naturally occurring recovery; do not inject a
+  render failure into a live trading session for acceptance.

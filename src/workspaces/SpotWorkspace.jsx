@@ -12,6 +12,8 @@ import QuickSwitchModal from '../components/features/tools/QuickSwitchModal'
 import DrawingToolbar from '../components/features/tools/DrawingToolbar'
 import AlertPanel from '../components/features/tools/AlertPanel'
 import MainView from '../components/layout/MainView'
+import RenderErrorBoundary from '../components/common/RenderErrorBoundary.jsx'
+import WorkspaceRecovery from '../components/common/WorkspaceRecovery.jsx'
 import { INTERVALS } from '../constants'
 import { AlertProvider } from '../context/AlertProvider.jsx'
 import { DataProvider, useDataContext } from '../context/DataContext'
@@ -399,7 +401,9 @@ function SpotWorkspaceContent() {
       <div className="root-container">
         {/* Analytics Panel - inline in depth view */}
         <div className="analytics-panel-container">
+          <RenderErrorBoundary title="Analytics">
           <AnalyticsPanel onPairNavigate={handleAnalyticsPairClick} />
+          </RenderErrorBoundary>
         </div>
         <DrawingToolbar />
         <div className="chart">
@@ -445,6 +449,7 @@ function SpotWorkspaceContent() {
             </div>
           </div>
           <div className="chart-wrapper-container">
+            <RenderErrorBoundary title="Chart">
             <ChartWrapper
               onOrderCreate={handleOrderModalOpen}
               onOrderCancel={(data) => handleRequest(data, 'cancel')}
@@ -465,6 +470,7 @@ function SpotWorkspaceContent() {
               onViewSwitch={toggleView}
               showOrderHistory={showOrderHistory}
             />
+            </RenderErrorBoundary>
           </div>
         </div>
       </div>
@@ -540,7 +546,9 @@ function SpotWorkspaceContent() {
         <>
           {showAnalyticsPanelInMainView && (
             <div className="persistent-analytics-panel in-main-view">
+              <RenderErrorBoundary title="Analytics">
               <AnalyticsPanel onPairNavigate={handleAnalyticsPairClick} />
+              </RenderErrorBoundary>
             </div>
           )}
           <MainView
@@ -579,7 +587,9 @@ const SpotWorkspace = () => (
   <DataProvider>
     <AlertProvider>
       <DrawingProvider>
+        <RenderErrorBoundary fallback={retry => <WorkspaceRecovery title="Spot view" onRetry={retry} />}>
         <SpotWorkspaceContent />
+        </RenderErrorBoundary>
       </DrawingProvider>
     </AlertProvider>
   </DataProvider>

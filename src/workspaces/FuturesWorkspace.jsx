@@ -2,6 +2,8 @@ import { useEffect, useRef } from 'react'
 import FuturesProductionWorkstation from '../components/features/futures/FuturesProductionWorkstation.jsx'
 import { useGatewayContext } from '../context/GatewayContext.jsx'
 import useFuturesTrading from '../hooks/useFuturesTrading.js'
+import RenderErrorBoundary from '../components/common/RenderErrorBoundary.jsx'
+import WorkspaceRecovery from '../components/common/WorkspaceRecovery.jsx'
 
 const FuturesWorkspace = ({ marketClock = null }) => {
   const {
@@ -59,6 +61,7 @@ const FuturesWorkspace = ({ marketClock = null }) => {
       data-testid="futures-live-view"
       aria-label="USDⓈ-M Futures production workspace"
     >
+      <RenderErrorBoundary fallback={retry => <WorkspaceRecovery title="Futures view" onRetry={retry} />}>
       <FuturesProductionWorkstation
         enabled
         executionState={futuresTrading}
@@ -66,6 +69,7 @@ const FuturesWorkspace = ({ marketClock = null }) => {
         wsConnection={wsConnection}
         sendMessage={sendMessage}
       />
+      </RenderErrorBoundary>
     </main>
   )
 }

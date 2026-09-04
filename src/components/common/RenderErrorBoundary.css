@@ -1,0 +1,42 @@
+.render-failure {
+  box-sizing: border-box;
+  min-width: 0;
+  padding: 20px;
+  color: #e8e9ed;
+  background: #1b2029;
+  border: 1px solid #bb8540;
+  border-radius: 6px;
+  overflow-wrap: anywhere;
+}
+
+.render-failure h1,
+.render-failure h2 {
+  margin: 0 0 12px;
+  font-size: 18px;
+}
+
+.render-failure p {
+  margin: 8px 0;
+  line-height: 1.5;
+}
+
+.render-failure button {
+  margin-top: 12px;
+  padding: 8px 14px;
+  color: #fff;
+  background: #343e50;
+  border: 1px solid #8390a5;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.render-failure button:focus-visible {
+  outline: 2px solid #edb965;
+  outline-offset: 3px;
+}
+
+.render-failure.is-workspace {
+  align-self: start;
+  margin: 20px;
+  max-width: 760px;
+}

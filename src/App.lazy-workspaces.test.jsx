@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => ({
   futuresRenders: 0,
   providerModes: [],
   startupStatus: null,
+  spotFails: false,
 }))
 
 vi.mock('./workspaces/SpotWorkspace.jsx', () => {
@@ -21,6 +22,7 @@ vi.mock('./workspaces/SpotWorkspace.jsx', () => {
   return {
     default: () => {
       mocks.spotRenders += 1
+      if (mocks.spotFails) throw new Error('fixture-sensitive-workspace-error')
       return <main data-testid="lazy-spot-workspace">Spot workspace</main>
     },
   }
@@ -81,6 +83,7 @@ describe('App lazy market workspace ownership', () => {
     mocks.futuresRenders = 0
     mocks.providerModes.length = 0
     mocks.startupStatus = null
+    mocks.spotFails = false
   })
 
   afterEach(() => {
@@ -140,6 +143,23 @@ describe('App lazy market workspace ownership', () => {
     expect(mocks.spotRenders).toBeGreaterThan(0)
     expect(mocks.futuresRenders).toBe(0)
     expect(mocks.providerModes[0]).toBe(MARKET_WORKSPACES.SPOT)
+  })
+
+  it('keeps market selection and truthful recovery visible after a workspace owner fails', async () => {
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      mocks.spotFails = true
+      localStorageMock.setItem(MARKET_WORKSPACE_STORAGE_KEY, MARKET_WORKSPACES.SPOT)
+      render(<App />)
+      expect(await screen.findByText('Spot workspace unavailable')).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: 'Reload interface' })).toBeInTheDocument()
+      expect(screen.getByText(/Existing exchange orders may still be active/)).toBeInTheDocument()
+      expect(screen.queryByText('fixture-sensitive-workspace-error')).not.toBeInTheDocument()
+      expect(screen.getByTestId('market-mode-spot')).toBeInTheDocument()
+      fireEvent.click(screen.getByTestId('market-mode-futures-live'))
+      expect(await screen.findByTestId('lazy-futures-workspace')).toBeInTheDocument()
+      expect(screen.queryByText('Spot workspace unavailable')).not.toBeInTheDocument()
+    } finally { errorLog.mockRestore() }
   })
 
   it('mounts neither workspace while credential preflight is blocked', () => {

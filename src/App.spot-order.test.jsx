@@ -1,3 +1,4 @@
+import { useEffect } from 'react'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { attachMockLocalStorage } from '@/test/mocks'
@@ -25,10 +26,19 @@ const mocks = vi.hoisted(() => ({
   futuresProductionEnabled: [],
   futuresProductionState: null,
   spotPrivateStatus: { state: 'ready' },
+  failedPanel: null,
+  spotOwnerMounts: 0,
+  spotOwnerUnmounts: 0,
 }))
 
 vi.mock('./context/DataContext', () => ({
-  DataProvider: ({ children }) => children,
+  DataProvider: ({ children }) => {
+    useEffect(() => {
+      mocks.spotOwnerMounts += 1
+      return () => { mocks.spotOwnerUnmounts += 1 }
+    }, [])
+    return children
+  },
   useDataContext: () => ({
     panel: { selected: 'BTCUSDT', interval: '1h' },
     ticker: [],
@@ -124,7 +134,9 @@ vi.mock('./context/AlertProvider', () => ({
 }))
 
 vi.mock('./components/features/charts/ChartWrapper', () => ({
-  ChartWrapper: ({ onOrderPlace, onOrderCancel }) => (
+  ChartWrapper: ({ onOrderPlace, onOrderCancel }) => {
+    if (mocks.failedPanel === 'Chart') throw new Error('fixture-chart-error')
+    return (
     <div>
       <button type="button" data-testid="place-spot-order" onClick={() => onOrderPlace(mocks.order)}>
         Place
@@ -133,7 +145,8 @@ vi.mock('./components/features/charts/ChartWrapper', () => ({
         Cancel
       </button>
     </div>
-  ),
+    )
+  },
 }))
 
 vi.mock('./components/features/trading/OrderFormModal', () => ({
@@ -153,11 +166,14 @@ vi.mock('./components/layout/UpperPanel', () => ({
 }))
 
 vi.mock('./components/layout/InfoPanel', () => ({
-  default: () => null,
+  default: () => <button type="button" data-testid="sibling-order-controls">Order controls</button>,
 }))
 
 vi.mock('./components/layout/AnalyticsPanel', () => ({
-  default: () => null,
+  default: () => {
+    if (mocks.failedPanel === 'Analytics') throw new Error('fixture-analytics-error')
+    return null
+  },
 }))
 
 vi.mock('./components/layout/MainView', () => ({
@@ -219,6 +235,9 @@ describe('App spot order payloads', () => {
     mocks.futuresProductionEnabled.length = 0
     mocks.futuresProductionState = null
     mocks.spotPrivateStatus = { state: 'ready' }
+    mocks.failedPanel = null
+    mocks.spotOwnerMounts = 0
+    mocks.spotOwnerUnmounts = 0
   })
 
   afterEach(() => {
@@ -236,6 +255,45 @@ describe('App spot order payloads', () => {
     mocks.spotPrivateStatus = { state: 'ready' }
     rerender(<App />)
     await waitFor(() => expect(screen.queryByText('Spot private updates unconfirmed')).not.toBeInTheDocument())
+  })
+
+  it.each(['Chart', 'Analytics'])('isolates a broken %s without losing account controls or replaying a command', async panel => {
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      mocks.failedPanel = panel
+      mocks.spotPrivateStatus = { state: 'reconnecting', reason: 'connection-closed' }
+      render(<App />)
+      expect(await screen.findByText(`${panel} unavailable`)).toBeInTheDocument()
+      expect(screen.getByTestId('sibling-order-controls')).toBeInTheDocument()
+      expect(screen.getByText('Spot private updates unconfirmed')).toBeInTheDocument()
+      expect(mocks.spotOwnerMounts).toBe(1)
+      expect(mocks.spotOwnerUnmounts).toBe(0)
+      mocks.failedPanel = null
+      fireEvent.click(screen.getByRole('button', { name: 'Retry panel' }))
+      expect(screen.queryByText(`${panel} unavailable`)).not.toBeInTheDocument()
+      expect(mocks.spotOwnerMounts).toBe(1)
+      expect(mocks.send).not.toHaveBeenCalled()
+      expect(mocks.sendMessage.mock.calls.some(([message]) => String(message.action).startsWith('trade.'))).toBe(false)
+    } finally { errorLog.mockRestore() }
+  })
+
+  it('keeps the Spot account owner mounted while recovering a failed content initializer', async () => {
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      localStorageMock.setItem('mainViewShowActivity', '{broken')
+      render(<App />)
+      expect(await screen.findByText('Spot view unavailable')).toBeInTheDocument()
+      expect(mocks.spotOwnerMounts).toBe(1)
+      expect(mocks.spotOwnerUnmounts).toBe(0)
+      // Repair the fixture externally; the recovery UI itself never deletes storage.
+      expect(localStorageMock.getItem('mainViewShowActivity')).toBe('{broken')
+      localStorageMock.setItem('mainViewShowActivity', 'true')
+      fireEvent.click(screen.getByRole('button', { name: 'Retry view' }))
+      expect(screen.getByTestId('sibling-order-controls')).toBeInTheDocument()
+      expect(mocks.spotOwnerMounts).toBe(1)
+      expect(mocks.spotOwnerUnmounts).toBe(0)
+      expect(mocks.sendMessage.mock.calls.some(([message]) => String(message.action).startsWith('trade.'))).toBe(false)
+    } finally { errorLog.mockRestore() }
   })
 
   it('sends typed buy place-order commands with the 0.999 quantity reduction', async () => {
