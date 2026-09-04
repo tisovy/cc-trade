@@ -1211,3 +1211,15 @@ Full local checks passed: 140 files / 3,373 tests, lint, build and all gates.
   race or timeout with real money. Unknown identity may intentionally wait.
 - Private alias observation is not a replayable command outcome. Alias memory
   and duplicate-command records remain bounded, in-memory and non-durable.
+
+## isolate-spot-account-history-and-pnl — 2026-09-05
+
+Status: F09 implemented; **operator confirmation pending**, not archived.
+Full local checks passed: 144 files / 3,411 tests, lint, build and all gates.
+
+- History/PnL use a versioned Spot configured-key namespace. Legacy global
+  data remains untouched and is not assigned to the current account by guess.
+- Confirm ordinary history/PnL after full balances arrive; key rotation starts
+  a fresh baseline even when both keys belong to the same exchange account.
+- No credential changes or trades were made for testing. A live key-rotation
+  acceptance check should coincide with an intended operator configuration change.

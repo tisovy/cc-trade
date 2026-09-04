@@ -186,7 +186,7 @@ describe('Spot selection opening ownership', () => {
         await act(async () => {
             for (const message of [
                 { chart: liveRows(99), symbol: 'ETHUSDT', interval: '1h' },
-                { channelId: 'global', type: 'balances', payload: account },
+                { channelId: 'global', type: 'balances', payload: account, spot_account_fingerprint: 'a'.repeat(64) },
             ]) {
                 const data = JSON.stringify(message);
                 captured.listener({ data }, gateway.wsConnection, readDeskFrame(data));

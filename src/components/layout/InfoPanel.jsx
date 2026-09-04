@@ -12,6 +12,7 @@ const InfoPanel = ({ handleRequest }) => {
     const {
         panel,
         balances,
+        spotAccountFingerprint,
         orders,
         history: _history,
         filters,
@@ -21,24 +22,28 @@ const InfoPanel = ({ handleRequest }) => {
     } = useDataContext();
     const [menu, setMenu] = useState('orders')
     const [pnlPeriod, setPnlPeriod] = useState('day')
-    const [pnlData, setPnlData] = useState(null)
+    const [heldPnL, setPnlData] = useState(null)
+    const pnlData = spotAccountFingerprint && heldPnL?.fingerprint === spotAccountFingerprint
+        && heldPnL?.period === pnlPeriod && Object.keys(balances ?? {}).length > 0 ? heldPnL.data : null
     const [pnlRefreshKey, setPnlRefreshKey] = useState(0)
 
     // Calculate P&L when period changes or balances/ticker update
     useEffect(() => {
-        if (menu === 'pnl' && balances && ticker && ticker.length > 0) {
+        if (menu === 'pnl' && spotAccountFingerprint && balances && ticker && ticker.length > 0) {
             // eslint-disable-next-line react-hooks/set-state-in-effect
-            setPnlData(calculatePnL(pnlPeriod, balances, ticker));
+            setPnlData({ fingerprint: spotAccountFingerprint, period: pnlPeriod,
+                data: calculatePnL(pnlPeriod, balances, ticker, spotAccountFingerprint) });
         }
-    }, [menu, pnlPeriod, balances, ticker, pnlRefreshKey]);
+    }, [menu, pnlPeriod, balances, ticker, pnlRefreshKey, spotAccountFingerprint]);
 
     const handlePnlReset = useCallback(() => {
-        if (balances && ticker) {
-            resetPnL(pnlPeriod, balances, ticker);
-            setPnlData(calculatePnL(pnlPeriod, balances, ticker));
+        if (spotAccountFingerprint && balances && ticker) {
+            resetPnL(pnlPeriod, balances, ticker, spotAccountFingerprint);
+            setPnlData({ fingerprint: spotAccountFingerprint, period: pnlPeriod,
+                data: calculatePnL(pnlPeriod, balances, ticker, spotAccountFingerprint) });
             setPnlRefreshKey(prev => prev + 1);
         }
-    }, [pnlPeriod, balances, ticker]);
+    }, [pnlPeriod, balances, ticker, spotAccountFingerprint]);
 
     const handleMenuClick = (e) => {
         // Use id from the clicked element
@@ -330,7 +335,7 @@ const InfoPanel = ({ handleRequest }) => {
                     </div>
 
                     <div className="pnl-time-label">
-                        {getTimeRangeLabel(pnlPeriod)}
+                        {getTimeRangeLabel(pnlPeriod, null, spotAccountFingerprint)}
                     </div>
 
                     {pnlData && pnlData.hasSnapshot && (
@@ -430,7 +435,7 @@ const InfoPanel = ({ handleRequest }) => {
                     )}
 
                     {!pnlData && (
-                        <div className="pnl-empty">Loading balance data...</div>
+                        <div className="pnl-empty">{spotAccountFingerprint ? 'Loading balance data...' : 'Waiting for account identity...'}</div>
                     )}
                 </div>
             )

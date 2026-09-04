@@ -3,6 +3,7 @@ import { describe, it, expect, vi } from 'vitest'
 import InfoPanel from './InfoPanel'
 import * as DataContextModule from '../../context/DataContext'
 import { createMockDataContextValue } from '@/test/mocks'
+import { resetPnL } from '../../utils/pnl'
 
 // Mock DataContext
 vi.mock('../../context/DataContext', () => ({
@@ -85,5 +86,29 @@ describe('InfoPanel', () => {
 
         expect(screen.getByText('BTC')).toBeInTheDocument()
         expect(screen.getByText('1.500000')).toBeInTheDocument()
+    })
+
+    it('holds PnL until current account identity and full balances are available', () => {
+        const ticker = [{ symbol: 'BTCUSDT', lastPrice: '50000' }]
+        const balances = { USDT: { available: '1000', onOrder: '0' } }
+        const context = { ...defaultContext, balances, ticker, spotAccountFingerprint: null }
+        vi.mocked(DataContextModule.useDataContext).mockReturnValue(context)
+        const view = render(<InfoPanel handleRequest={mockHandleRequest} />)
+        fireEvent.click(screen.getByText('P&L'))
+        expect(screen.getByText('Waiting for account identity...')).toBeInTheDocument()
+        expect(screen.queryByText(/Start Tracking/)).not.toBeInTheDocument()
+        const A = 'a'.repeat(64), B = 'b'.repeat(64)
+        resetPnL('day', { USDT: { available: '10000', onOrder: '0' } }, ticker, A)
+        vi.mocked(DataContextModule.useDataContext).mockReturnValue({ ...context, spotAccountFingerprint: A })
+        view.rerender(<InfoPanel handleRequest={mockHandleRequest} />)
+        expect(screen.getAllByText('-90.00%')).toHaveLength(2)
+        vi.mocked(DataContextModule.useDataContext).mockReturnValue({ ...context, balances: {}, spotAccountFingerprint: B })
+        view.rerender(<InfoPanel handleRequest={mockHandleRequest} />)
+        expect(screen.queryByText('-90.00%')).not.toBeInTheDocument()
+        expect(screen.getByText('Loading balance data...')).toBeInTheDocument()
+        vi.mocked(DataContextModule.useDataContext).mockReturnValue({ ...context, spotAccountFingerprint: B })
+        view.rerender(<InfoPanel handleRequest={mockHandleRequest} />)
+        expect(screen.queryByText('-90.00%')).not.toBeInTheDocument()
+        expect(screen.getByText('Current')).toBeInTheDocument()
     })
 })

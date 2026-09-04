@@ -3,6 +3,7 @@ import { server as WebSocketServer } from 'websocket';
 import { Spot } from '@binance/spot';
 import { protectSpotRestApi } from './spot-rest-boundary.js';
 import { createSpotUserDataStream } from './spot-user-data-stream.js';
+import { createSpotAccountFingerprint, stampSpotAccountPayload } from './spot-account-identity.js';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 import { SocksProxyAgent } from 'socks-proxy-agent';
 import { Buffer } from 'buffer';
@@ -1499,6 +1500,7 @@ export function setupBinanceConnection({
     const futuresCredentialsReady = credentialPreflight.markets.futures.ready;
     const APIKEY = spotCredentialsReady ? process.env.BK : null;
     const APISECRET = spotCredentialsReady ? process.env.BS : null;
+    const spotAccountFingerprint = createSpotAccountFingerprint(APIKEY);
     const FUTURES_APIKEY = futuresCredentialsReady ? process.env.BFK : null;
     const FUTURES_APISECRET = futuresCredentialsReady ? process.env.BFS : null;
     // The guarded Futures production subsystem is retired: scrub its legacy
@@ -1805,6 +1807,7 @@ export function setupBinanceConnection({
     // being the desk's and becomes the socket's: the same moment
     // `markOutboundFrame` takes it on the market lane.
     const broadcastToRenderers = (payload, delivery = ACCOUNT_FRAME, marks = null) => {
+        payload = stampSpotAccountPayload(payload, spotAccountFingerprint);
         tradingCommandRegistry.observeEnvelope(payload);
         const message = markAccountFrame(JSON.stringify(payload), payload, marks);
         for (const conn of rendererConnections) {
@@ -8025,6 +8028,7 @@ export function setupBinanceConnection({
 
         // Legacy emit for backward compatibility
         const emit = (payload, overrideRequestId) => {
+            payload = stampSpotAccountPayload(payload, spotAccountFingerprint);
             tradingCommandRegistry.observeEnvelope(payload);
             // How a trading command ended reaches the operator here and nowhere
             // else; the record recognizes those envelopes and ignores the rest.

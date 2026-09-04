@@ -2697,6 +2697,43 @@ describe('setupBinanceConnection user-data orchestration', () => {
             }),
         });
 
+        it('stamps Spot REST and private frames with the same opaque configured-key identity', async () => {
+            await connectRenderer(null);
+            await moduleMocks.rendererHandlers.message({ type: 'utf8', utf8Data: JSON.stringify({ action: 'activate_market', marketMode: 'spot' }) });
+            await vi.advanceTimersByTimeAsync(2_000);
+            await flushMicrotasks();
+            const accountFrames = emitted().filter(frame => frame.balances || frame.orders);
+            expect(accountFrames.some(frame => frame.balances)).toBe(true);
+            expect(accountFrames.some(frame => frame.orders)).toBe(true);
+            const fingerprint = accountFrames[0].spot_account_fingerprint;
+            expect(fingerprint).toMatch(/^[a-f0-9]{64}$/);
+            expect(accountFrames.every(frame => frame.spot_account_fingerprint === fingerprint)).toBe(true);
+            const refresh = moduleMocks.rendererHandlers.message({ type: 'utf8', utf8Data: JSON.stringify({
+                action: 'account.refresh', version: 1, marketType: 'spot', accountId: 'default', symbol: 'BTCUSDT',
+            }) });
+            await vi.advanceTimersByTimeAsync(2_000);
+            await refresh;
+            expect(emitted().find(frame => frame.history)?.spot_account_fingerprint).toBe(fingerprint);
+            const socket = moduleMocks.spotPrivateSockets[0];
+            privateFrame(socket, { e: 'executionReport', s: 'BTCUSDT', i: 91, X: 'NEW', S: 'BUY' });
+            privateFrame(socket, { e: 'outboundAccountPosition', B: [{ a: 'USDT', f: '9', l: '1' }] });
+            expect(emitted().find(frame => frame.execution_update)?.spot_account_fingerprint).toBe(fingerprint);
+            expect(emitted().find(frame => frame.balance_update)?.spot_account_fingerprint).toBe(fingerprint);
+            const text = JSON.stringify(emitted());
+            expect(text).not.toContain('test-api-key');
+            expect(text).not.toContain('test-api-secret');
+            expect(emitted().filter(frame => frame.ticker || frame.filters || frame.startup_status)
+                .every(frame => !Object.hasOwn(frame, 'spot_account_fingerprint'))).toBe(true);
+        });
+
+        it('does not stamp Futures account or command data as Spot-owned', async () => {
+            await connectRenderer();
+            await placeFuturesOrder('futures-identity-regression');
+            const frames = emitted();
+            expect(frames.some(frame => frame.futures_execution_update)).toBe(true);
+            expect(frames.every(frame => !Object.hasOwn(frame, 'spot_account_fingerprint'))).toBe(true);
+        });
+
         it('uses no retired REST listenKey, catches up balances/orders and publishes identity-scoped health', async () => {
             await connectRenderer('spot');
             expect(moduleMocks.spotPrivateSockets).toHaveLength(1);

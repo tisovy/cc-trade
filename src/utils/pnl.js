@@ -4,20 +4,22 @@
  * Takes a snapshot when you reset, then calculates change from current balance
  */
 
-const STORAGE_KEY = 'pnl_snapshots';
+import { readSpotAccountFingerprint, readSpotAccountStorage, writeSpotAccountStorage } from './spotAccountScope.js';
+const PERIODS = ['day', 'week', 'month', 'all'];
 
 // Load P&L data from localStorage
-export const loadPnLData = () => {
-    try {
-        const stored = localStorage.getItem(STORAGE_KEY);
-        if (!stored) {
-            return getDefaultPnLData();
-        }
-        return JSON.parse(stored);
-    } catch (err) {
-        console.error('Error loading P&L data:', err);
-        return getDefaultPnLData();
+export const loadPnLData = (fingerprint) => {
+    const data = getDefaultPnLData();
+    const stored = readSpotAccountStorage('pnl_snapshots', fingerprint);
+    for (const period of PERIODS) {
+        const snapshot = stored?.snapshots?.[period];
+        if (snapshot && Number.isFinite(snapshot.timestamp) && snapshot.timestamp > 0
+            && ['totalUSDT', 'totalBTC', 'btcPrice'].every(key => Number.isFinite(snapshot[key]) && snapshot[key] >= 0)
+            && snapshot.btcPrice > 0) data.snapshots[period] = snapshot;
+        const count = stored?.tradesSince?.[period];
+        if (Number.isSafeInteger(count) && count >= 0) data.tradesSince[period] = count;
     }
+    return data;
 };
 
 // Get default P&L structure with snapshots
@@ -39,13 +41,8 @@ const getDefaultPnLData = () => ({
 });
 
 // Save P&L data to localStorage
-export const savePnLData = (data) => {
-    try {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
-    } catch (err) {
-        console.error('Error saving P&L data:', err);
-    }
-};
+export const savePnLData = (data, fingerprint) =>
+    writeSpotAccountStorage('pnl_snapshots', fingerprint, data);
 
 /**
  * Compute the start of the calendar period that the given timestamp falls into.
@@ -173,8 +170,9 @@ export const calculateTotalUSDT = (balances, ticker) => {
 /**
  * Take a balance snapshot for a period
  */
-export const takeSnapshot = (period, balances, ticker, portfolio = null) => {
-    const data = loadPnLData();
+export const takeSnapshot = (period, balances, ticker, portfolio = null, fingerprint = null) => {
+    const data = loadPnLData(fingerprint);
+    if (!readSpotAccountFingerprint(fingerprint) || !PERIODS.includes(period)) return data;
     // Reuse the caller's already-computed totals when provided, to avoid
     // recomputing the whole portfolio over the same balances/ticker.
     const { totalUSDT, totalBTC, btcPrice } = portfolio || calculatePortfolioValue(balances, ticker);
@@ -198,7 +196,7 @@ export const takeSnapshot = (period, balances, ticker, portfolio = null) => {
     };
     data.tradesSince[period] = 0;
 
-    savePnLData(data);
+    savePnLData(data, fingerprint);
     return data;
 };
 
@@ -252,12 +250,15 @@ const flatPnL = (period, snapshot, tradeCount, btcPrice) => {
 /**
  * Calculate P&L by comparing current balance to snapshot
  */
-export const calculatePnL = (period, balances, ticker) => {
-    let data = loadPnLData();
+export const calculatePnL = (period, balances, ticker, fingerprint) => {
+    let data = loadPnLData(fingerprint);
     let snapshot = data.snapshots[period];
 
     const portfolio = calculatePortfolioValue(balances, ticker);
     const { totalUSDT: currentUSDT, totalBTC: currentBTC, btcPrice } = portfolio;
+    if (!readSpotAccountFingerprint(fingerprint) || !PERIODS.includes(period)) {
+        return emptyPnL(period, currentUSDT, currentBTC, btcPrice, 0);
+    }
 
     // Only trust these totals once prices have loaded and balances are populated.
     // Acting on a half-loaded tick is what produced the zero-baseline and
@@ -272,7 +273,7 @@ export const calculatePnL = (period, balances, ticker) => {
         // Anchor only on complete data with real value, so we never persist a
         // zero/partial baseline (which would later show a fake gain or loss).
         if (dataReady && currentUSDT > 0) {
-            data = takeSnapshot(period, balances, ticker, portfolio);
+            data = takeSnapshot(period, balances, ticker, portfolio, fingerprint);
             snapshot = data.snapshots[period];
         } else {
             return emptyPnL(period, currentUSDT, currentBTC, btcPrice, data.tradesSince[period]);
@@ -319,19 +320,19 @@ export const calculatePnL = (period, balances, ticker) => {
 /**
  * Increment trade count for all periods (called when new trade happens)
  */
-export const incrementTradeCount = () => {
-    const data = loadPnLData();
+export const incrementTradeCount = (fingerprint) => {
+    const data = loadPnLData(fingerprint);
     ['day', 'week', 'month', 'all'].forEach(period => {
         data.tradesSince[period] = (data.tradesSince[period] || 0) + 1;
     });
-    savePnLData(data);
+    savePnLData(data, fingerprint);
 };
 
 /**
  * Reset P&L for a period by taking a new snapshot
  */
-export const resetPnL = (period, balances, ticker) => {
-    return takeSnapshot(period, balances, ticker);
+export const resetPnL = (period, balances, ticker, fingerprint) => {
+    return takeSnapshot(period, balances, ticker, null, fingerprint);
 };
 
 /**
@@ -346,8 +347,8 @@ export const syncWithHistory = (_orderHistory) => {
 /**
  * Get formatted time range label
  */
-export const getTimeRangeLabel = (period, data) => {
-    const pnlData = data || loadPnLData();
+export const getTimeRangeLabel = (period, data, fingerprint) => {
+    const pnlData = data || loadPnLData(fingerprint);
     const snapshot = pnlData.snapshots?.[period];
 
     // A snapshot that has rolled past its period boundary is no longer the active
@@ -371,4 +372,3 @@ export const getTimeRangeLabel = (period, data) => {
             return 'No snapshot';
     }
 };
-

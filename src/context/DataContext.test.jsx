@@ -8,6 +8,7 @@ import { NotificationProvider } from './NotificationProvider'
 import { useNotifications } from '../hooks/useNotifications'
 import { readDeskFrame } from '../utils/deskFrameRouter'
 import { SPOT_CHART_MAX_ROWS } from '../utils/spotChartHistory'
+import { isSpotAccountPayload } from '../utils/spotAccountScope'
 
 const webSocketMocks = vi.hoisted(() => ({
     connection: { readyState: 1 },
@@ -20,11 +21,12 @@ vi.mock('../hooks/useWebSocket', () => ({
     default: vi.fn((_url, _detail, handleMessage) => {
         // Standing in for the socket boundary, which is where a frame is read
         // and named before any of this is handed it.
-        webSocketMocks.handleMessage = (event, connection) => handleMessage(
-            event,
-            connection,
-            readDeskFrame(event?.data),
-        )
+        webSocketMocks.handleMessage = (event, connection) => {
+            const payload = JSON.parse(event.data)
+            const data = isSpotAccountPayload(payload)
+                ? JSON.stringify({ ...payload, spot_account_fingerprint: 'a'.repeat(64) }) : event.data
+            handleMessage({ ...event, data }, connection ?? webSocketMocks.connection, readDeskFrame(data))
+        }
         return {
             send: vi.fn(),
             readyState: 1,

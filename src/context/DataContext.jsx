@@ -18,6 +18,7 @@ import {
   spotChartOpenTimeAt,
 } from '../utils/spotChartHistory';
 import { incrementTradeCount } from '../utils/pnl';
+import { isSpotAccountPayload, readSpotAccountFingerprint, readSpotAccountStorage, writeSpotAccountStorage } from '../utils/spotAccountScope.js';
 import { answersUnresolvedCommand } from '../utils/unresolvedCommandIdentity.js';
 import { readUnresolvedOrderPostcondition } from '../utils/orderMutationPostcondition.js';
 import {
@@ -44,7 +45,6 @@ const ANALYTICS_LIMIT = 40;
 const STORAGE_KEYS = {
   PANEL: 'panel',
   MARKET_HISTORY: 'market_history',
-  ORDER_HISTORY: 'orders_history',
   ENABLED_MARKET_BALANCE: 'enabled_market_balance',
   TRADE_NOTIONAL_FILTER: 'trade_notional_filter',
   ACTIVITY_VOLUME_FILTER: 'activity_volume_filter',
@@ -225,6 +225,11 @@ export const DataProvider = ({
   const [miniCharts, setMiniCharts] = useState({});
   const [balances, setBalances] = useState({});
   const [orders, setOrders] = useState([]);
+  const accountAuthorityRef = useRef(null);
+  const [accountSnapshot, setAccountSnapshot] = useState(null);
+  const accountIsCurrent = !!wsConnection && wsConnection.readyState === 1
+    && accountSnapshot?.connection === wsConnection;
+  const spotAccountFingerprint = accountIsCurrent ? accountSnapshot.fingerprint : null;
   // The last Spot command outcome the exchange or the transport reported.
   // Stays until the operator dismisses it: a refusal that scrolls away
   // unnoticed is the same as no refusal at all.
@@ -255,11 +260,8 @@ export const DataProvider = ({
     const numeric = Number(stored);
     return Number.isFinite(numeric) && numeric > 0 ? numeric : DEFAULT_ANALYTICS_VOLUME_FILTER;
   });
-  const historyCacheFromStorage = buildHistoryCacheFromStorage(
-    readStorage(STORAGE_KEYS.ORDER_HISTORY, []),
-    initialPanelState.selected
-  );
-  const historyBySymbolRef = useRef(historyCacheFromStorage);
+  // No unattributed history is loaded until main identifies the current account.
+  const historyBySymbolRef = useRef({});
   const [history, setHistory] = useState(() => {
     const key = normalizeSymbolKey(initialPanelState.selected);
     return historyBySymbolRef.current[key] ?? [];
@@ -296,19 +298,21 @@ export const DataProvider = ({
 
   const updateHistoryCache = useCallback(
     (entries, symbolHint) => {
-      if (!Array.isArray(entries)) return;
+      const authority = accountAuthorityRef.current;
+      if (!Array.isArray(entries) || !authority || authority.connection !== wsConnection) return;
       const normalizedSymbol = resolveHistorySymbolFromEntries(entries, symbolHint ?? panel.selected);
       historyBySymbolRef.current[normalizedSymbol] = entries;
-      writeStorage(STORAGE_KEYS.ORDER_HISTORY, historyBySymbolRef.current);
+      writeSpotAccountStorage('orders_history', authority.fingerprint, historyBySymbolRef.current);
       if (normalizedSymbol === normalizeSymbolKey(panel.selected)) {
         setHistory(entries);
       }
     },
-    [panel.selected]
+    [panel.selected, wsConnection]
   );
 
   // Get all history across all symbols (for P&L calculation)
   const getAllHistory = useCallback(() => {
+    if (!accountIsCurrent) return [];
     const allHistory = [];
     Object.values(historyBySymbolRef.current).forEach(symbolHistory => {
       if (Array.isArray(symbolHistory)) {
@@ -316,7 +320,7 @@ export const DataProvider = ({
       }
     });
     return allHistory;
-  }, []);
+  }, [accountIsCurrent]);
 
   const refreshAnalytics = useCallback(async () => {
     if (analyticsAbortControllerRef.current) {
@@ -1214,7 +1218,7 @@ export const DataProvider = ({
         if (Array.isArray(extra)) {
           historyRef.current = extra;
           updateHistoryCache(extra, extra[0]?.symbol ?? panel.selected);
-          incrementTradeCount();
+          incrementTradeCount(accountAuthorityRef.current?.fingerprint);
         }
         break;
 
@@ -1265,6 +1269,35 @@ export const DataProvider = ({
     // from, not with the frame, and untangling that is its own change.
     const rawMessage = frame?.payload;
     if (rawMessage === null || typeof rawMessage !== 'object') return;
+
+    // Old connections cannot answer for the new desk, including held outcomes.
+    if (_connection !== wsConnection || !wsConnection || wsConnection.readyState !== 1) return;
+    if (isSpotAccountPayload(rawMessage)) {
+      const fingerprint = readSpotAccountFingerprint(rawMessage.spot_account_fingerprint);
+      if (!fingerprint) return;
+      const previous = accountAuthorityRef.current;
+      let authority = previous;
+      if (previous?.connection !== _connection || previous?.fingerprint !== fingerprint) {
+        authority = { connection: _connection, fingerprint, balancesReady: false };
+        accountAuthorityRef.current = authority;
+        ordersRef.current = [];
+        setOrders([]);
+        setBalances({});
+        historyBySymbolRef.current = buildHistoryCacheFromStorage(
+          readSpotAccountStorage('orders_history', fingerprint, {}), panelRef.current.selected,
+        );
+        historyRef.current = historyBySymbolRef.current[normalizeSymbolKey(panelRef.current.selected)] ?? [];
+        setHistory(historyRef.current);
+        if (previous?.fingerprint && previous.fingerprint !== fingerprint) {
+          setOutcomes({ command: null, unresolved: null });
+        }
+      }
+      if (Object.hasOwn(rawMessage, 'balances') || rawMessage.type === 'balances') {
+        authority = { ...authority, balancesReady: true };
+        accountAuthorityRef.current = authority;
+      }
+      if (authority !== previous) setAccountSnapshot(authority);
+    }
 
     // A refused or unconfirmed Spot command used to reach only the main-process
     // log, so a failed order was invisible at the desk. Futures owns its own
@@ -1447,6 +1480,7 @@ export const DataProvider = ({
     touchChannel,
     activeDetailChannelId,
     handleGlobalMessage,
+    wsConnection,
   ]);
 
   useEffect(() => addMessageListener(handleSocketUpdate), [
@@ -1508,8 +1542,9 @@ export const DataProvider = ({
     panel,
     throttle,
     chart,
-    balances,
-    orders,
+    balances: accountIsCurrent && accountSnapshot.balancesReady ? balances : {},
+    orders: accountIsCurrent ? orders : [],
+    spotAccountFingerprint,
     spotPrivateStatus: spotEnabled ? spotPrivateStatus : { state: 'unconfirmed', reason: null },
     commandOutcome,
     dismissCommandOutcome,
@@ -1518,7 +1553,7 @@ export const DataProvider = ({
     filters,
     depth,
     trades,
-    history,
+    history: accountIsCurrent ? history : [],
     getAllHistory,
     ticker,
     marketHistory,
