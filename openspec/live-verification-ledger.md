@@ -1098,3 +1098,21 @@ fixed; the changes named are written and strictly valid, for the owner's review:
   by transport) and its resynchronization; each re-open reads the store's
   window (hit) and the exchange's (weight 5).
 
+## keep-spot-selection-and-packaged-ui-consistent — 2026-09-04
+
+Status: implementation and local verification are recorded in the active
+change; **operator confirmation pending**, not archived.
+
+- **Spot selection (audit F03):** confirm rapid pair and interval switching,
+  including returning to the first pair, with cached data and live public market
+  updates. Selection, chart and depth must agree, with no previous-selection
+  rows during the cache wait. No real order is required for this check.
+- **Packaged window (audit F04):** launch the locally built directory package
+  without a Vite dev server and confirm the normal window, renderer assets and
+  workspace load. Archive inspection alone is not a launched-window check.
+- **Why outstanding:** implementation verification does not start the operator's
+  production session, restart services, or send exchange mutations. Confirmation
+  must come from the operator; task 3.3 remains unchecked until then.
+- **Boundary:** these fixes do not close audit F01/F02/F05 or the remaining P2
+  and architectural findings. In particular, a successfully packaged Spot UI
+  is not evidence of healthy private-stream delivery or safe SDK error handling.

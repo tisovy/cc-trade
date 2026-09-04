@@ -86,6 +86,26 @@ npm run build
 npm run dist
 ```
 
+Distributables are written to `release/`, separately from the renderer build in
+`dist/`. Packaging includes only built first-party runtime files and production
+dependencies; local `.env` files, source, tests, OpenSpec and archives are not
+application resources. Supply runtime credentials through the launch environment,
+not files placed inside the distribution.
+
+The packaging hook checks the actual `app.asar`, including every renderer build
+asset and the production main/preload. For a local Linux directory package
+without publishing or starting the app:
+
+```bash
+npm run dist -- --linux --dir --publish never
+npm run check:packaged-app -- "$PWD/release/linux-unpacked/resources/app.asar"
+```
+
+The standalone archive check verifies its manifest, entry assets and allowed
+contents; the packaging hook additionally compares the full renderer build
+inventory, including lazy chunks. Neither check proves a launched window:
+packaged-window acceptance remains a separate operator check.
+
 ## Testing
 
 ```bash

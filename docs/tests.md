@@ -26,6 +26,18 @@
 - `npm run check:circular`, `check:runtime-mock`, `check:futures-production`, and `check:command-path`: retained static architecture and safety gates.
 - `npm run test:all`: aggregate of every command above.
 - `npm run e:smoke`: bounded deterministic Electron readiness smoke; this is not part of `test:all`.
+- `npm run dist -- --linux --dir --publish never`: fresh production build and
+  local Linux directory package under `release/`, with the actual ASAR checked
+  by the packaging hook. This does not launch the application or publish it.
+- `npm run check:packaged-app -- /absolute/path/to/app.asar`: inspect an existing
+  application archive without execution. The packaging hook also compares all
+  renderer build files, including lazy-loaded chunks, with the archive.
+
+The unit suite exercises electron-builder's real file matcher and a real
+temporary ASAR fixture. These are retained file/contract checks, not a browser
+runner or evidence of a live trading session. `release/` is excluded from lint
+and Vitest discovery; application dependencies inside a package are not tests of
+the source checkout.
 
 Vitest owns deterministic in-memory `localStorage` and `sessionStorage` for
 every test. The standard `npm test` command requires no storage-related

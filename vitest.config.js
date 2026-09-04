@@ -16,6 +16,6 @@ export default defineConfig({
         globals: true,
         setupFiles: './src/test/setup.js',
         unstubGlobals: true,
-        exclude: ['**/node_modules/**', '**/dist/**'],
+        exclude: ['**/node_modules/**', '**/dist/**', '**/release/**'],
     },
 })

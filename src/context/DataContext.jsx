@@ -211,6 +211,10 @@ export const DataProvider = ({
     return basePanel;
   })();
   const [panel, setPanel] = useState(initialPanelState);
+  const panelRef = useRef(initialPanelState);
+  const chartOpeningGenerationRef = useRef(0);
+  const chartOpeningRef = useRef(null);
+  const [chartOpening, setChartOpening] = useState(null);
   const [enabledMarketBalance, setEnabledMarketBalance] = useState(() => {
     return readStorage(STORAGE_KEYS.ENABLED_MARKET_BALANCE, false);
   });
@@ -543,13 +547,14 @@ export const DataProvider = ({
   }));
 
   useEffect(() => {
-    if (!spotEnabled || !startupStatus.ready) {
+    if (!spotEnabled || !startupStatus.ready || chartOpening) {
       setSpotDetailSubscription(null);
       return undefined;
     }
     setSpotDetailSubscription(detailSubscription);
     return () => setSpotDetailSubscription(null);
   }, [
+    chartOpening,
     detailSubscription,
     setSpotDetailSubscription,
     spotEnabled,
@@ -823,20 +828,22 @@ export const DataProvider = ({
   }, []);
 
   const handlePanelUpdate = useCallback((newPanel, shouldUpdateChart = false) => {
+    const currentPanel = panelRef.current;
     if (shouldUpdateChart) {
-      const nextSelected = newPanel?.selected ?? panel.selected;
-      const nextInterval = newPanel?.interval ?? panel.interval;
+      const nextSelected = newPanel?.selected ?? currentPanel.selected;
+      const nextInterval = newPanel?.interval ?? currentPanel.interval;
       const resolvedPanel = {
         ...newPanel,
         selected: nextSelected,
         interval: nextInterval,
       };
-      const symbolChanged = nextSelected !== panel.selected;
-      const requestId = `${nextSelected}-${nextInterval}-${Date.now()}`;
+      const symbolChanged = nextSelected !== currentPanel.selected;
+      const generation = ++chartOpeningGenerationRef.current;
+      const requestId = `${nextSelected}-${nextInterval}-${Date.now()}-${generation}`;
 
       if (symbolChanged) {
-        if (nextSelected.indexOf(panel.market) === -1) {
-          resolvedPanel.market = panel.market === 'USDT' ? 'BTC' : 'USDT';
+        if (nextSelected.indexOf(currentPanel.market) === -1) {
+          resolvedPanel.market = currentPanel.market === 'USDT' ? 'BTC' : 'USDT';
         } else if (nextSelected === 'BTCUSDT') {
           resolvedPanel.market = 'USDT';
         }
@@ -859,29 +866,15 @@ export const DataProvider = ({
       chartHistoryRequestRef.current = null;
       chartSelectionRef.current = `${nextSelected}:${nextInterval}`;
       setChartHistoryExhausted(false);
-
-      // Try to load cached data first for instant display
-      const loadCachedFirst = async () => {
-        const cached = await getCachedCandles(nextSelected, nextInterval);
-        if (cached && cached.candles.length > 0) {
-          // The stored run is the depth an earlier session already pulled in,
-          // not just the last live window: it is presented whole, and the
-          // bootstrap that follows merges into it rather than replacing it.
-          setChart(cached.candles);
-          // If we have cached data, clear loading immediately - data is visible
-          // The chart will update seamlessly when fresh data arrives
-          setIsLoading(false);
-          setIsChartLoading(false);
-          setLoadingMessage('');
-          return true; // indicate we have cached data
-        } else {
-          setChart([]);
-          if (symbolChanged) {
-            setLoadingMessage(`Loading ${nextSelected}...`);
-          }
-          return false;
-        }
-      };
+      chartQueueRef.current = [];
+      if (chartFlushTimerRef.current) {
+        clearTimeout(chartFlushTimerRef.current);
+        chartFlushTimerRef.current = null;
+      }
+      chartSeriesRef.current = [];
+      setChart([]);
+      isFinalRef.current = false;
+      setIsFinal(false);
 
       if (symbolChanged) {
         setTrades([]);
@@ -899,28 +892,59 @@ export const DataProvider = ({
 
       pendingPairRef.current = `${nextSelected}:${nextInterval}`;
 
-      // Load cache first, then subscribe to live data
-      loadCachedFirst().then(() => {
-        setDetailSubscription({
-          symbol: nextSelected,
-          interval: nextInterval,
-          requestId,
-          panelState: { ...panel, ...resolvedPanel },
-        });
-        // If no cached data, loading overlay stays until fresh data arrives
-      });
-
-      setPanel(prev => ({ ...prev, ...resolvedPanel }));
+      // Invalidate synchronously: two selections can happen before an effect
+      // cleanup, and A -> B -> A must not revive the first A's cache read.
+      const opening = { symbol: nextSelected, interval: nextInterval, requestId, generation };
+      chartOpeningRef.current = opening;
+      setChartOpening(opening);
+      panelRef.current = { ...currentPanel, ...resolvedPanel };
+      setPanel(panelRef.current);
       setUpdateChart(true);
     } else {
-      const nextPanel = { ...panel, ...newPanel };
+      const nextPanel = { ...currentPanel, ...newPanel };
+      panelRef.current = nextPanel;
       setPanel(nextPanel);
       setDetailSubscription(prev => ({
         ...prev,
         panelState: nextPanel
       }));
     }
-  }, [panel]);
+  }, []);
+
+  useEffect(() => {
+    if (!spotEnabled || !chartOpening) return undefined;
+    let cancelled = false;
+    const loadCachedFirst = async () => {
+      let cached;
+      try {
+        cached = await getCachedCandles(chartOpening.symbol, chartOpening.interval);
+      } catch {
+        // Cache availability must not prevent the live subscription.
+        cached = null;
+      }
+      if (cancelled || chartOpeningRef.current !== chartOpening) return;
+
+      if (Array.isArray(cached?.candles) && cached.candles.length > 0) {
+        // Preserve all stored depth; the later live bootstrap wins overlaps.
+        setChart(cached.candles);
+        setIsLoading(false);
+        setIsChartLoading(false);
+        setLoadingMessage('');
+      }
+      setDetailSubscription({
+        symbol: chartOpening.symbol,
+        interval: chartOpening.interval,
+        requestId: chartOpening.requestId,
+        panelState: panelRef.current,
+      });
+      chartOpeningRef.current = null;
+      setChartOpening(null);
+    };
+    void loadCachedFirst();
+    // Disabling/unmounting cancels this attempt. Re-enabling restarts only the
+    // latest still-pending opening; an already completed one is not re-read.
+    return () => { cancelled = true; };
+  }, [chartOpening, spotEnabled]);
 
   /**
    * Ask for the page of closed candles behind the oldest one loaded.
@@ -1295,7 +1319,9 @@ export const DataProvider = ({
 
       if (isDetailChannel) {
         // Verify symbol/interval match current subscription
-        if (symbol !== detailSubscription.symbol || interval !== detailSubscription.interval) {
+        if (chartOpeningRef.current
+          || symbol !== panelRef.current.selected || interval !== panelRef.current.interval
+          || symbol !== detailSubscription.symbol || interval !== detailSubscription.interval) {
           // Stale message from old subscription, drop it
           return;
         }
@@ -1356,11 +1382,15 @@ export const DataProvider = ({
 
     // Filter by symbol (and interval for chart)
     if (type === 'chart') {
-      if (requestSymbol !== detailSubscription.symbol || requestInterval !== detailSubscription.interval) {
+      if (chartOpeningRef.current
+        || requestSymbol !== panelRef.current.selected || requestInterval !== panelRef.current.interval
+        || requestSymbol !== detailSubscription.symbol || requestInterval !== detailSubscription.interval) {
         return;
       }
     } else if (['trades', 'depth'].includes(type)) {
-      if (requestSymbol && requestSymbol !== detailSubscription.symbol) {
+      if (chartOpeningRef.current
+        || (requestSymbol && requestSymbol !== panelRef.current.selected)
+        || (requestSymbol && requestSymbol !== detailSubscription.symbol)) {
         return;
       }
     }

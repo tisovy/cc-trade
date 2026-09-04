@@ -20,7 +20,7 @@ const nodeLanguageOptions = {
 }
 
 export default defineConfig([
-  globalIgnores(['dist', 'dist-electron']),
+  globalIgnores(['dist', 'dist-electron', 'release']),
   {
     files: ['**/*.{js,jsx}'],
     extends: [

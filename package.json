@@ -9,6 +9,20 @@
   "engines": {
     "node": "^20.19.0 || >=22.12.0"
   },
+  "build": {
+    "directories": {
+      "output": "release"
+    },
+    "asar": true,
+    "files": [
+      "dist/**/*",
+      "dist-electron/main.js",
+      "dist-electron/preload.cjs",
+      "!**/*.map",
+      "!**/.env{,.*}"
+    ],
+    "afterPack": "./scripts/check-packaged-app.mjs"
+  },
   "scripts": {
     "e": "PORT=5174 VITE_DEV_SERVER_URL=http://localhost:5174 vite",
     "e:safe": "BUILD_MODE=safe-dev PORT=5174 VITE_DEV_SERVER_URL=http://localhost:5174 vite",
@@ -29,6 +43,7 @@
     "test:all": "npm run test && npm run lint && npm run build && npm run check:circular && npm run check:runtime-mock && npm run check:futures-production && npm run check:command-path",
     "check:circular": "node scripts/check-circular-imports.mjs",
     "check:electron-build-artifacts": "node scripts/check-electron-build-artifacts.mjs",
+    "check:packaged-app": "node scripts/check-packaged-app.mjs",
     "check:runtime-mock": "node scripts/check-runtime-mock-layer.mjs",
     "check:futures-production": "node scripts/check-futures-workstation-boundaries.mjs",
     "check:command-path": "node scripts/check-trading-command-path.mjs",
