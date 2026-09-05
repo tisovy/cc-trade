@@ -1,5 +1,10 @@
 # F05 dependency implementation evidence — 2026-09-04
 
+This is the original implementation checkpoint. Its pending-audit/acceptance
+wording is superseded by the later [registry audit](registry-audit-evidence.md)
+and [operator acceptance](tasks.md). Historical results below are preserved;
+they are not relabeled as the fresh scan or as independently observed live tests.
+
 ## Selected baseline
 
 | Component | Before | Locked after |

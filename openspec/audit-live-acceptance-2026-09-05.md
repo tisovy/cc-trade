@@ -47,7 +47,7 @@ does not relabel them as observed in production.
 ## Kept active after the initial observation
 
 - [keep-spot-selection-and-packaged-ui-consistent](changes/archive/2026-09-05-keep-spot-selection-and-packaged-ui-consistent/tasks.md): task 3.3 explicitly requires rapid selection and a packaged window. The initial report did not establish those additional checks; the later follow-up below closes this gate.
-- [refresh-the-desktop-security-baseline](changes/refresh-the-desktop-security-baseline/tasks.md): the explicit packaged-window acceptance and separate permission-gated registry audit remain outstanding. No dependency-metadata disclosure is authorized by the live report.
+- [refresh-the-desktop-security-baseline](changes/archive/2026-09-05-refresh-the-desktop-security-baseline/tasks.md): the explicit packaged-window acceptance and separate permission-gated registry audit remained outstanding at this initial checkpoint. No dependency-metadata disclosure was authorized by the live report.
 
 Nothing was silently carried away or dropped: those changes and their unchecked
 tasks stayed active at this checkpoint. Git push is also not authorized by this observation and is
@@ -96,7 +96,7 @@ revision. No failure injection, adversarial race or security-audit result is
 inferred, and the earlier local test/package evidence is not relabeled as live.
 
 - Task 3.3 of [keep-spot-selection-and-packaged-ui-consistent](changes/archive/2026-09-05-keep-spot-selection-and-packaged-ui-consistent/tasks.md) is satisfied; the spec-driven change is archived under the `2026-09-05-` prefix with all tasks complete.
-- Task 2.5 of [refresh-the-desktop-security-baseline](changes/refresh-the-desktop-security-baseline/tasks.md) is satisfied. This change remains active only for task 2.4: separate registry-audit disclosure permission and the audit result.
+- Task 2.5 of [refresh-the-desktop-security-baseline](changes/archive/2026-09-05-refresh-the-desktop-security-baseline/tasks.md) is satisfied. At this checkpoint the change remained active only for task 2.4: separate registry-audit disclosure permission and the audit result.
 
 The reply reports application behavior, not consent to the separate `npm audit`
 question. No registry audit or push is performed. This brings the selected audit
@@ -121,3 +121,34 @@ Code, dependencies and main specs are unchanged. Source tests were not rerun for
 this documentation-only follow-up; the earlier 3,528-test checkpoint remains
 historical local evidence. The retained change has exactly one unchecked task,
 2.4, and the documentation diff passes the whitespace check.
+
+## Registry audit and final batch closure — 2026-09-05
+
+After a separate explanation that `npm audit` sends dependency names and versions
+to npm registry, the operator instructed “работай дальше”. The assistant stated
+that this would be treated as permission specifically for that check, and the
+execution approval layer allowed the scoped command. The earlier behavior-only
+messages are not retroactively treated as disclosure consent.
+
+The fresh scan exited 0 and reported zero known vulnerabilities; the local
+seven-copy dependency baseline also passed. The command, tool versions, manifest
+and lockfile hashes, complete JSON and coverage limitations are preserved in the
+[registry evidence](changes/archive/2026-09-05-refresh-the-desktop-security-baseline/registry-audit-evidence.md).
+No dependency, production or main-spec change was necessary. The previous
+packaged-use acceptance still applies; the scan is not a new live observation.
+
+Task 2.4 is complete. The spec-driven security-baseline change is archived with
+all ten tasks complete and both delta requirements already matching main specs.
+This completes archival of all 13 changes in the selected audit batch, not every
+proposal in this repository or every architectural follow-up. No Git push,
+trading session, deployment or credential operation is authorized or performed.
+
+Strict validation passed before archive and for all 23 main specs afterward.
+All eight security-change files (including the added raw report/evidence and
+`.openspec.yaml`) match their post-edit, pre-move SHA-256 inventory. All 49
+relative links across nine archive/report Markdown files resolve. The saved
+JSON matches the captured audit stdout; manifest/lockfile hashes still match
+the recorded checkpoint. All 13 selected archive directories exist, their old
+active paths are absent and their tasks contain no unchecked item. Production,
+dependency and main-spec diffs are empty; the documentation whitespace check
+passes. Source tests were not rerun for this evidence-only closure.

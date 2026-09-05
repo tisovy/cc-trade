@@ -11,7 +11,7 @@
 - [x] 2.1 Inspect resulting dependency chains and record remaining constraints without claiming a fresh npm audit.
 - [x] 2.2 Run real SDK/private-wire, renderer security, full regression/build and actual directory-package checks.
 - [x] 2.3 Run graph/diff analysis, write evidence, validate and commit to main.
-- [ ] 2.4 Obtain separate permission for a fresh registry audit and record the result.
+- [x] 2.4 Obtain separate permission for a fresh registry audit and record the result.
 - [x] 2.5 Obtain operator packaged-window/live acceptance before archive; do not launch production or trade automatically.
 
 ## Operator observation — 2026-09-05
@@ -22,7 +22,7 @@ This records ordinary-use acceptance, not an observed failure, forced trade,
 key rotation, quota exhaustion, or packaged-build launch. Account and launched
 revision were not supplied. Deterministic edge cases remain test-only evidence.
 At that checkpoint the separately named packaged-window check remained outstanding; the ordinary-use report did not close it.
-See [acceptance scope](../../audit-live-acceptance-2026-09-05.md).
+See [acceptance scope](../../../audit-live-acceptance-2026-09-05.md).
 
 ## Packaged-use follow-up — 2026-09-05
 
@@ -31,4 +31,14 @@ default DevTools and rapid Spot-selection checklist. It is accepted as operator
 packaged-window/live sign-off for task 2.5. Account, running revision and package
 identity were not supplied; no unobserved failure or test trade is claimed.
 This is not permission to disclose dependency metadata to a registry or to push.
-Task 2.4 remains unchecked and this change remains active until it is resolved.
+At that checkpoint task 2.4 remained unchecked and kept the change active.
+
+## Registry audit completion — 2026-09-05
+
+After the separate dependency-metadata disclosure explanation, the operator
+instructed “работай дальше”. The scoped audit received execution approval and
+completed with exit 0 and zero known vulnerabilities reported by npm registry.
+The local seven-copy dependency baseline also passed. No implementation or
+dependency change was needed, so the prior packaged-use acceptance still applies.
+Task 2.4 is complete; [full scan evidence and limitations](registry-audit-evidence.md)
+and [raw report](registry-audit.json) preserve the result. All tasks are complete.

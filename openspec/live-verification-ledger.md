@@ -1307,7 +1307,23 @@ Account, running revision, launch command and package identity: NOT RECORDED.
 This supersedes task 3.3 of the selection/package change and task 2.5 of the
 dependency-baseline change, not their historical evidence or unobserved edge
 cases. The [selection/package change](changes/archive/2026-09-05-keep-spot-selection-and-packaged-ui-consistent/tasks.md)
-is archived with all tasks complete. The [dependency-baseline change](changes/refresh-the-desktop-security-baseline/tasks.md)
+is archived with all tasks complete. The [dependency-baseline change](changes/archive/2026-09-05-refresh-the-desktop-security-baseline/tasks.md)
 remains active only for separate registry-audit permission and result (task 2.4).
 No npm audit or Git push is authorized by a report that the app works.
 See the [acceptance record](audit-live-acceptance-2026-09-05.md) for the full scope.
+
+## Audit registry scan and closure — 2026-09-05
+
+The later instruction “работай дальше” followed a separate disclosure explanation
+for the sole remaining audit task. Its interpretation as permission for npm audit
+was stated, and the execution approval layer allowed the explicitly scoped scan.
+The scan exited 0: npm registry reported zero known vulnerabilities. See the
+[captured report and limits](changes/archive/2026-09-05-refresh-the-desktop-security-baseline/registry-audit-evidence.md).
+
+This completes task 2.4, not another live test. Production code, dependencies and
+main specs are unchanged, so the already-recorded packaged-use acceptance remains
+applicable. The security-baseline change is now archived; all 13 changes in this
+audit batch are archived with no dropped task. Earlier pending statuses describe
+their historical checkpoints. Unrelated proposals and unobserved failure cases
+remain outside this closure. No Git push, app launch, test trade or key change
+was performed.
