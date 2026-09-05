@@ -1295,3 +1295,19 @@ failure, replay/race, key-rotation, backlog, fatal-exit and other adversarial
 scenarios are not made live-confirmed by this message. No real test trade is
 claimed. The combined selection/package change and dependency-baseline change
 stay active for their separately named remaining checks and permission gates.
+
+## Audit packaged-use acceptance — 2026-09-05
+
+Later operator update: “все работает как надо”, following the explicit request
+to check the built application window, default-closed DevTools and rapid Spot
+pair/interval switching. Accepted as operator sign-off for that checklist and
+its live acceptance; no independent observation or test trade is claimed.
+Account, running revision, launch command and package identity: NOT RECORDED.
+
+This supersedes task 3.3 of the selection/package change and task 2.5 of the
+dependency-baseline change, not their historical evidence or unobserved edge
+cases. The [selection/package change](changes/archive/2026-09-05-keep-spot-selection-and-packaged-ui-consistent/tasks.md)
+is archived with all tasks complete. The [dependency-baseline change](changes/refresh-the-desktop-security-baseline/tasks.md)
+remains active only for separate registry-audit permission and result (task 2.4).
+No npm audit or Git push is authorized by a report that the app works.
+See the [acceptance record](audit-live-acceptance-2026-09-05.md) for the full scope.

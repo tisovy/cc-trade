@@ -1,5 +1,10 @@
 # Local verification — 2026-09-04
 
+Later operator acceptance is recorded in [tasks](tasks.md) and the
+[acceptance record](../../../audit-live-acceptance-2026-09-05.md).
+The pending-acceptance wording and package versions below describe the original
+local checkpoint, not the current archive status or the operator's package identity.
+
 Scope: audit F03/F04 only, starting from `aae31e6` on `main`. No trading
 transport, dependency version, credentials, external service, or existing
 candle-store change was modified. Production code preceded regression tests.

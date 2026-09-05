@@ -2,6 +2,10 @@
 
 ## Observation and scope
 
+This section records the initial ordinary-use checkpoint. The later
+[packaged-use follow-up](#packaged-use-follow-up--2026-09-05) below updates the
+remaining acceptance gates without changing the scope of the initial observation.
+
 Operator message: “проверил - вроде всё ок”. It followed the requested check of
 ordinary application use: default-closed DevTools and normal balances, history
 and chart loading. Record this as **ordinary-use acceptance with no reported
@@ -40,13 +44,13 @@ ordinary-use acceptance. Safety/error/recovery cases remain covered only by the
 named deterministic tests unless separate live evidence already exists; archive
 does not relabel them as observed in production.
 
-## Kept active
+## Kept active after the initial observation
 
-- [keep-spot-selection-and-packaged-ui-consistent](changes/keep-spot-selection-and-packaged-ui-consistent/tasks.md): task 3.3 explicitly requires rapid selection and a packaged window. This report does not establish those additional checks.
+- [keep-spot-selection-and-packaged-ui-consistent](changes/archive/2026-09-05-keep-spot-selection-and-packaged-ui-consistent/tasks.md): task 3.3 explicitly requires rapid selection and a packaged window. The initial report did not establish those additional checks; the later follow-up below closes this gate.
 - [refresh-the-desktop-security-baseline](changes/refresh-the-desktop-security-baseline/tasks.md): the explicit packaged-window acceptance and separate permission-gated registry audit remain outstanding. No dependency-metadata disclosure is authorized by the live report.
 
-Nothing is silently carried away or dropped: those changes and their unchecked
-tasks stay active. Git push is also not authorized by this observation and is
+Nothing was silently carried away or dropped: those changes and their unchecked
+tasks stayed active at this checkpoint. Git push is also not authorized by this observation and is
 not performed. Other active proposals, historical live-ledger findings and
 untracked user files remain out of scope.
 
@@ -76,3 +80,44 @@ rename/deletion entries are additionally covered by the complete 72-file
 inventory and staged-path review. Graph coverage is not treated as exhaustive.
 Both retained changes also passed strict validation. No production/spec file
 changed and the staged diff passed the whitespace check.
+
+## Packaged-use follow-up — 2026-09-05
+
+Later operator message: “все работает как надо”. The immediately preceding
+checklist explicitly requested the built application rather than dev mode:
+the window opens, DevTools remain closed by default, and rapid Spot pair/interval
+switching works correctly. No trades were required. This reply is accepted as
+operator sign-off to that checklist, including the outstanding live acceptance,
+not an independent observation or an exhaustive correctness claim.
+
+Running revision, package identity, launch command and account were not supplied.
+The checkout was `8711a73`, which is not proof of the running application's
+revision. No failure injection, adversarial race or security-audit result is
+inferred, and the earlier local test/package evidence is not relabeled as live.
+
+- Task 3.3 of [keep-spot-selection-and-packaged-ui-consistent](changes/archive/2026-09-05-keep-spot-selection-and-packaged-ui-consistent/tasks.md) is satisfied; the spec-driven change is archived under the `2026-09-05-` prefix with all tasks complete.
+- Task 2.5 of [refresh-the-desktop-security-baseline](changes/refresh-the-desktop-security-baseline/tasks.md) is satisfied. This change remains active only for task 2.4: separate registry-audit disclosure permission and the audit result.
+
+The reply reports application behavior, not consent to the separate `npm audit`
+question. No registry audit or push is performed. This brings the selected audit
+batch to 12 archived changes and one retained change, without dropping work.
+
+### Follow-up verification
+
+Before edits, GitNexus was bound to the primary `trade_ui_latest` checkout and
+refreshed at `8711a73`. The `Outstanding acceptance` section resolved to this
+change's evidence document. Its upstream/context walk reported no callers or
+processes (the installed tool labels this LOW); the empty result was treated as
+unresolved and supplemented with a reference scan, not as a runtime safety claim.
+
+Both delta requirements exactly match their main-spec blocks; no sync write was
+needed. All planning artifacts and selected tasks are complete. Both selected
+and retained changes passed strict validation before the move. The validated
+`openspec archive --yes --skip-specs` operation preserved all seven files,
+including `.openspec.yaml`, byte for byte against a pre-move SHA-256 inventory
+after the explicit acceptance/link edits. All 42 relative links across the
+11 archive/report files resolve; all 23 main specs pass strict validation.
+Code, dependencies and main specs are unchanged. Source tests were not rerun for
+this documentation-only follow-up; the earlier 3,528-test checkpoint remains
+historical local evidence. The retained change has exactly one unchecked task,
+2.4, and the documentation diff passes the whitespace check.
