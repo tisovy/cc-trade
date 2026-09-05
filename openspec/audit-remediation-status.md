@@ -41,7 +41,7 @@
 - Проверены 324 source files на циклы, 165 runtime modules без mock-слоя, 24 Futures boundary files и 131 command-path modules.
 - Свежий unsigned Linux x64 package: `release/self-audit-2026-09-05/linux-unpacked`; ASAR-контракт: 2062 файла / 10 renderer build files. SHA-256: `8254cd218d867dde6c254b0d01887820cd7db96d6876733ef2c7a250045ec348`. Приложение не запускалось.
 - GitNexus сообщил HIGH для account catch-up и CRITICAL для совокупного diff; предупреждения даны. Ограничения графа дополнены точечным source review и тестами, не объявлены исчезнувшими.
-- Синхронизация main specs выполняется отдельно от подтверждения live-приёмки; незакрытые live-задачи не снимаются ради архивации.
+- [Синхронизированы main specs](changes/close-audit-evidence-gaps/sync-evidence.md) для 13 изменений: 16 capabilities, 34 новых и 5 уточнённых требований; все 107 прежних сценариев сохранены, добавлено 111. Строго прошли 23 основные спецификации и все 13 изменений. Незакрытые live-задачи не сняты ради архивации.
 
 ### Предыдущая контрольная точка — до self-review
 

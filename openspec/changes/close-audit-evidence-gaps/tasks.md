@@ -11,6 +11,6 @@
 - [x] 2.1 Add regressions after production code, including malformed success, no mutation replay, stale catch-up and DevTools policy.
 - [x] 2.2 Complete the prior-work audit, run full local gates and inspect a fresh package without launching it.
 - [x] 2.3 Record evidence and remaining limitations; validate OpenSpec and GitNexus all/compare-main before committing fixes on main.
-- [ ] 2.4 Synchronize the 12 prior implemented changes and this follow-up into main specs; validate, verify no lost scenarios and commit synchronization.
+- [x] 2.4 Synchronize the 12 prior implemented changes and this follow-up into main specs; validate, verify no lost scenarios and commit synchronization.
 - [ ] 2.5 Obtain operator confirmation on live data for the applicable changes before archiving; do not claim unobserved scenarios completed.
 - [x] 2.6 Correct current launch/branch documentation drift and document explicit DevTools opt-in; retain historical audit evidence.

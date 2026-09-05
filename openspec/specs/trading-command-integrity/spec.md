@@ -53,19 +53,20 @@ the operator as a rejection, and SHALL NOT be presented as a success.
 - **THEN** it is classified exactly as the equivalent Futures failure is
 
 ### Requirement: An unresolved outcome is reconciled before any resubmission
-The system SHALL resolve an unresolved outcome by querying the exchange for the
-order under the command's client identity, with bounded retries, before the
-same intent may be submitted again. Resubmission SHALL be permitted only when
-the exchange reports no order under that identity, and SHALL reuse the original
-identity. When reconciliation cannot resolve the outcome, the system SHALL
-report it as unresolved and SHALL NOT offer a retry control.
+The system SHALL reconcile an unresolved order mutation using bounded read-only
+queries under its requested identity. Confirmation SHALL require the requested
+action's postcondition: placement acceptance, cancelled status, or exact requested
+amendment terms. Repeated explicit absence may settle placement only; it SHALL
+NOT prove cancellation or amendment. Any permitted resubmission SHALL reuse the
+original intent identity. Inconclusive reconciliation SHALL remain unresolved
+and SHALL NOT offer a retry control.
 
 #### Scenario: The ambiguous order actually executed
-- **WHEN** reconciliation finds an order under the command's client identity
-- **THEN** its execution report becomes the outcome of the command and no second order is submitted
+- **WHEN** reconciliation finds the requested order and proves the requested action's postcondition
+- **THEN** that evidence becomes the outcome of the command and no second mutation is submitted
 
 #### Scenario: The ambiguous order never reached the exchange
-- **WHEN** reconciliation confirms that no order exists under the command's client identity
+- **WHEN** all bounded reconciliation observations explicitly confirm that no order exists under an ambiguous placement's client identity
 - **THEN** the intent may be resubmitted, and it is resubmitted under the same client identity
 
 #### Scenario: Reconciliation itself keeps failing
@@ -110,37 +111,39 @@ confirmed mutating command SHALL NOT replace state produced by that command.
 - **THEN** it replaces the local state as the current account truth
 
 ### Requirement: Every trading command failure reaches the operator
-A failed Spot or Futures trading command SHALL produce a market-scoped
-`command_rejected` carrying a stable local code and a sanitized explanation. A
-failure SHALL NOT be reported only to the application log.
+A determinate Spot or Futures command failure SHALL produce a market-scoped
+`command_rejected` carrying a stable local code and sanitized explanation. An
+indeterminate failure SHALL instead produce `command_unresolved`; a failed
+request alone SHALL NOT prove that a mutation was rejected. Neither outcome
+SHALL be reported only to the application log.
 
 #### Scenario: Spot placement fails
 - **WHEN** a Spot order placement fails at the exchange or in transport
-- **THEN** a market-scoped rejection is emitted and the operator sees the command as rejected
+- **THEN** the operator receives a market-scoped rejection for a determinate refusal or an unresolved warning for insufficient execution evidence
 
 #### Scenario: Spot cancellation fails
 - **WHEN** a Spot cancellation fails
-- **THEN** a market-scoped rejection is emitted rather than a log-only entry
+- **THEN** a market-scoped rejection or unresolved warning is emitted according to the evidence, rather than a log-only entry
 
 #### Scenario: An unresolved outcome is not a rejection
 - **WHEN** a command ends unresolved rather than failed
 - **THEN** it is reported as unresolved and is not emitted as a rejection
 
 ### Requirement: Trading commands are ordered no more coarsely than the order they name
-The main process SHALL order a mutating command against the order it names and
-SHALL NOT hold it behind a command about a different order. A command that
+The main process SHALL order a mutating command against its proven order aliases
+and SHALL NOT hold it behind a command about a proven distinct order. A command that
 speaks for a whole contract rather than for one order on it — cancelling every
 order, setting leverage, setting margin type, adjusting position margin — SHALL
 run alone on that contract: every command about an order on it that was accepted
 earlier SHALL complete first, and every command accepted after it SHALL wait for
-it. A command that names an order the desk cannot identify SHALL be ordered
-against its whole contract rather than against nothing.
+it. A command whose target aliases are unknown or contradictory SHALL be ordered
+against its whole contract rather than assumed independent.
 
 This is the granularity of the ordering guarantee, not a relaxation of it: two
 commands about one order stay serialized exactly as before.
 
 #### Scenario: Two orders on one contract are worked at once
-- **WHEN** a placement for one order is in flight and a cancellation for a different order on the same contract is accepted
+- **WHEN** a placement for one order is in flight and a cancellation for a proven distinct order on the same contract is accepted
 - **THEN** the cancellation reaches the exchange without waiting for the placement to be answered
 
 #### Scenario: A contract-wide command is accepted while an order command is running
@@ -152,14 +155,15 @@ commands about one order stay serialized exactly as before.
 - **THEN** it waits for that command to complete
 
 #### Scenario: A command names no order the desk can identify
-- **WHEN** a mutating command about an order carries neither an exchange order id nor a client order id
+- **WHEN** a mutating command about an order carries no usable target identity or its target aliases are unproved or contradictory
 - **THEN** it is ordered against every other command on its contract
 
 ### Requirement: An unresolved outcome is cleared only by an answer to that command
 An unresolved command SHALL be held together with the identity of the command
 it belongs to — the symbol and the order identifiers the command was issued
-with. The system SHALL clear it only on an execution report, rejection or
-reconciliation result carrying that identity. Traffic belonging to any other
+with. The system SHALL clear it only on a matching action-specific rejection or
+reconciliation result, or on a report carrying an explicit matching symbol and
+order identity that proves the held action's postcondition or terminal outcome. Traffic belonging to any other
 order or symbol SHALL leave the unresolved state exactly as it was.
 
 #### Scenario: Unrelated order updates while an outcome is unknown
@@ -167,7 +171,7 @@ order or symbol SHALL leave the unresolved state exactly as it was.
 - **THEN** the unresolved outcome remains on screen and no retry is offered
 
 #### Scenario: The command's own answer arrives
-- **WHEN** an execution report or rejection carrying the unresolved command's identity arrives
+- **WHEN** an execution report proves the held action's postcondition or terminal outcome, or a rejection names that same action and identity
 - **THEN** the unresolved outcome is cleared and replaced by that answer
 
 #### Scenario: Both markets hold it the same way
@@ -179,18 +183,19 @@ order or symbol SHALL leave the unresolved state exactly as it was.
 - **THEN** the unresolved outcome is cleared only by the reconciliation result for that command, never by unrelated traffic
 
 ### Requirement: An order the exchange does not report is asked for again before it is called absent
-When reconciling an ambiguous outcome, the system SHALL treat a lookup that
+When reconciling an ambiguous placement, the system SHALL treat a lookup that
 reports no such order as provisional. It SHALL repeat the lookup up to the
-bounded attempt count, spaced in time, and SHALL conclude that the order is
-absent only when the final attempt also reports no such order. The total number
-of exchange reads SHALL remain bounded.
+bounded attempt count, spaced in time, and SHALL conclude absence only when
+every configured observation explicitly reports absence. Failed or HTTP-indeterminate
+reads SHALL NOT count as absence. For cancellation or amendment, absence SHALL
+remain inconclusive. The total number of exchange reads SHALL remain bounded.
 
 #### Scenario: Order appears on a later lookup
-- **WHEN** the first reconciliation lookup reports no such order and a later attempt finds it
+- **WHEN** the first placement reconciliation lookup reports no such order and a later attempt finds it
 - **THEN** the command resolves as executed, its execution report is emitted, and no rejection is produced
 
 #### Scenario: Order absent on every attempt
-- **WHEN** every bounded attempt reports no such order
+- **WHEN** every configured placement lookup explicitly reports no such order
 - **THEN** the command resolves as not executed and the market's absent-outcome handling applies
 
 #### Scenario: Both markets reconcile alike
@@ -393,3 +398,94 @@ operator-facing rejection detail and the journal's `outcome` line.
 
 - **WHEN** a reduce-only order is refused for any cause
 - **THEN** the journal `outcome` line and the popup carry the named condition, and no journal archaeology is needed to tell a transient reading gap from a wrong order
+
+### Requirement: The Spot SDK boundary preserves outcome evidence
+
+The Spot REST boundary SHALL preserve HTTP status and explicit numeric exchange error codes before the SDK discards them, and SHALL distinguish confirmed business refusal from unknown execution. A network failure whose transport details have been discarded, an unreadable response, HTTP 5xx, or an exchange code declaring unknown execution SHALL NOT become a confirmed rejection. The boundary SHALL NOT infer order absence from human-readable messages. All consumers of the shared REST client, including public reads, SHALL receive failures rather than success-shaped error bodies. Error objects exposed beyond the boundary SHALL NOT include credential-bearing request configuration or raw request URLs.
+
+#### Scenario: The installed SDK loses network details
+
+- **WHEN** a Spot mutation's transport fails without a usable response and the installed SDK provides only its NetworkError
+- **THEN** the boundary explicitly marks the outcome unknown and the command enters bounded reconciliation without resending the mutation
+
+#### Scenario: The exchange explicitly reports no such order
+
+- **WHEN** a lookup receives a determinate HTTP 400 with numeric exchange code -2013
+- **THEN** the adapter reports exists false for the existing bounded absence reconciliation
+
+#### Scenario: A message resembles absence without evidence
+
+- **WHEN** a lookup fails with an absence-like message but no determinate numeric -2013 evidence
+- **THEN** it fails as a read and does not establish absence
+
+#### Scenario: A business rejection survives the installed SDK
+
+- **WHEN** Binance returns a well-formed 4xx business refusal
+- **THEN** its HTTP status, numeric code, and reason remain available and it is not confused with a transport timeout
+
+#### Scenario: The API cannot confirm execution
+
+- **WHEN** a mutation receives a 5xx response, an unreadable response, or Binance code -1000, -1006, or -1007
+- **THEN** the outcome is unknown regardless of a lower HTTP status and no success or confirmed refusal is fabricated
+
+#### Scenario: A public read receives an error
+
+- **WHEN** a shared-client market-data request receives an error response
+- **THEN** its caller receives a failure and cannot use the error body as a market snapshot
+
+### Requirement: Spot SDK retries do not bypass the request owner
+
+The shared Spot REST client SHALL make at most one physical attempt per SDK method invocation. Mutation uncertainty SHALL be handled by the command owner's read-only reconciliation. Read retries SHALL belong to the existing bounded read owners rather than an additional hidden SDK retry loop.
+
+#### Scenario: A cancellation loses its response
+
+- **WHEN** a DELETE request loses its response after being sent
+- **THEN** the SDK sends no second DELETE and exposes an unknown outcome to the command owner
+
+#### Scenario: A lookup or placement fails
+
+- **WHEN** a GET or POST encounters a server error or a network failure
+- **THEN** that SDK invocation makes only one physical request and any further read is explicitly owned by the calling workflow
+
+### Requirement: A new Spot order requires a confirmed private subscription
+
+Main SHALL refuse a new Spot placement while its private subscription is unconfirmed and SHALL state a dedicated market-scoped reason. Cancellation and read-only refresh SHALL remain available. Private-stream recovery SHALL NOT replay a refused placement or any previous mutation.
+
+#### Scenario: Place while private updates are unavailable
+
+- **WHEN** a new Spot order arrives before subscription acknowledgement or during private-stream recovery
+- **THEN** main emits SPOT_PRIVATE_STREAM_UNAVAILABLE and sends no placement to Binance
+
+#### Scenario: Cancel while private updates are unavailable
+
+- **WHEN** a Spot cancellation or read-only refresh arrives while private subscription is unavailable
+- **THEN** the normal command path remains available, including its existing outcome reconciliation
+
+#### Scenario: Private subscription becomes ready
+
+- **WHEN** the subscription is confirmed after a placement was refused
+- **THEN** only a subsequent operator command may place an order and no refused command is replayed
+
+### Requirement: An execution report withdraws only the action it proves
+
+Renderer warning state SHALL require matching order identity and the held command's action-specific postcondition before treating execution traffic as an answer. Expected amendment terms SHALL accompany the unresolved command. Named outcome envelopes SHALL NOT settle another action on the same order. Terminal non-cancellation outcomes SHALL remain explicitly explained.
+
+#### Scenario: A matching working report arrives during cancellation uncertainty
+
+- **WHEN** the renderer receives NEW for the same order whose cancellation is unconfirmed
+- **THEN** its order state updates but its cancellation warning is retained
+
+#### Scenario: A delayed private event proves cancellation
+
+- **WHEN** matching CANCELED arrives after bounded reads remained inconclusive
+- **THEN** only that cancellation's warning is cleared and no command is replayed
+
+#### Scenario: Another action on the same order answers
+
+- **WHEN** a named placement resolution arrives while cancellation of the same order is unresolved
+- **THEN** the cancellation warning is not cleared by that envelope
+
+#### Scenario: Same-batch Spot uncertainty and answer
+
+- **WHEN** an unresolved Spot command and its confirming private event arrive before a React render
+- **THEN** the combined outcome state applies both in order without retaining a stale warning or losing a terminal explanation

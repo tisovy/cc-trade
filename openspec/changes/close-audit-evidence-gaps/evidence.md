@@ -53,6 +53,8 @@ Preliminary all/compare-main detected 120 nodes across 14 tracked files and 46 a
 
 OpenSpec `close-audit-evidence-gaps` was strictly validated before production changes and after its later additions. The implementation is committed before a separate spec synchronization. Only the 12 reviewed changes and this corrective change are selected for synchronization; unrelated active proposals stay untouched. Live tasks stay open even after main specs reflect the implemented contracts.
 
+Fixes committed as `5d3e46c`. Subsequent [synchronization evidence](sync-evidence.md) records 16 canonical capabilities, 34 added and five modified requirements, strict validation and preservation of all existing scenarios. Archive remains live-gated.
+
 Final staged review after forced reindex: **248 changed nodes / 30 files / 46 affected processes, CRITICAL**, identically in all and compare/main; neither returned partial/truncated. Both new production modules were present in the result. The fresh index contains 13,056 nodes, 20,714 edges, 522 clusters and 300 flows. Source/test review and passing regression gates, not the risk label, support this commit. Git diff whitespace validation and strict OpenSpec validation passed.
 
 All edits/commits use the primary `main` checkout. An already-existing clean `wt-finish` worktree was observed during final checks; `git log main..wt-finish` is empty, so none of its commits is missing from main. It was neither created, edited nor removed by this task. Untracked user GitNexus skills and the original audit remain untouched and excluded from the commit.
