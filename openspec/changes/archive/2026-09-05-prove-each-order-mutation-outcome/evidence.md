@@ -1,0 +1,27 @@
+# F06 implementation evidence — 2026-09-05
+
+Later ordinary-use operator acceptance is recorded in [tasks](tasks.md).
+Pending-live wording below describes the implementation checkpoint; no
+unobserved edge case becomes live-confirmed through archival.
+
+The shared evaluator distinguishes accepted placement, actual cancelled status and exact requested amendment price/original quantity. Missing status remains UNKNOWN in both regular-order normalizers, including private events. Unknown execution types/statuses do not become placement refusals or cancellation evidence. Equivalent decimal strings compare exactly, including values beyond binary float precision; malformed, missing or scientific notation is not proof.
+
+Main Spot/Futures reconciliation updates observed orders but continues bounded reads when the requested postcondition is absent. Three explicit absence observations can settle placement only; failed reads do not count. Cancel/modify absence stays unknown. Futures owner-level lookup retries are zero, preserving the loop's three logical observations without claiming to bound internal transport behavior. No mutation is replayed. Amendment expectations travel in every uncertainty envelope. Account-refresh errors after a known outcome cannot turn it back into unknown.
+
+Both renderers require identity plus action-specific evidence. Named answers to another action do not clear a warning on the same order. Spot folds its two outcome fields atomically, including same-batch unresolved/terminal delivery. Futures retains an explicit terminal explanation across unrelated execution traffic until dismissed or another explicit error takes its slot. The cancel-then-place watcher still requires actual cancellation. Spot keeps original/current client IDs for late cancellation events.
+
+Production preceded tests. Added evaluator status/decimal/identity cases, 18 main reconciliation cases (both venues; cancellation working/partial/cancelled/filled/expired/absent, amendment old/matching/missing terms, mixed failed/absent placement reads), normalizer and renderer regressions. Main checks assert one mutation, read count and no replacement. Actual SDK boundary tests and private stream lifecycle checks remain in the full suite. Initial fixture failures exposed missing HTTP 200 in a test response; the protected SDK boundary correctly rejected it. Two older fixtures without order status now expect UNKNOWN rather than invent NEW.
+
+## Graph and review limits
+
+Baseline 455350a on main. Pre-edit reconcileAmbiguousFuturesCommand/reportFuturesCommandFailure HIGH: report owner and placement/modify/cancel/dispatch callers at 0.95 confidence. Spot failure owner has six upstream nodes via place/cancel/dispatch/setup/main. useFuturesTrading reaches FuturesWorkspace. Empty normalizer/identity/DataProvider results are unresolved: source imports/calls and real runner coverage supplement graph analysis. This GitNexus version does not resolve several exported arrow-function calls; exact-path Cypher confirms only four internal helper CALLS relationships, not absence of consumers.
+
+The large main integration file is beyond the 512KB index limit. detect_changes has an internal 20-node-per-file lookup cap without explicit truncation flags; exact-path node counts and source diff must supplement it. No zero or missing flag establishes whole-program safety. Final staged all/compare-main graph summary and full checks are recorded below before commit.
+
+## Owner decisions and outstanding acceptance
+
+Final checks: **140 files / 3,330 tests**, lint, production build and all gates passed. Gates walked 310 source files, 158 runtime modules, 24 Futures boundary files and 127 command modules. Known ESLint flat-config and large-test-file warnings remain; no warning is called a clean upgrade to ESLint 10. A non-failing TimeoutNaN fixture warning was observed in the full runner.
+
+Final refreshed index: 12,691 nodes / 20,173 edges / 300 flows. Staged all and compare/main both report 23 files / 223 changed nodes / 50 processes, CRITICAL, no partial/truncated flags. Warning disclosed. Uncapped exact paths contain main 216, Futures adapter 84, Spot adapter 23, Futures hook 55 and its tests 42 nodes: these exceed the tool's per-file cap. Shared evaluator has five nodes and identity two; their missing call edges remain unresolved. Source diff and executable regression review cover these known index blind spots without claiming complete graph coverage.
+
+Chose truthful uncertainty over clearing a warning just because an order exists. FILLED/expired is an explained non-cancellation, never permission to replace. Matching amendment terms proves observed state, not causal attribution or exactly-once execution. A universal revision fence/durable command journal and F09/F10 identity work are not claimed solved. No real orders, credentials, service restart or live acceptance. Archive remains blocked on operator observation, not inferred from fixtures.

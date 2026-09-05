@@ -1,28 +1,28 @@
 # Исправления по аудиту — 2026-09-05
 
-Это статус реализации и проверок, не подтверждение live-приёмки. Исходный локальный аудит: [code-and-architecture](audits/2026-09-04-code-and-architecture.md). Работа велась непосредственно в `main`, без дополнительных веток/worktree. Ни одна из новых реализаций не архивирована вместо live-проверки.
+Это статус реализации и проверок. Оператор подтвердил обычную live-проверку 2026-09-05: «проверил - вроде всё ок»; [точные границы приёмки](audit-live-acceptance-2026-09-05.md) не включают неописанные аварийные сценарии или запуск собранного пакета. Исходный локальный аудит: [code-and-architecture](audits/2026-09-04-code-and-architecture.md). Работа велась непосредственно в `main`, без создания дополнительных веток/worktree. Архивация не подменяет доказательства отдельных сценариев.
 
 ## Что реализовано
 
 | Пункт | Результат | Контракт и доказательства |
 |---|---|---|
-| F01 | Main владеет подпиской Spot WebSocket API: signed subscribe/ACK, поколение, heartbeat/reconnect, сверка аккаунта и запрет новых заявок без подтверждённого private stream. | [OpenSpec](changes/own-the-spot-private-subscription/) |
-| F02 | Реальная граница SDK сохраняет неопределённый исход вместо ложного отказа; нет автоматического повтора мутации. | [OpenSpec](changes/preserve-spot-command-outcome-evidence/) |
+| F01 | Main владеет подпиской Spot WebSocket API: signed subscribe/ACK, поколение, heartbeat/reconnect, сверка аккаунта и запрет новых заявок без подтверждённого private stream. | [OpenSpec](changes/archive/2026-09-05-own-the-spot-private-subscription/) |
+| F02 | Реальная граница SDK сохраняет неопределённый исход вместо ложного отказа; нет автоматического повтора мутации. | [OpenSpec](changes/archive/2026-09-05-preserve-spot-command-outcome-evidence/) |
 | F03 | Устаревшее завершение cache read не меняет новый выбранный Spot-инструмент/график. | [OpenSpec](changes/keep-spot-selection-and-packaged-ui-consistent/) |
 | F04 | Renderer включён в Electron-пакет; afterPack проверяет фактический ASAR. | [OpenSpec](changes/keep-spot-selection-and-packaged-ui-consistent/) |
 | F05 | Обновлены Electron/инструменты/runtime-зависимости, добавлен lockfile baseline gate. **Свежий полный npm audit ещё не выполнен.** | [Ограничения проверки](changes/refresh-the-desktop-security-baseline/evidence.md) |
-| F06 | Cancel/modify подтверждаются результатом конкретного действия, не существованием ордера. Поздний private event должен доказать нужный результат. | [Доказательства](changes/prove-each-order-mutation-outcome/evidence.md) |
-| F07 | Candle store принимается только при совпадении идентичности, диапазона и геометрии; неверный ответ идёт в существующий fallback. | [Доказательства](changes/verify-the-candle-store-answer/evidence.md) |
-| F08 | Стоимость Spot-read и каждого повторного физического read-attempt учитывается корректнее. Прямая мутация/lookup не объявлена полностью объединённой с этим лимитером. | [OpenSpec](changes/count-each-spot-request-attempt/) |
-| F09 | История/PnL изолированы по версии/рынку/отпечатку настроенного ключа; поздние данные старого сокета не меняют новый аккаунт. | [Доказательства](changes/isolate-spot-account-history-and-pnl/evidence.md) |
-| F10 | Обменный order ID и доказанный client ID используют общие зависимости очереди; неизвестная/конфликтная идентичность блокируется консервативно в пределах контракта. | [Доказательства](changes/unify-order-command-alias-lanes/evidence.md) |
-| A02 | Необработанная ошибка main терминальна: ограниченная диагностика, exit 1, без продолжения торговли, отмены заявок или автоперезапуска. | [OpenSpec](changes/stop-after-unhandled-runtime-faults/) |
-| A03 | Render-ошибка изолируется: график/аналитика не убирают соседние ордерные элементы; повтор содержимого сохраняет account/trading owner. | [Доказательства](changes/isolate-workspace-render-failures/evidence.md) |
-| A04 | Очередь renderer ограничена байтами, количеством и длительностью backlog; защищённые события не теряются молча. | [Доказательства](changes/bound-renderer-backlog-memory/evidence.md) |
+| F06 | Cancel/modify подтверждаются результатом конкретного действия, не существованием ордера. Поздний private event должен доказать нужный результат. | [Доказательства](changes/archive/2026-09-05-prove-each-order-mutation-outcome/evidence.md) |
+| F07 | Candle store принимается только при совпадении идентичности, диапазона и геометрии; неверный ответ идёт в существующий fallback. | [Доказательства](changes/archive/2026-09-05-verify-the-candle-store-answer/evidence.md) |
+| F08 | Стоимость Spot-read и каждого повторного физического read-attempt учитывается корректнее. Прямая мутация/lookup не объявлена полностью объединённой с этим лимитером. | [OpenSpec](changes/archive/2026-09-05-count-each-spot-request-attempt/) |
+| F09 | История/PnL изолированы по версии/рынку/отпечатку настроенного ключа; поздние данные старого сокета не меняют новый аккаунт. | [Доказательства](changes/archive/2026-09-05-isolate-spot-account-history-and-pnl/evidence.md) |
+| F10 | Обменный order ID и доказанный client ID используют общие зависимости очереди; неизвестная/конфликтная идентичность блокируется консервативно в пределах контракта. | [Доказательства](changes/archive/2026-09-05-unify-order-command-alias-lanes/evidence.md) |
+| A02 | Необработанная ошибка main терминальна: ограниченная диагностика, exit 1, без продолжения торговли, отмены заявок или автоперезапуска. | [OpenSpec](changes/archive/2026-09-05-stop-after-unhandled-runtime-faults/) |
+| A03 | Render-ошибка изолируется: график/аналитика не убирают соседние ордерные элементы; повтор содержимого сохраняет account/trading owner. | [Доказательства](changes/archive/2026-09-05-isolate-workspace-render-failures/evidence.md) |
+| A04 | Очередь renderer ограничена байтами, количеством и длительностью backlog; защищённые события не теряются молча. | [Доказательства](changes/archive/2026-09-05-bound-renderer-backlog-memory/evidence.md) |
 
 «Реализовано» здесь означает код и локальные регрессии, а не отсутствие всех рисков. Для F05 отдельно не заявляется нулевое число уязвимостей.
 
-Повторный аудит всех 12 коммитов и исправления: [полный self-review](changes/close-audit-evidence-gaps/evidence.md). Закрыты ложное подтверждение по успешному REST-ответу, недостаточная идентичность query/private evidence, ложное отсутствие при Futures 5xx/-2013, потеря Spot account catch-up/истории и сериализация native BigInt из настоящего SDK. По запросу оператора DevTools теперь закрыты по умолчанию, включая dev-server; явный `ELECTRON_OPEN_DEVTOOLS=true` и ручной Inspect Element сохранены. Текущие README/workflow приведены к `main` и фактическим режимам запуска.
+Повторный аудит всех 12 коммитов и исправления: [полный self-review](changes/archive/2026-09-05-close-audit-evidence-gaps/evidence.md). Закрыты ложное подтверждение по успешному REST-ответу, недостаточная идентичность query/private evidence, ложное отсутствие при Futures 5xx/-2013, потеря Spot account catch-up/истории и сериализация native BigInt из настоящего SDK. По запросу оператора DevTools теперь закрыты по умолчанию, включая dev-server; явный `ELECTRON_OPEN_DEVTOOLS=true` и ручной Inspect Element сохранены. Текущие README/workflow приведены к `main` и фактическим режимам запуска.
 
 ## Принятые решения и причины
 
@@ -41,7 +41,7 @@
 - Проверены 324 source files на циклы, 165 runtime modules без mock-слоя, 24 Futures boundary files и 131 command-path modules.
 - Свежий unsigned Linux x64 package: `release/self-audit-2026-09-05/linux-unpacked`; ASAR-контракт: 2062 файла / 10 renderer build files. SHA-256: `8254cd218d867dde6c254b0d01887820cd7db96d6876733ef2c7a250045ec348`. Приложение не запускалось.
 - GitNexus сообщил HIGH для account catch-up и CRITICAL для совокупного diff; предупреждения даны. Ограничения графа дополнены точечным source review и тестами, не объявлены исчезнувшими.
-- [Синхронизированы main specs](changes/close-audit-evidence-gaps/sync-evidence.md) для 13 изменений: 16 capabilities, 34 новых и 5 уточнённых требований; все 107 прежних сценариев сохранены, добавлено 111. Строго прошли 23 основные спецификации и все 13 изменений. Незакрытые live-задачи не сняты ради архивации.
+- [Синхронизированы main specs](changes/archive/2026-09-05-close-audit-evidence-gaps/sync-evidence.md) для 13 изменений: 16 capabilities, 34 новых и 5 уточнённых требований; все 107 прежних сценариев сохранены, добавлено 111. Строго прошли 23 основные спецификации и все 13 изменений. Незакрытые live-задачи не сняты ради архивации.
 
 ### Предыдущая контрольная точка — до self-review
 
@@ -55,7 +55,7 @@
 
 ## Что остаётся открытым
 
-1. **Live-приёмка.** Проверки и ограничения перечислены в [live-verification-ledger](live-verification-ledger.md). Реальные заявки не создавались, приложение/сервисы не перезапускались, ключи аккаунтов не менялись. Аварии/гонки не следует намеренно воспроизводить на реальных деньгах.
+1. **Отдельная приёмка пакета и непроверенные сценарии.** Обычная live-проверка подтверждена; явно запрошенное окно собранного пакета остаётся неподтверждённым. Границы перечислены в [live-verification-ledger](live-verification-ledger.md). Агент не создавал реальные заявки, не перезапускал приложение/сервисы и не менял ключи. Аварии/гонки не следует намеренно воспроизводить на реальных деньгах.
 2. **Свежий npm audit.** Auto-review запретил передачу полного списка имён/версий зависимостей в реестр без отдельного согласия. Запрос согласия показан; до ответа обход запрета не выполнялся. Установка обновлений, публичные advisory и baseline gate не доказывают отсутствие остальных уязвимостей.
 3. **A01 — дальнейшая декомпозиция.** Владельцы уже частично выделены в текущих fixes; полный рефакторинг оркестратора остаётся отдельной работой с live-регрессиями.
 4. **A05 — settled-income I/O.** Синхронный writer не переписан. Сначала нужны p95/p99 на реальных объёмах и явная гарантия durability; иначе смена writer рискует изменить порядок/сохранность состояния без доказанного эффекта.

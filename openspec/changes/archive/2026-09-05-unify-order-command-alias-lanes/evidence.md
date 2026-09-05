@@ -1,0 +1,27 @@
+# F10 implementation evidence — 2026-09-05
+
+Later ordinary-use operator acceptance is recorded in [tasks](tasks.md).
+Pending-live wording below describes the implementation checkpoint; no
+unobserved edge case becomes live-confirmed through archival.
+
+Raw lanes now distinguish exchange and client namespaces under the existing logical account/market/symbol scope. Main-owned regular-order reports and snapshots teach alias groups; unproved command assertions do not. Commands wait on all observed alias tails. Unknown/conflicting target aliases use the existing contract barrier, including an exchange-ID command before any observation proves that ID. A client-target command can wait on its exact in-flight placement lane before ACK. Private/ACK alias learning while placement is active makes later exchange-ID cancellation wait for that original client tail.
+
+Alias memory is bounded to 1,024 typed keys with five-minute expiry on admission/capacity cleanup. Active lane groups cannot be evicted; if they fill capacity, new aliases remain unproved and use the barrier. Conflicting/reused aliases become unsafe instead of choosing a winner. This can serialize more commands, especially under capacity/identity uncertainty, but known distinct orders still run concurrently. Existing completed-command record retains its five-minute/256-entry/eight-envelope policy and is not a durable exactly-once guarantee. Logical account scope is not a proof of credential-account equivalence.
+
+Main initializes its shared registry before outbound observation owners. Common emit and broadcast learn only recognized regular-order account/execution envelopes; algo reports are excluded. Learning private identity is separate from AsyncLocalStorage outcome recording: it does not record an unrelated event for command replay. No new REST read, mutation, retry, transport route or external service action.
+
+Production preceded tests. Registry now has 51 tests (15 new), covering typed keys, both alias directions with/without proof, pending placement before/after private/command evidence, untrusted pair assertions, known unrelated groups, conflict, three scope dimensions, TTL/capacity and private-vs-replay ownership. Main adds four integrations: mixed private IDs, known Futures-order concurrency, private exchange ID before placement completes, and Spot REST snapshot alias/concurrency. Existing independent-order test now seeds the exchange observation its premise requires.
+
+Test fixture corrections: wait for private setup, select the socket by private ping ownership instead of array position, and give the concurrency test one fake-clock owner while retaining actual physical admission. Nested automatic fake-clock advancement in two concurrent mutation fixtures stalled the test without representing production ordering. The final private tests assert the normalized event was actually delivered, not merely that an unknown target happened to wait.
+
+Local synthetic 500-order snapshot microbenchmark (not end-to-end trading latency): initial repeated observation ~16.27ms average over 20 passes. Known-pair fast path and capacity-only scans on new observations reduced repeated mean to ~1.11ms; first pass ~6.55ms, 1,000 typed keys. No machine-independent latency promise, larger/capacity-thrashing books are not covered by that measurement.
+
+## Graph and final verification
+
+Baseline 85d73bd, main. Pre-edit broadcastToRenderers CRITICAL (45 upstream nodes, trade/account/history/activation paths), warned. Registry exported-arrow entry and emit yielded unresolved empty walks; exact-path graph finds main/test imports and internal runInLane/createRegistry relationships. New alias methods were absent before indexing, not unused. Refreshed graph: 12,755 nodes / 20,303 edges / 300 flows; resolveOrderKeys → runInLane → createRegistry at 0.95. Large main test file is beyond 512KB index cap. Staged all/compare-main and uncapped exact paths are recorded below; tool per-file caps are not a whole-program safety check.
+
+## Owner decision and remaining acceptance
+
+Final full checks: **140 files / 3,373 tests passed**, lint, production build, dependency baseline and all architecture gates (310 source / 158 runtime / 24 Futures / 127 command modules). Staged MCP all and compare/main each report 10 files / 69 changed nodes / 52 processes, CRITICAL, no partial/truncated flag. Warning disclosed. Exact path contains 18 registry nodes, eight registry-test nodes and 216 main nodes (main exceeds the hidden 20-node cap). Source/main integration tests supplement, not replace, graph review. OpenSpec strict validation passed.
+
+Chose conservative unknown-identity serialization with exchange-evidence-driven concurrency, not blanket serialization of every known order or guessed aliases. Identity is observed state, not causal/exactly-once proof. No production launch, credentials or real trades. Operator confirmation of ordinary multi-order interaction remains outstanding; do not manufacture a trading race or timeout. No archive.

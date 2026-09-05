@@ -13,3 +13,13 @@
 - [x] 2.3 Run graph/diff analysis, write evidence, validate and commit to main.
 - [ ] 2.4 Obtain separate permission for a fresh registry audit and record the result.
 - [ ] 2.5 Obtain operator packaged-window/live acceptance before archive; do not launch production or trade automatically.
+
+## Operator observation — 2026-09-05
+
+The operator replied “проверил - вроде всё ок” after the requested ordinary
+live check (default DevTools state and normal balances/history/charts).
+This records ordinary-use acceptance, not an observed failure, forced trade,
+key rotation, quota exhaustion, or packaged-build launch. Account and launched
+revision were not supplied. Deterministic edge cases remain test-only evidence.
+The separately named packaged-window check remains outstanding; this ordinary-use report does not close it.
+See [acceptance scope](../../audit-live-acceptance-2026-09-05.md).

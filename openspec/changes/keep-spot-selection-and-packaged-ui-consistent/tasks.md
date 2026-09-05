@@ -15,3 +15,13 @@
 - [x] 3.1 Document packaging commands and local verification evidence, and record outstanding operator checks in the live ledger.
 - [x] 3.2 Validate OpenSpec, review all own changes, run GitNexus detect_changes without partial/truncated output, and commit only this work directly to main.
 - [ ] 3.3 Operator confirms rapid Spot pair/interval selection and the packaged application window on live data; only then archive this change.
+
+## Operator observation — 2026-09-05
+
+The operator replied “проверил - вроде всё ок” after the requested ordinary
+live check (default DevTools state and normal balances/history/charts).
+This records ordinary-use acceptance, not an observed failure, forced trade,
+key rotation, quota exhaustion, or packaged-build launch. Account and launched
+revision were not supplied. Deterministic edge cases remain test-only evidence.
+The separately named packaged-window check remains outstanding; this ordinary-use report does not close it.
+See [acceptance scope](../../audit-live-acceptance-2026-09-05.md).

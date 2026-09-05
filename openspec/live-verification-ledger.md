@@ -1280,4 +1280,18 @@ Linux directory ASAR contract passed; no window was launched.
   non-cancellation reporting and stale-snapshot replacement, not live acceptance.
 - Main-spec synchronization does not close any live task from the 12 preceding
   changes. The dependency audit also still requires separate disclosure consent.
-- Detailed scope, package hash, decisions and limitations: [self-review evidence](changes/close-audit-evidence-gaps/evidence.md).
+- Detailed scope, package hash, decisions and limitations: [self-review evidence](changes/archive/2026-09-05-close-audit-evidence-gaps/evidence.md).
+
+## Audit ordinary-use acceptance — 2026-09-05
+
+Later operator update: “проверил - вроде всё ок”, in response to the requested
+normal-use check of default DevTools behavior and balances/history/charts.
+This supersedes the generic pending operator hand-off for the 11 changes listed
+in the [acceptance record](audit-live-acceptance-2026-09-05.md), not any unobserved
+edge case. Account, running revision and launch/package identity: NOT RECORDED.
+
+The earlier sections remain dated implementation-checkpoint evidence. Forced
+failure, replay/race, key-rotation, backlog, fatal-exit and other adversarial
+scenarios are not made live-confirmed by this message. No real test trade is
+claimed. The combined selection/package change and dependency-baseline change
+stay active for their separately named remaining checks and permission gates.
