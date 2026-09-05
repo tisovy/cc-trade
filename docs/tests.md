@@ -23,6 +23,7 @@
 - `npm test`: full Vitest suite.
 - `npm run lint`: ESLint.
 - `npm run build`: normal production build plus Electron artifact inspection.
+- `npm run check:dependency-baseline`: local locked-version security floors, not a fresh registry vulnerability scan.
 - `npm run check:circular`, `check:runtime-mock`, `check:futures-production`, and `check:command-path`: retained static architecture and safety gates.
 - `npm run test:all`: aggregate of every command above.
 - `npm run e:smoke`: bounded deterministic Electron readiness smoke; this is not part of `test:all`.
@@ -54,5 +55,5 @@ normal, safe-development, and bounded-smoke compositions.
 
 ## Next Steps
 
-1. Gate CI on `npm run test:all`.
+1. Accept the first hosted `CI / Linux verification` run and record a main-compatible enforcement decision; [the CI guide](ci.md) distinguishes local preparation from remote protection.
 2. Expand focused Vitest and protocol/integration coverage for trading and Electron boundaries.

@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verification:
+    name: Linux verification
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: bash
+    env:
+      CI: 'true'
+      # Build the normal production composition, but never launch the app.
+      BUILD_MODE: ''
+      VITE_DEV_SERVER_URL: ''
+      ELECTRON_OPEN_DEVTOOLS: 'false'
+      BK: ''
+      BS: ''
+      BFK: ''
+      BFS: ''
+      ANALYTICS_URL: ''
+      ANALYTICS_BASE_URL: ''
+      ANALYTICS_KEY: ''
+      ANALYTICS_SECRET: ''
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+    steps:
+      - name: Check out the triggering revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up the repository Node version
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          package-manager-cache: false
+      - name: Record tool versions
+        run: |
+          node --version
+          npm --version
+      - name: Install locked dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Run all retained verification gates
+        run: npm run test:all
+      - name: Build and inspect the Linux package
+        run: npm run dist -- --linux --x64 --dir --publish never

@@ -125,6 +125,13 @@ npm run test:watch
 npm run test:all
 ```
 
+The checked-in [CI workflow](.github/workflows/ci.yml) runs the aggregate checks
+and an unsigned Linux x64 directory package check for pushes to `main` and manual
+runs on `main`, using the exact Node version in `.nvmrc`. It does not launch the
+app, load trading secrets, publish/upload packages or run `npm audit`. Dependency
+installation still needs internet. See [CI operation and acceptance](docs/ci.md)
+for local reproduction and the separate hosted-run/enforcement requirements.
+
 ## Project Structure
 
 ```

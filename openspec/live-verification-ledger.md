@@ -1327,3 +1327,16 @@ audit batch are archived with no dropped task. Earlier pending statuses describe
 their historical checkpoints. Unrelated proposals and unobserved failure cases
 remain outside this closure. No Git push, app launch, test trade or key change
 was performed.
+
+## gate-main-with-offline-verification — 2026-09-05
+
+Status: CI workflow prepared locally; hosted execution and owner acceptance
+**pending**, not archived. See [tasks](changes/gate-main-with-offline-verification/tasks.md)
+and [operating guide](../docs/ci.md). No push, workflow dispatch, remote settings
+change, package publication or live account session was performed for this change.
+
+After an authorized push, record the actual hosted run URL, commit SHA, full
+verification/package result and operator acceptance. Record the main-compatible
+enforcement decision separately: a successful post-push job does not prove a
+required branch rule or prevent the original push. Existing ordinary/package
+acceptance for the previous audit batch does not accept this new CI workflow.
