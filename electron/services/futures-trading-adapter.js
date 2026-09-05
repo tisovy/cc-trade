@@ -12,6 +12,7 @@ import {
     normalizeFuturesTradeHistoryTime,
 } from '../../src/utils/futuresTradeHistoryEvidence.js';
 import { isIndeterminateTradingFailure } from './trading-command-outcome.js';
+import { requireOrderResponseEvidence } from './order-response-evidence.js';
 
 export const FUTURES_REST_ORIGIN = 'https://fapi.binance.com';
 export const FUTURES_STREAM_ORIGIN = 'wss://fstream.binance.com';
@@ -1365,7 +1366,7 @@ export class FuturesTradingAdapter {
         if (command.reduceOnly && !hedgeMode) params.reduceOnly = 'true';
         if (command.newClientOrderId) params.newClientOrderId = command.newClientOrderId;
         const data = await this.#signedRequest('POST', '/fapi/v1/order', params);
-        return normalizeFuturesExecutionReport(data, { x: 'NEW' });
+        return normalizeFuturesExecutionReport(requireOrderResponseEvidence(data, command, 'trade.placeOrder'), { x: 'NEW' });
     }
 
     // Binance USDⓈ-M amendment: reprices/resizes a live LIMIT order in one call.
@@ -1381,7 +1382,7 @@ export class FuturesTradingAdapter {
         if (command.orderId) params.orderId = command.orderId;
         else if (command.origClientOrderId) params.origClientOrderId = command.origClientOrderId;
         const data = await this.#signedRequest('PUT', '/fapi/v1/order', params);
-        return normalizeFuturesExecutionReport(data, { x: 'AMENDMENT' });
+        return normalizeFuturesExecutionReport(requireOrderResponseEvidence(data, command, 'trade.replaceOrder'), { x: 'AMENDMENT' });
     }
 
     async cancelOrder(command) {
@@ -1389,11 +1390,7 @@ export class FuturesTradingAdapter {
         if (command.orderId) params.orderId = command.orderId;
         else if (command.origClientOrderId) params.origClientOrderId = command.origClientOrderId;
         const data = await this.#signedRequest('DELETE', '/fapi/v1/order', params);
-        return normalizeFuturesExecutionReport(data, {
-            x: 'CANCELED',
-            status: 'CANCELED',
-            X: 'CANCELED',
-        });
+        return normalizeFuturesExecutionReport(requireOrderResponseEvidence(data, command, 'trade.cancelOrder'), { x: 'CANCELED' });
     }
 
     async cancelAllOrders(symbol) {
@@ -1443,9 +1440,11 @@ export class FuturesTradingAdapter {
         else throw new FuturesApiError('An order lookup needs an order id or a client order id');
         try {
             const data = await this.#signedRequest('GET', '/fapi/v1/order', params);
-            return { exists: true, report: normalizeFuturesExecutionReport(data) };
+            return { exists: true, report: normalizeFuturesExecutionReport(requireOrderResponseEvidence(
+                data, { symbol, orderId, origClientOrderId },
+            )) };
         } catch (error) {
-            if (Number(error?.code) === FUTURES_ORDER_NOT_FOUND_CODE) {
+            if (!isIndeterminateTradingFailure(error) && Number(error?.code) === FUTURES_ORDER_NOT_FOUND_CODE) {
                 return { exists: false, report: null };
             }
             throw error;

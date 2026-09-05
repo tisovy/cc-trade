@@ -13,13 +13,13 @@ A modern cryptocurrency trading terminal built with React, Vite, and Electron. F
 - **Live Trades** — Real-time trade feed with throttling controls
 - **Order Management** — Place and cancel orders directly from the interface
 - **Drawing Tools** — Horizontal lines, trend lines, and measurement tools
-- **Mock Mode** — Runs with synthetic data when API keys aren't configured
+- **Safe Development** — Explicit fake-only launch modes, separate from the normal trading runtime
 
 ## Prerequisites
 
 - Node.js `^22.12.0 || >=24.0.0` (Node 24 LTS recommended for development)
 - npm or yarn
-- Binance API keys (optional — app runs in mock mode without them)
+- Binance API keys for authenticated account/trading features; use `e:safe` for deterministic fakes (there is no automatic mock fallback)
 
 ## Installation
 
@@ -34,7 +34,7 @@ npm install
 
 ## Development
 
-All development and integration work is committed directly to `master`. Do not
+All development and integration work is committed directly to `main`. Do not
 create feature branches or additional Git worktrees for this repository. See
 [Repository workflow](docs/repository_workflow.md) for the mandatory checks.
 
@@ -42,9 +42,8 @@ create feature branches or additional Git worktrees for this repository. See
 # Start the Vite dev server (web mode)
 npm run dev
 
-# Start Electron with the normal operator configuration. This enables the
-# reviewed public-read Futures Production transport; if BK is
-# configured, Spot may also connect to real market-data/account endpoints.
+# Start Electron with the normal operator configuration. This can connect to
+# real market/account endpoints and submit trades with configured credentials.
 npm run e
 
 # Start Electron persistently with credentials cleared and deterministic fakes
@@ -56,6 +55,10 @@ npm run e:smoke
 
 The app will be available at `http://localhost:5174` in web mode.
 
+Electron DevTools stay closed by default, including when using the development
+server. Set `ELECTRON_OPEN_DEVTOOLS=true` for explicit automatic opening; manual
+Inspect Element remains available.
+
 Futures Testnet was retired on 2026-07-16 and is not part of the runtime or
 verification build. Its recovery manifest is in
 [`archive/futures-testnet/`](archive/futures-testnet/README.md).
@@ -66,6 +69,8 @@ verification build. Its recovery manifest is in
 |----------|-------------|---------|
 | `BK` | Binance API Key | — |
 | `BS` | Binance API Secret | — |
+| `BFK` / `BFS` | Separate Binance Futures API key / secret | — |
+| `ELECTRON_OPEN_DEVTOOLS` | Explicit automatic Electron DevTools opening (`true` to enable) | off |
 | `WS_PORT` | WebSocket server port | `14477` |
 | `LOG_LEVEL` | Logging verbosity (`error`, `warn`, `info`, `debug`) | `info` |
 | `ANALYTICS_URL` | Analytics service URL | — |

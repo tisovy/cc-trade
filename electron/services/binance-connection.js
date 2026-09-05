@@ -5380,8 +5380,19 @@ export function setupBinanceConnection({
         };
 
         const emitSpotRefreshOperation = async (operation, epoch) => {
+            if (!spotRendererConnections.has(connection)) return;
+            if (epoch !== spotMutationEpoch) {
+                refreshAccountStateUnstated();
+                return;
+            }
             const payload = await operation.loadPayload();
-            if (epoch !== spotMutationEpoch) return;
+            if (!spotRendererConnections.has(connection)) return;
+            if (epoch !== spotMutationEpoch) {
+                // Dropping an obsolete baseline must not leave a new renderer
+                // with deltas only. Reuse the single-flight account owner.
+                refreshAccountStateUnstated();
+                return;
+            }
             emit(payload);
         };
 
@@ -5393,6 +5404,7 @@ export function setupBinanceConnection({
 
         let _spotAccountRefreshInFlight = false;
         let _spotAccountRefreshQueued = null;
+        let _spotAccountRefreshSymbol;
         const runSpotAccountRefreshPass = async (symbol) => {
             const epoch = spotMutationEpoch;
             await runSpotAccountRefreshOperations({
@@ -5407,22 +5419,25 @@ export function setupBinanceConnection({
         // Queued rather than dropped, for the same reason as Futures: the read
         // that follows a trade is the one that proves what the trade did.
         const refreshAccountState = async (symbol) => {
-            if (!spotTradingAdapter) return;
+            if (!spotTradingAdapter || !spotRendererConnections.has(connection)) return;
             if (_spotAccountRefreshInFlight) {
-                _spotAccountRefreshQueued = { symbol };
+                // Generic catch-up cannot erase a deliberate history request.
+                _spotAccountRefreshQueued = { symbol: symbol ?? _spotAccountRefreshQueued?.symbol ?? _spotAccountRefreshSymbol };
                 return;
             }
             _spotAccountRefreshInFlight = true;
             try {
                 let pending = { symbol };
-                while (pending) {
+                while (pending && spotRendererConnections.has(connection)) {
                     _spotAccountRefreshQueued = null;
+                    _spotAccountRefreshSymbol = pending.symbol;
                     await runSpotAccountRefreshPass(pending.symbol);
                     pending = _spotAccountRefreshQueued;
                 }
             } finally {
                 _spotAccountRefreshInFlight = false;
                 _spotAccountRefreshQueued = null;
+                _spotAccountRefreshSymbol = undefined;
             }
         };
 

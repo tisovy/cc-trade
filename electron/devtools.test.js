@@ -6,13 +6,13 @@ describe('shouldOpenDevTools', () => {
     expect(shouldOpenDevTools({ env: {} })).toBe(false)
   })
 
-  it('opens DevTools during dev-server runs by default', () => {
+  it('keeps DevTools closed during dev-server runs by default', () => {
     expect(shouldOpenDevTools({
       env: { VITE_DEV_SERVER_URL: 'http://localhost:5174' },
-    })).toBe(true)
+    })).toBe(false)
   })
 
-  it('lets an explicit flag override the dev-server default', () => {
+  it('honors explicit false during dev-server runs', () => {
     expect(shouldOpenDevTools({
       env: {
         ELECTRON_OPEN_DEVTOOLS: 'false',
@@ -21,17 +21,15 @@ describe('shouldOpenDevTools', () => {
     })).toBe(false)
   })
 
-  it('keeps DevTools closed when the dev-server default is disabled', () => {
+  it.each(['', 'false', '0', 'off', 'no', 'unexpected'])('keeps DevTools closed for %j', value => {
     expect(shouldOpenDevTools({
-      env: { VITE_DEV_SERVER_URL: 'http://localhost:5174' },
-      allowDevServerDefault: false,
+      env: { VITE_DEV_SERVER_URL: 'http://localhost:5174', ELECTRON_OPEN_DEVTOOLS: value },
     })).toBe(false)
   })
 
-  it('allows explicit DevTools opt-in when the default is disabled', () => {
+  it.each(['1', 'true', 'yes', 'on', ' TRUE '])('allows explicit DevTools opt-in with %j', value => {
     expect(shouldOpenDevTools({
-      env: { ELECTRON_OPEN_DEVTOOLS: 'true' },
-      allowDevServerDefault: false,
+      env: { ELECTRON_OPEN_DEVTOOLS: value },
     })).toBe(true)
   })
 })

@@ -1,4 +1,4 @@
-import { answersUnresolvedCommand } from './unresolvedCommandIdentity.js'
+import { matchesOrderReportIdentity } from './orderReportIdentity.js'
 
 const CANCELLED = new Set(['CANCELED', 'CANCELLED'])
 const CLOSED = new Set(['FILLED', 'EXPIRED', 'EXPIRED_IN_MATCH', 'REJECTED'])
@@ -56,16 +56,7 @@ export const evaluateOrderMutationPostcondition = ({ action, report, expected } 
 }
 
 export const readUnresolvedOrderPostcondition = (unresolved, report) => {
-  const identity = {
-    symbol: report?.symbol ?? report?.s,
-    orderId: report?.orderId ?? report?.i,
-    clientOrderId: report?.clientOrderId ?? report?.c,
-  }
-  const originalClientOrderId = report?.originalClientOrderId ?? report?.C
-  if (!answersUnresolvedCommand(unresolved, identity)
-    && !(originalClientOrderId != null && answersUnresolvedCommand(unresolved, {
-      ...identity, clientOrderId: originalClientOrderId,
-    }))) return null
+  if (!unresolved || !matchesOrderReportIdentity(report, unresolved.details)) return null
   return evaluateOrderMutationPostcondition({
     action: unresolved.request, report, expected: unresolved.details?.expected,
   })

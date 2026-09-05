@@ -663,7 +663,7 @@ describe('DataContext spot chart depth', () => {
             send({ execution_update: { s: 'PAXUSDT', c: 'spot-1', X: 'NEW' } })
             send({ command_resolved: { ...unresolvedPlacement.command_unresolved, code: 'SPOT_OUTCOME_EXECUTED' } })
             expect(screen.getByTestId('unresolved').textContent).toBe('SPOT_OUTCOME_PENDING')
-            send({ execution_update: { s: 'PAXUSDT', c: 'cancel-id', C: 'spot-1', X: 'CANCELED' } })
+            send({ execution_update: { s: 'PAXUSDT', i: 11, c: 'cancel-id', C: 'spot-1', X: 'CANCELED' } })
             expect(screen.getByTestId('unresolved').textContent).toBe('none')
             expect(screen.getByTestId('rejected').textContent).toBe('none')
         })
@@ -673,7 +673,7 @@ describe('DataContext spot chart depth', () => {
             act(() => {
                 for (const payload of [
                     { command_unresolved: { ...unresolvedPlacement.command_unresolved, request: 'trade.cancelOrder' } },
-                    { execution_update: { s: 'PAXUSDT', c: 'spot-1', X: status } },
+                    { execution_update: { s: 'PAXUSDT', i: 11, c: 'spot-1', X: status } },
                 ]) webSocketMocks.handleMessage({ data: JSON.stringify(payload) }, webSocketMocks.connection)
             })
             expect(screen.getByTestId('unresolved').textContent).toBe('none')

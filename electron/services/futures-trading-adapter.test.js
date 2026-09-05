@@ -356,7 +356,7 @@ describe('Futures REST physical response accounting', () => {
 
 describe('FuturesTradingAdapter signing', () => {
     it('signs order placement as an urlencoded body with HMAC-SHA256 and the API key header', async () => {
-        globalThis.__futuresTestResponse = { serverTime: Date.now() };
+        globalThis.__futuresTestResponse = { serverTime: Date.now(), symbol: 'BTCUSDT', orderId: 11, status: 'NEW' };
         const adapter = createAdapter();
         adapter.getPositionMode = vi.fn().mockResolvedValue({ hedgeMode: false });
         await adapter.placeOrder({
@@ -476,6 +476,7 @@ describe('FuturesTradingAdapter signing', () => {
     });
 
     it('amends a live order in place with a signed PUT instead of cancel and re-place', async () => {
+        globalThis.__futuresTestResponse = { symbol: 'BTCUSDT', orderId: 11, status: 'NEW', price: '58500', origQty: '0.004' };
         const adapter = createAdapter();
         adapter.serverTimeOffsetMs = 0;
         await adapter.modifyOrder({
@@ -534,6 +535,7 @@ describe('FuturesTradingAdapter signing', () => {
     });
 
     it('derives hedge-mode position sides from order intent', async () => {
+        globalThis.__futuresTestResponse = { symbol: 'BTCUSDT', orderId: 11, status: 'FILLED' };
         const adapter = createAdapter();
         adapter.serverTimeOffsetMs = 0;
         adapter.getPositionMode = vi.fn().mockResolvedValue({ hedgeMode: true });
@@ -556,6 +558,7 @@ describe('FuturesTradingAdapter signing', () => {
     });
 
     it('keeps reduceOnly for one-way accounts', async () => {
+        globalThis.__futuresTestResponse = { symbol: 'BTCUSDT', orderId: 11, status: 'FILLED' };
         const adapter = createAdapter();
         adapter.serverTimeOffsetMs = 0;
         adapter.getPositionMode = vi.fn().mockResolvedValue({ hedgeMode: false });
@@ -708,6 +711,45 @@ describe('futures execution outcome classification', () => {
 });
 
 describe('futures order lookup by identity', () => {
+    it.each([500, 502, 503])('does not count HTTP %s plus -2013 as absence', async status => {
+        const adapter = createAdapter();
+        adapter.serverTimeOffsetMs = 0;
+        globalThis.__futuresTestStatus = status;
+        globalThis.__futuresTestResponse = { code: -2013, msg: 'Order does not exist.' };
+        await expect(adapter.findOrder({ symbol: 'BTCUSDT', orderId: 11 })).rejects.toMatchObject({ status, indeterminate: true });
+        expect(requests).toHaveLength(1);
+    });
+    it.each([null, {}, { symbol: 'ETHUSDT', orderId: 11, status: 'NEW' },
+        { symbol: 'BTCUSDT', orderId: 12, status: 'NEW' },
+    ])('rejects unusable or mismatching successful lookup identity: %j', async body => {
+        const adapter = createAdapter();
+        adapter.serverTimeOffsetMs = 0;
+        globalThis.__futuresTestRawResponse = JSON.stringify(body);
+        await expect(adapter.findOrder({ symbol: 'BTCUSDT', orderId: 11 })).rejects.toMatchObject({ indeterminate: true });
+        expect(requests).toHaveLength(1);
+    });
+    it.each([
+        ['cancelOrder', null], ['cancelOrder', {}],
+        ['cancelOrder', { symbol: 'BTCUSDT', orderId: 11, status: 'FILLED' }],
+        ['cancelOrder', { symbol: 'BTCUSDT', orderId: 11, status: 'NEW' }],
+        ['modifyOrder', { symbol: 'BTCUSDT', orderId: 11, status: 'NEW', price: '9', origQty: '1' }],
+        ['placeOrder', { symbol: 'BTCUSDT', orderId: 11 }],
+    ])('keeps an insufficient %s success indeterminate without replay: %j', async (method, body) => {
+        const adapter = createAdapter();
+        adapter.serverTimeOffsetMs = 0;
+        adapter.getPositionMode = vi.fn().mockResolvedValue({ hedgeMode: false });
+        globalThis.__futuresTestRawResponse = JSON.stringify(body);
+        await expect(adapter[method]({ symbol: 'BTCUSDT', orderId: 11, numericPrice: 10, numericQuantity: 1, side: 'BUY' }))
+            .rejects.toMatchObject({ indeterminate: true });
+        expect(requests).toHaveLength(1);
+    });
+    it('preserves an actual successful cancellation', async () => {
+        const adapter = createAdapter();
+        adapter.serverTimeOffsetMs = 0;
+        globalThis.__futuresTestResponse = { symbol: 'BTCUSDT', orderId: 11, status: 'CANCELED' };
+        await expect(adapter.cancelOrder({ symbol: 'BTCUSDT', orderId: 11 })).resolves.toMatchObject({ orderId: '11', status: 'CANCELED' });
+        expect(requests).toHaveLength(1);
+    });
     it('does not invent accepted status for query or private reports', async () => {
         const adapter = createAdapter();
         adapter.serverTimeOffsetMs = 0;

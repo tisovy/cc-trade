@@ -177,7 +177,7 @@ function createWindow() {
   console.log('Loading renderer URL:', rendererUrl)
   win.loadURL(rendererUrl)
 
-  if (shouldOpenDevTools({ allowDevServerDefault: !app.isPackaged })) {
+  if (shouldOpenDevTools()) {
     win.webContents.openDevTools(devToolsOptions)
   }
 

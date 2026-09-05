@@ -69,8 +69,36 @@ describe('installed Spot SDK REST outcome boundary', () => {
     it('retains a large exchange order id without JSON number rounding', async () => {
         const { client } = makeSdk(() => ({ status: 200, data: '{"orderId":9007199254740993}' }));
         const response = await client.restAPI.getOrder({ symbol: 'BTCUSDT', orderId: 42 });
-        expect(String((await response.data()).orderId)).toBe('9007199254740993');
+        expect((await response.data()).orderId).toBe('9007199254740993');
+        expect(JSON.stringify(await response.data())).toBe('{"orderId":"9007199254740993"}');
     });
+
+    it('keeps a real-SDK large order and nested history IDs exact through adapter and renderer JSON', async () => {
+        const { client, adapter, transport } = makeSdk(() => ({ status: 200,
+            data: '{"symbol":"BTCUSDT","orderId":9007199254740993,"clientOrderId":"boundary-intent","status":"NEW","fills":[{"tradeId":9007199254740995}]}' }));
+        const report = await adapter.placeOrder(command);
+        expect(JSON.parse(JSON.stringify({ execution_update: report })).execution_update.orderId).toBe('9007199254740993');
+        const body = await (await client.restAPI.getOrder({ symbol: 'BTCUSDT', orderId: '9007199254740993' })).data();
+        expect(JSON.parse(JSON.stringify(body)).fills[0].tradeId).toBe('9007199254740995');
+        expect(transport).toHaveBeenCalledTimes(2);
+    });
+
+    it('refuses excessive response nesting as unreadable without exposing its body', async () => {
+        let body = { value: 'fixture-private-body' };
+        for (let depth = 0; depth < 70; depth += 1) body = { nested: body };
+        const { adapter } = makeSdk(() => jsonResponse(200, body));
+        const error = await adapter.placeOrder(command).catch(value => value);
+        expect(error).toMatchObject({ indeterminate: true });
+        expect(error.message).not.toContain('fixture-private-body');
+    });
+
+    it.each([{}, { ...order, status: undefined }, { ...order, symbol: 'ETHUSDT' }])(
+        'does not call insufficient real-SDK success a placement: %j', async body => {
+            const { adapter, transport } = makeSdk(() => jsonResponse(200, body));
+            await expect(adapter.placeOrder(command)).rejects.toMatchObject({ indeterminate: true });
+            expect(transport).toHaveBeenCalledOnce();
+        },
+    );
 
     it.each(['ECONNRESET', 'ETIMEDOUT', 'ECONNABORTED', 'ENOTFOUND', 'ECONNREFUSED'])(
         'does not invent a refusal when the SDK discards %s', async (code) => {

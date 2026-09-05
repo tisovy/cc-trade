@@ -23,11 +23,22 @@ const numericExchangeCode = (value) => (
     typeof value === 'number' && Number.isSafeInteger(value) && value < 0 ? value : null
 );
 
+// The SDK parses large JSON integers as native BigInt. Preserve their exact
+// value, but make the owned response safe for renderer frames and persistence.
+// Walk in place: market/history bodies need no second full JSON allocation.
+const makeJsonSafe = (value, depth = 0) => {
+    if (typeof value === 'bigint') return value.toString();
+    if (value === null || typeof value !== 'object') return value;
+    if (depth >= 64) throw new Error('Excessive response nesting');
+    for (const key of Object.keys(value)) value[key] = makeJsonSafe(value[key], depth + 1);
+    return value;
+};
+
 const checkedResponse = async (response) => {
     const status = Number.isInteger(response?.status) ? response.status : null;
     let data;
     try {
-        data = await response.data();
+        data = makeJsonSafe(await response.data());
     } catch {
         throw new SpotRestError('Binance Spot returned an unreadable response.', { status });
     }

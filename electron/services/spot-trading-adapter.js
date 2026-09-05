@@ -1,4 +1,5 @@
 import { isIndeterminateTradingFailure } from './trading-command-outcome.js';
+import { requireOrderResponseEvidence } from './order-response-evidence.js';
 
 export const normalizeSpotBalances = (account = {}) => {
     const balances = {};
@@ -256,7 +257,7 @@ export class SpotTradingAdapter {
             ...(command.newClientOrderId ? { newClientOrderId: command.newClientOrderId } : {}),
         });
         const data = await response.data();
-        return normalizeSpotExecutionReport(data, { x: 'NEW' });
+        return normalizeSpotExecutionReport(requireOrderResponseEvidence(data, command, 'trade.placeOrder'), { x: 'NEW' });
     }
 
     // The Spot counterpart of the Futures lookup: what became of the command
@@ -270,7 +271,9 @@ export class SpotTradingAdapter {
                 recvWindow: this.recvWindow,
             });
             const data = await response.data();
-            return { exists: true, report: normalizeSpotExecutionReport(data) };
+            return { exists: true, report: normalizeSpotExecutionReport(requireOrderResponseEvidence(
+                data, { symbol, orderId, origClientOrderId },
+            )) };
         } catch (error) {
             if (!isIndeterminateTradingFailure(error)
                 && Number(error?.exchangeCode ?? error?.code ?? error?.response?.data?.code)
@@ -297,10 +300,6 @@ export class SpotTradingAdapter {
 
         const response = await this.client.restAPI.deleteOrder(cancelParams);
         const data = await response.data();
-        return normalizeSpotExecutionReport(data, {
-            x: 'CANCELED',
-            status: 'CANCELED',
-            X: 'CANCELED',
-        });
+        return normalizeSpotExecutionReport(requireOrderResponseEvidence(data, command, 'trade.cancelOrder'), { x: 'CANCELED' });
     }
 }

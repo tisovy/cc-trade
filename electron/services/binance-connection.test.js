@@ -206,16 +206,18 @@ const moduleMocks = vi.hoisted(() => {
                 ticker24hr: vi.fn().mockResolvedValue({
                     status: 200, data: vi.fn().mockResolvedValue([]),
                 }),
-                newOrder: vi.fn().mockResolvedValue({
-                    status: 200, data: vi.fn().mockResolvedValue({
-                        symbol: 'PAXUSDT', orderId: 41, status: 'NEW', side: 'BUY',
+                newOrder: vi.fn().mockImplementation(async params => ({
+                    status: 200, data: async () => ({
+                        symbol: params.symbol, orderId: 41, status: 'NEW', side: params.side,
+                        clientOrderId: params.newClientOrderId,
                     }),
-                }),
-                getOrder: vi.fn().mockResolvedValue({
-                    status: 200, data: vi.fn().mockResolvedValue({
-                        symbol: 'PAXUSDT', orderId: 41, status: 'NEW', side: 'BUY',
+                })),
+                getOrder: vi.fn().mockImplementation(async params => ({
+                    status: 200, data: async () => ({
+                        symbol: params.symbol, orderId: params.orderId ?? 41, status: 'NEW', side: 'BUY',
+                        clientOrderId: params.origClientOrderId,
                     }),
-                }),
+                })),
                 getAccount: vi.fn().mockResolvedValue({
                     status: 200, data: vi.fn().mockResolvedValue({ balances: [] }),
                 }),
@@ -2777,6 +2779,84 @@ describe('setupBinanceConnection user-data orchestration', () => {
             expect(moduleMocks.spotClient.restAPI.newOrder).not.toHaveBeenCalled();
             await place('new-operator-intent');
             expect(moduleMocks.spotClient.restAPI.newOrder).toHaveBeenCalledOnce();
+        });
+
+        it('replaces initial account catch-up superseded by a burst of private balance deltas', async () => {
+            let release;
+            const held = new Promise(resolve => { release = resolve; });
+            moduleMocks.spotClient.restAPI.getAccount
+                .mockImplementationOnce(async () => ({ status: 200, data: () => held }))
+                .mockResolvedValue({ status: 200, data: async () => ({ balances: [{ asset: 'USDT', free: '30', locked: '0' }] }) });
+            await connectRenderer('spot');
+            expect(moduleMocks.spotClient.restAPI.getAccount).toHaveBeenCalledOnce();
+            const socket = moduleMocks.spotPrivateSockets[0];
+            for (const free of ['20', '25', '30']) {
+                privateFrame(socket, { e: 'outboundAccountPosition', B: [{ a: 'USDT', f: free, l: '0' }] });
+            }
+            release({ balances: [{ asset: 'USDT', free: '10', locked: '0' }] });
+            await vi.advanceTimersByTimeAsync(4_000);
+            expect(moduleMocks.spotClient.restAPI.getAccount).toHaveBeenCalledTimes(2);
+            expect(moduleMocks.spotClient.restAPI.getOpenOrders).toHaveBeenCalledOnce();
+            expect(emitted().filter(frame => frame.balances).map(frame => frame.balances.USDT.available)).toEqual(['30']);
+            expect(moduleMocks.spotClient.restAPI.newOrder).not.toHaveBeenCalled();
+        });
+
+        it('keeps the newest explicit history symbol when generic catch-up supersedes a read', async () => {
+            await connectRenderer('spot');
+            let release;
+            const held = new Promise(resolve => { release = resolve; });
+            moduleMocks.spotClient.restAPI.getAccount.mockImplementationOnce(async () => ({ status: 200, data: () => held }));
+            moduleMocks.spotClient.restAPI.myTrades.mockClear();
+            const refresh = symbol => moduleMocks.rendererHandlers.message({ type: 'utf8', utf8Data: JSON.stringify({
+                action: 'account.refresh', version: 1, marketType: 'spot', symbol,
+            }) });
+            const first = refresh('BTCUSDT');
+            await vi.advanceTimersByTimeAsync(500);
+            await refresh('ETHUSDT');
+            privateFrame(moduleMocks.spotPrivateSockets[0], { e: 'outboundAccountPosition', B: [] });
+            release({ balances: [] });
+            await vi.advanceTimersByTimeAsync(4_000);
+            await first;
+            expect(moduleMocks.spotClient.restAPI.myTrades).toHaveBeenCalledOnce();
+            expect(moduleMocks.spotClient.restAPI.myTrades).toHaveBeenCalledWith(expect.objectContaining({ symbol: 'ETHUSDT' }));
+        });
+
+        it.each(['close', 'market switch'])('does not restart superseded initial catch-up after %s', async retire => {
+            let release;
+            const held = new Promise(resolve => { release = resolve; });
+            moduleMocks.spotClient.restAPI.getAccount.mockImplementationOnce(async () => ({ status: 200, data: () => held }));
+            await connectRenderer('spot');
+            privateFrame(moduleMocks.spotPrivateSockets[0], { e: 'outboundAccountPosition', B: [] });
+            if (retire === 'close') moduleMocks.rendererHandlers.close();
+            else await activateMarket('futures-live');
+            moduleMocks.rendererConnection.sendUTF.mockClear();
+            release({ balances: [{ asset: 'USDT', free: '999', locked: '0' }] });
+            await vi.advanceTimersByTimeAsync(4_000);
+            expect(moduleMocks.spotClient.restAPI.getAccount).toHaveBeenCalledOnce();
+            expect(moduleMocks.spotClient.restAPI.getOpenOrders).not.toHaveBeenCalled();
+            expect(emitted().some(frame => frame.balances)).toBe(false);
+        });
+
+        it('reconciles an HTTP-successful but unproven cancellation without manufacturing success or replaying DELETE', async () => {
+            await connectRenderer('spot');
+            moduleMocks.spotClient.restAPI.deleteOrder = vi.fn().mockResolvedValue({
+                status: 200, data: async () => ({ symbol: 'BTCUSDT', orderId: 11, status: 'FILLED' }),
+            });
+            moduleMocks.spotClient.restAPI.getOrder.mockResolvedValue({
+                status: 200, data: async () => ({ symbol: 'BTCUSDT', orderId: 11, status: 'FILLED' }),
+            });
+            const pending = moduleMocks.rendererHandlers.message({ type: 'utf8', utf8Data: JSON.stringify({
+                action: 'trade.cancelOrder', version: 1, marketType: 'spot',
+                clientOrderId: 'cancel-filled-evidence', symbol: 'BTCUSDT', orderId: '11',
+            }) });
+            await vi.advanceTimersByTimeAsync(3_000);
+            await pending;
+            expect(moduleMocks.spotClient.restAPI.deleteOrder).toHaveBeenCalledOnce();
+            expect(moduleMocks.spotClient.restAPI.newOrder).not.toHaveBeenCalled();
+            expect(moduleMocks.spotClient.restAPI.getOrder).toHaveBeenCalledOnce();
+            expect(emitted().some(frame => frame.execution_update?.status === 'CANCELED')).toBe(false);
+            expect(emitted().some(frame => frame.command_unresolved)).toBe(true);
+            expect(emitted().some(frame => frame.command_rejected?.code === 'SPOT_ORDER_NOT_CANCELLED')).toBe(true);
         });
 
         it('does not let a held balance fallback undo a newer private event, and drains one trailing read', async () => {
@@ -12384,6 +12464,7 @@ describe('setupBinanceConnection user-data orchestration', () => {
                 type: params.type,
                 status: 'NEW',
                 orderId: 987,
+                clientOrderId: params.newClientOrderId,
                 price: params.price,
                 origQty: params.quantity,
                 executedQty: '0',
@@ -12639,7 +12720,7 @@ describe('setupBinanceConnection user-data orchestration', () => {
                 }));
             moduleMocks.spotClient.restAPI.getOrder = vi.fn(async () => ({
                 status: 200, data: vi.fn().mockResolvedValue({
-                    symbol: 'BTCUSDT', orderId: 41, status: 'NEW', side: 'BUY',
+                    symbol: 'BTCUSDT', orderId: 41, status: 'NEW', side: 'BUY', clientOrderId: 'spot-place-unresolved',
                 }),
             }));
 

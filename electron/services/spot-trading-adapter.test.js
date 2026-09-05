@@ -26,6 +26,30 @@ const makeClient = (overrides = {}) => ({
 });
 
 describe('SpotTradingAdapter', () => {
+    it.each([null, {}, { symbol: 'BTCUSDT', orderId: 11, status: 'FILLED' },
+        { symbol: 'BTCUSDT', orderId: 11, status: 'NEW' },
+        { symbol: 'ETHUSDT', orderId: 11, status: 'CANCELED' },
+    ])('treats an insufficient successful cancel as unknown without retrying: %j', async body => {
+        const deleteOrder = vi.fn().mockResolvedValue(makeResponse(body));
+        const adapter = new SpotTradingAdapter({ client: makeClient({ deleteOrder }) });
+        await expect(adapter.cancelOrder({ symbol: 'BTCUSDT', orderId: 11 })).rejects.toMatchObject({ indeterminate: true });
+        expect(deleteOrder).toHaveBeenCalledOnce();
+    });
+    it.each([null, {}, { symbol: 'ETHUSDT', orderId: 11, status: 'NEW' },
+        { symbol: 'BTCUSDT', orderId: 12, status: 'NEW' },
+    ])('rejects unusable or mismatching lookup identity: %j', async body => {
+        const getOrder = vi.fn().mockResolvedValue(makeResponse(body));
+        const adapter = new SpotTradingAdapter({ client: makeClient({ getOrder }) });
+        await expect(adapter.findOrder({ symbol: 'BTCUSDT', orderId: 11 })).rejects.toMatchObject({ indeterminate: true });
+        expect(getOrder).toHaveBeenCalledOnce();
+    });
+    it('rejects a successful placement with missing status without a second POST', async () => {
+        const newOrder = vi.fn().mockResolvedValue(makeResponse({ symbol: 'BTCUSDT', orderId: 11, clientOrderId: 'intent' }));
+        const adapter = new SpotTradingAdapter({ client: makeClient({ newOrder }) });
+        await expect(adapter.placeOrder({ symbol: 'BTCUSDT', newClientOrderId: 'intent', numericQuantity: 1, numericPrice: 1 }))
+            .rejects.toMatchObject({ indeterminate: true });
+        expect(newOrder).toHaveBeenCalledOnce();
+    });
     it('preserves both client identities and missing status in private order reports', () => {
         expect(normalizeSpotExecutionReport({ s: 'BTCUSDT', c: 'cancel-id', C: 'original-id', i: '9007199254740993' }))
             .toMatchObject({ symbol: 'BTCUSDT', clientOrderId: 'cancel-id', originalClientOrderId: 'original-id', orderId: '9007199254740993', status: 'UNKNOWN', X: 'UNKNOWN' });
@@ -270,6 +294,7 @@ describe('SpotTradingAdapter', () => {
                 side: 'BUY',
                 type: 'LIMIT',
                 orderId: 987,
+                status: 'NEW',
                 price: '12346',
                 origQty: '0.0999',
                 executedQty: '0',
@@ -291,7 +316,7 @@ describe('SpotTradingAdapter', () => {
             S: 'BUY',
             o: 'LIMIT',
             x: 'NEW',
-            X: 'UNKNOWN',
+            X: 'NEW',
             i: 987,
             p: '12346',
             q: '0.0999',
@@ -317,6 +342,7 @@ describe('SpotTradingAdapter', () => {
                 side: 'BUY',
                 type: 'LIMIT',
                 orderId: 654,
+                status: 'NEW',
                 price: '25000',
                 origQty: '0.5',
                 executedQty: '0',
@@ -336,7 +362,7 @@ describe('SpotTradingAdapter', () => {
             S: 'BUY',
             o: 'LIMIT',
             x: 'NEW',
-            X: 'UNKNOWN',
+            X: 'NEW',
             i: 654,
             p: '25000',
             q: '0.5',
@@ -362,6 +388,7 @@ describe('SpotTradingAdapter', () => {
                 type: 'LIMIT',
                 orderId: 123,
                 price: '3000',
+                status: 'CANCELED',
                 origQty: '1',
                 executedQty: '0',
                 updateTime: Date.parse('2026-07-09T10:00:02.000Z'),
@@ -541,7 +568,7 @@ describe('SpotTradingAdapter', () => {
 
     it('sends the command identity so a resubmission can be deduplicated', async () => {
         const newOrder = vi.fn().mockResolvedValue(makeResponse({
-            symbol: 'BTCUSDT', side: 'BUY', status: 'NEW', orderId: 1,
+            symbol: 'BTCUSDT', side: 'BUY', status: 'NEW', orderId: 1, clientOrderId: 's-intent-1',
         }));
         const client = makeClient({ newOrder });
         const adapter = new SpotTradingAdapter({ client, recvWindow: 60000 });

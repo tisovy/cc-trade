@@ -1263,3 +1263,21 @@ Final Linux directory packaging/ASAR contract passed; app was not launched.
   exchange before resubmitting after a crash.
 - Do not inject a failure into a live trading process. Six isolated Node child
   cases establish local termination behavior, not live Electron acceptance.
+
+## close-audit-evidence-gaps — 2026-09-05
+
+Status: second self-review and corrective implementation complete locally;
+**operator confirmation pending**, not archived. Full aggregate checks and a
+second post-package test run passed: 147 files / 3,528 tests. Fresh unsigned
+Linux directory ASAR contract passed; no window was launched.
+
+- On the next intended app launch, confirm DevTools stay closed with no explicit
+  ELECTRON_OPEN_DEVTOOLS opt-in. Manual inspection remains available.
+- Confirm ordinary Spot initial balances/history and normal order outcome UI.
+  Observe only naturally occurring uncertain outcomes; do not manufacture
+  mismatched responses, API failures, races or large order IDs on a live account.
+- Deterministic tests establish malformed-success handling, exact ID transport,
+  non-cancellation reporting and stale-snapshot replacement, not live acceptance.
+- Main-spec synchronization does not close any live task from the 12 preceding
+  changes. The dependency audit also still requires separate disclosure consent.
+- Detailed scope, package hash, decisions and limitations: [self-review evidence](changes/close-audit-evidence-gaps/evidence.md).

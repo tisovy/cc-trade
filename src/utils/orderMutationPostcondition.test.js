@@ -44,6 +44,14 @@ describe('action-specific mutation evidence', () => {
     expect(read(held(), { symbol: 'BTCUSDT', orderId: '12', status: 'CANCELED' })).toBeNull()
     expect(answersUnresolvedCommand(held(), { symbol: 'BTCUSDT', orderId: '11', request: 'trade.placeOrder' })).toBe(false)
     expect(read(held(), { symbol: 'BTCUSDT', orderId: '11', status: 'NEW' }).state).toBe('pending')
-    expect(read(held(), { s: 'BTCUSDT', c: 'cancel-request', C: 'original', X: 'CANCELED' }).state).toBe('confirmed')
+    expect(read(held(), { s: 'BTCUSDT', i: 11, c: 'cancel-request', C: 'original', X: 'CANCELED' }).state).toBe('confirmed')
+  })
+  it.each([
+    { orderId: 11, clientOrderId: 'original', status: 'CANCELED' },
+    { symbol: 'BTCUSDT', orderId: 12, clientOrderId: 'original', status: 'CANCELED' },
+    { symbol: 'BTCUSDT', clientOrderId: 'original', status: 'CANCELED' },
+    { symbol: 'BTCUSDT', orderId: 9007199254740992, clientOrderId: 'original', status: 'CANCELED' },
+  ])('retains a warning for incomplete or contradictory identity: %j', report => {
+    expect(read(held(), report)).toBeNull()
   })
 })
